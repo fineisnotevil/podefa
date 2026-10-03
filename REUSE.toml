@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2026 [YOUR_NAME] <[YOUR_EMAIL]>
+
+version = 1
+
+[[annotations]]
+path = "Cargo.lock"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 [YOUR_NAME] <[YOUR_EMAIL]>"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "LICENSE"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2007 Free Software Foundation, Inc."
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+[[annotations]]
+path = "LICENSES/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Free Software Foundation, Inc. / Creative Commons"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "patches/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2020-2026 messense and mupdf-rs contributors"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
