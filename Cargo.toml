@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 [YOUR_NAME] <[YOUR_EMAIL]>
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/engine-mupdf",
+    "crates/render",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+authors = ["[YOUR_NAME] <[YOUR_EMAIL]>"] # TODO: Set maintainer info
+repository = "https://github.com/TODO/[PROJECT_NAME]" # TODO: Set [GITHUB_URL]
+rust-version = "1.85"
+
+[workspace.dependencies]
+core = { path = "crates/core" }
+pdf-core = { path = "crates/core", package = "core" }
+engine-mupdf = { path = "crates/engine-mupdf" }
+render = { path = "crates/render" }
+mupdf = "0.8.0"
+slint = "1.18.1"
+
+# Upstream mupdf 0.8.0 on crates.io misses a `max_align_t` binding on Windows MSVC
+# when built against modern LLVM/libclang (LLVM 22+).
+# This patch applies the official upstream commit fix (messense/mupdf-rs#262) locally.
+[patch.crates-io]
+mupdf = { path = "patches/mupdf" }
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(have_max_align_t)'] }
+
+[workspace.lints.clippy]
+all = "warn"
+correctness = "deny"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

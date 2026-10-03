@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 [YOUR_NAME] <[YOUR_EMAIL]>
+
+[package]
+name = "render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Tile scheduler and rendering cache for [PROJECT_NAME]"
+
+[lints]
+workspace = true
+
+[dependencies]
+core = { workspace = true }

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 [YOUR_NAME] <[YOUR_EMAIL]>
+
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Desktop PDF viewer application for [PROJECT_NAME]"
+
+[lints]
+workspace = true
+
+[dependencies]
+pdf-core = { workspace = true }
+render = { workspace = true }
+engine-mupdf = { workspace = true }
+slint = { workspace = true }
