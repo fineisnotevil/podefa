@@ -1,6 +1,6 @@
 <!--
-SPDX-License-Identifier: CC0-1.0
-SPDX-FileCopyrightText: 2026 [YOUR_NAME] <[YOUR_EMAIL]>
+SPDX-License-Identifier: AGPL-3.0-or-later
+SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 -->
 
 # Contributing to [PROJECT_NAME]

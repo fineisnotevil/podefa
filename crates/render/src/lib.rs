@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// SPDX-FileCopyrightText: 2026 [YOUR_NAME] <[YOUR_EMAIL]>
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 //! Tile scheduler and rendering cache for PDF pages.
 //!
