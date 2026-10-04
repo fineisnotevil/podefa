@@ -259,7 +259,12 @@ fn main() -> Result<(), slint::PlatformError> {
 
         Arc::new(move |page: usize, scale: f32| {
             let req_id = next_request_id.fetch_add(1, Ordering::Relaxed) as RequestId;
-            current_request_id.store(req_id, Ordering::Relaxed);
+            let prev_id = current_request_id.swap(req_id, Ordering::Relaxed);
+            if prev_id != 0 {
+                let _ = engine_sender.send(EngineCmd::Cancel {
+                    request_id: prev_id,
+                });
+            }
 
             if let Some(ui) = weak_ui.upgrade() {
                 ui.set_is_loading(true);
@@ -314,10 +319,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let trigger = Arc::clone(&trigger_render);
         let state_page = Arc::clone(&state_page);
         let state_zoom = Arc::clone(&state_zoom);
+        let weak = weak_window.clone();
         main_window.on_zoom_in(move || {
             let cur_zoom = f32::from_bits(state_zoom.load(Ordering::Relaxed));
             let new_zoom = clamp_zoom(cur_zoom * ZOOM_STEP);
             state_zoom.store(new_zoom.to_bits(), Ordering::Relaxed);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_zoom_percent(new_zoom * 100.0);
+            }
             let page = state_page.load(Ordering::Relaxed);
             trigger(page, new_zoom);
         });
@@ -327,10 +336,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let trigger = Arc::clone(&trigger_render);
         let state_page = Arc::clone(&state_page);
         let state_zoom = Arc::clone(&state_zoom);
+        let weak = weak_window.clone();
         main_window.on_zoom_out(move || {
             let cur_zoom = f32::from_bits(state_zoom.load(Ordering::Relaxed));
             let new_zoom = clamp_zoom(cur_zoom / ZOOM_STEP);
             state_zoom.store(new_zoom.to_bits(), Ordering::Relaxed);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_zoom_percent(new_zoom * 100.0);
+            }
             let page = state_page.load(Ordering::Relaxed);
             trigger(page, new_zoom);
         });
@@ -340,9 +353,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let trigger = Arc::clone(&trigger_render);
         let state_page = Arc::clone(&state_page);
         let state_zoom = Arc::clone(&state_zoom);
+        let weak = weak_window.clone();
         main_window.on_zoom_reset(move || {
             let new_zoom = ZOOM_DEFAULT;
             state_zoom.store(new_zoom.to_bits(), Ordering::Relaxed);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_zoom_percent(new_zoom * 100.0);
+            }
             let page = state_page.load(Ordering::Relaxed);
             trigger(page, new_zoom);
         });

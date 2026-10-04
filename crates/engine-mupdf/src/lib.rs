@@ -258,7 +258,17 @@ impl EngineHandle {
             .spawn(move || {
                 let mut engine = MupdfEngine::new();
 
-                while let Ok(cmd) = cmd_rx.recv() {
+                let mut buffered_cmd = None;
+                loop {
+                    let cmd = if let Some(c) = buffered_cmd.take() {
+                        c
+                    } else {
+                        match cmd_rx.recv() {
+                            Ok(c) => c,
+                            Err(_) => break,
+                        }
+                    };
+
                     match cmd {
                         EngineCmd::Open { path, password } => {
                             match engine.open_document_with_password(&path, password.as_deref()) {
@@ -281,22 +291,50 @@ impl EngineHandle {
                             scale,
                             request_id,
                         } => {
-                            // Check if cancelled before starting expensive render
+                            // Coalesce / drain any subsequent RenderPage commands queued up
+                            let mut target_page = page;
+                            let mut target_scale = scale;
+                            let mut target_req_id = request_id;
+
+                            while let Ok(next) = cmd_rx.try_recv() {
+                                match next {
+                                    EngineCmd::RenderPage {
+                                        page: p,
+                                        scale: s,
+                                        request_id: r,
+                                    } => {
+                                        // Supersedes previous render!
+                                        target_page = p;
+                                        target_scale = s;
+                                        target_req_id = r;
+                                    }
+                                    EngineCmd::Cancel { request_id: r } => {
+                                        cancelled_for_worker.store(r, Ordering::Relaxed);
+                                    }
+                                    other => {
+                                        // Store for next iteration and break drain
+                                        buffered_cmd = Some(other);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Check if this request was cancelled
                             let latest_cancelled = cancelled_for_worker.load(Ordering::Relaxed);
-                            if latest_cancelled == request_id {
+                            if latest_cancelled == target_req_id {
                                 continue;
                             }
 
-                            match engine.render_page(page, scale) {
+                            match engine.render_page(target_page, target_scale) {
                                 Ok(bitmap) => {
                                     // Check cancellation again after render before sending
                                     let latest_cancelled =
                                         cancelled_for_worker.load(Ordering::Relaxed);
-                                    if latest_cancelled != request_id {
+                                    if latest_cancelled != target_req_id {
                                         let _ = event_tx.send(EngineEvent::PageRendered {
-                                            page,
-                                            scale,
-                                            request_id,
+                                            page: target_page,
+                                            scale: target_scale,
+                                            request_id: target_req_id,
                                             bitmap,
                                         });
                                     }

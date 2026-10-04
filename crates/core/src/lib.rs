@@ -117,8 +117,8 @@ pub enum EngineEvent {
 
 /// Minimum allowed zoom scale factor.
 pub const ZOOM_MIN: f32 = 0.1;
-/// Maximum allowed zoom scale factor.
-pub const ZOOM_MAX: f32 = 10.0;
+/// Maximum allowed zoom scale factor (300% to keep raster buffers bounded under 15 MB).
+pub const ZOOM_MAX: f32 = 3.0;
 /// Default zoom scale factor (fit to actual size).
 pub const ZOOM_DEFAULT: f32 = 1.0;
 /// Zoom step multiplier for zoom-in/zoom-out.
@@ -174,8 +174,8 @@ mod tests {
     fn test_clamp_zoom() {
         assert_eq!(clamp_zoom(0.05), ZOOM_MIN);
         assert_eq!(clamp_zoom(1.0), 1.0);
-        assert_eq!(clamp_zoom(15.0), ZOOM_MAX);
-        assert_eq!(clamp_zoom(5.0), 5.0);
+        assert_eq!(clamp_zoom(5.0), ZOOM_MAX);
+        assert_eq!(clamp_zoom(2.0), 2.0);
     }
 
     #[test]
