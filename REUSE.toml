@@ -26,3 +26,10 @@ path = "patches/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2020-2026 messense and mupdf-rs contributors"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+[[annotations]]
+path = "crates/engine-mupdf/tests/fixtures/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 FINE Association <su@fa.org.tr>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+

@@ -15,5 +15,6 @@ description = "MuPDF backend implementation of PdfEngine for [PROJECT_NAME]"
 workspace = true
 
 [dependencies]
-core = { workspace = true }
+pdf-core = { workspace = true }
 mupdf = { workspace = true }
+thiserror = { workspace = true }
