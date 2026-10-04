@@ -117,8 +117,12 @@ pub enum EngineEvent {
 
 /// Minimum allowed zoom scale factor.
 pub const ZOOM_MIN: f32 = 0.1;
-/// Maximum allowed zoom scale factor (300% to keep raster buffers bounded under 15 MB).
-pub const ZOOM_MAX: f32 = 3.0;
+/// Maximum allowed zoom scale factor.
+///
+/// Interim ceiling inherited from the pre-tiling (full-page raster) implementation.
+/// It is kept only so full-page buffers stay bounded while the tiled renderer is
+/// built; the tiled renderer replaces it with a configurable limit (default 6400%).
+pub const ZOOM_MAX: f32 = 10.0;
 /// Default zoom scale factor (fit to actual size).
 pub const ZOOM_DEFAULT: f32 = 1.0;
 /// Zoom step multiplier for zoom-in/zoom-out.
