@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 [package]
-name = "core"
+name = "pdf-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -215,8 +215,8 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 name = "app"
 version = "0.1.0"
 dependencies = [
- "core",
  "engine-mupdf",
+ "pdf-core",
  "render",
  "slint",
 ]
@@ -790,10 +790,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core"
-version = "0.1.0"
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1083,8 +1079,9 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 name = "engine-mupdf"
 version = "0.1.0"
 dependencies = [
- "core",
  "mupdf",
+ "pdf-core",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3367,6 +3364,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-core"
+version = "0.1.0"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3756,7 +3757,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "render"
 version = "0.1.0"
 dependencies = [
- "core",
+ "pdf-core",
 ]
 
 [[package]]

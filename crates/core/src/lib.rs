@@ -44,6 +44,13 @@ pub enum PixelFormat {
 }
 
 /// In-memory bitmap containing raw rasterized pixels.
+///
+/// # Pixel format
+///
+/// When produced by the MuPDF backend, pixel data is in **non-premultiplied RGBA8**
+/// format (4 bytes per pixel: R, G, B, A). The `format` field indicates the
+/// exact layout. Slint expects non-premultiplied RGBA8, so no conversion is
+/// needed when using [`PixelFormat::Rgba8`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitmap {
     pub width: u32,
@@ -64,6 +71,15 @@ impl Bitmap {
             data,
         }
     }
+
+    /// Returns the total expected byte count for the pixel data.
+    pub fn expected_data_len(width: u32, height: u32, format: PixelFormat) -> usize {
+        let bytes_per_pixel = match format {
+            PixelFormat::Rgba8 | PixelFormat::Bgra8 => 4,
+            PixelFormat::Rgb8 => 3,
+        };
+        (width as usize) * (height as usize) * bytes_per_pixel
+    }
 }
 
 /// Metadata summary of a PDF document.
@@ -78,8 +94,70 @@ pub struct DocumentInfo {
     pub page_count: usize,
 }
 
+pub type RequestId = u64;
+
+/// Commands sent from the UI thread to the engine actor thread.
+#[derive(Debug)]
+pub enum EngineCmd {
+    /// Open a PDF file, optionally with a password.
+    Open {
+        path: std::path::PathBuf,
+        password: Option<String>,
+    },
+    /// Render a specific page at a given scale.
+    RenderPage {
+        page: usize,
+        scale: f32,
+        request_id: RequestId,
+    },
+    /// Cancel a pending render request.
+    Cancel { request_id: RequestId },
+    /// Shut down the engine thread.
+    Shutdown,
+}
+
+/// Page dimensions in PDF points (1 point = 1/72 inch).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Events sent from the engine actor thread back to the UI thread.
+#[derive(Debug)]
+pub enum EngineEvent {
+    /// Document was successfully opened.
+    Opened {
+        page_count: usize,
+        page_sizes: Vec<PageSize>,
+    },
+    /// A page has been rendered to a bitmap.
+    PageRendered {
+        page: usize,
+        scale: f32,
+        request_id: RequestId,
+        bitmap: Bitmap,
+    },
+    /// An error occurred.
+    Error { message: String },
+}
+
+/// Minimum allowed zoom scale factor.
+pub const ZOOM_MIN: f32 = 0.1;
+/// Maximum allowed zoom scale factor.
+pub const ZOOM_MAX: f32 = 10.0;
+/// Default zoom scale factor (fit to actual size).
+pub const ZOOM_DEFAULT: f32 = 1.0;
+/// Zoom step multiplier for zoom-in/zoom-out.
+pub const ZOOM_STEP: f32 = 1.25;
+
+/// Clamps a zoom scale factor to the allowed range.
+pub fn clamp_zoom(scale: f32) -> f32 {
+    scale.clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
 /// Abstraction over a PDF rendering and manipulation backend.
-pub trait PdfEngine: Send + Sync {
+pub trait PdfEngine {
     /// Associated error type produced by engine operations.
     type Error: Error + Send + Sync + 'static;
 
@@ -181,5 +259,35 @@ mod tests {
         assert!(cmd.applied);
         assert!(cmd.undo().is_ok());
         assert!(!cmd.applied);
+    }
+
+    #[test]
+    fn test_clamp_zoom() {
+        assert_eq!(clamp_zoom(0.05), ZOOM_MIN);
+        assert_eq!(clamp_zoom(1.0), 1.0);
+        assert_eq!(clamp_zoom(15.0), ZOOM_MAX);
+        assert_eq!(clamp_zoom(5.0), 5.0);
+    }
+
+    #[test]
+    fn test_expected_data_len() {
+        assert_eq!(
+            Bitmap::expected_data_len(100, 200, PixelFormat::Rgba8),
+            80_000
+        );
+        assert_eq!(
+            Bitmap::expected_data_len(100, 200, PixelFormat::Rgb8),
+            60_000
+        );
+    }
+
+    #[test]
+    fn test_page_size() {
+        let ps = PageSize {
+            width: 612.0,
+            height: 792.0,
+        };
+        assert_eq!(ps.width, 612.0);
+        assert_eq!(ps.height, 792.0);
     }
 }
