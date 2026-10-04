@@ -19,4 +19,8 @@ Thumbs.db
 # Environment variables
 .env
 .env.*
+
+# Agent configurations
+.agents/
+
 !.env.example
