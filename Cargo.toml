@@ -6,7 +6,6 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/engine-mupdf",
-    "crates/render",
     "crates/app",
 ]
 
@@ -21,7 +20,6 @@ rust-version = "1.85"
 [workspace.dependencies]
 pdf-core = { path = "crates/core" }
 engine-mupdf = { path = "crates/engine-mupdf" }
-render = { path = "crates/render" }
 mupdf = "0.8.0"
 slint = "1.18.1"
 thiserror = "2.0"
@@ -40,7 +38,7 @@ all = "warn"
 correctness = "deny"
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"

@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! Engine-agnostic core types and traits for PDF viewing and editing.
+//! Engine-agnostic core types and traits for PDF viewing.
 //!
 //! This crate defines fundamental domain primitives:
-//! - [`PdfEngine`]: Abstraction over underlying PDF rendering and parsing backends.
-//! - [`DocumentInfo`]: Metadata describing an opened PDF document.
-//! - [`Rect`]: 2D floating-point rectangle for geometry and bounding boxes.
-//! - [`Bitmap`]: Raw pixel buffer for rendered pages and tiles.
-//! - [`Command`]: Undo/redo command abstraction.
+//! - [`PdfEngine`]: Abstraction over underlying PDF rendering backends.
+//! - [`Rect`]: 2D floating-point rectangle for geometry and coordinates.
+//! - [`Bitmap`]: Raw pixel buffer for rendered pages.
+//! - [`EngineCmd`] and [`EngineEvent`]: Inter-thread messages for actor engines.
 
 use std::error::Error;
-use std::fmt::{self, Display, Formatter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 2D floating-point rectangle representing coordinates and dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -39,18 +37,14 @@ impl Rect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
     Rgba8,
-    Rgb8,
-    Bgra8,
 }
 
 /// In-memory bitmap containing raw rasterized pixels.
 ///
 /// # Pixel format
 ///
-/// When produced by the MuPDF backend, pixel data is in **non-premultiplied RGBA8**
-/// format (4 bytes per pixel: R, G, B, A). The `format` field indicates the
-/// exact layout. Slint expects non-premultiplied RGBA8, so no conversion is
-/// needed when using [`PixelFormat::Rgba8`].
+/// Pixel data is in **non-premultiplied RGBA8** format (4 bytes per pixel: R, G, B, A).
+/// Slint natively consumes non-premultiplied RGBA8.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitmap {
     pub width: u32,
@@ -71,27 +65,6 @@ impl Bitmap {
             data,
         }
     }
-
-    /// Returns the total expected byte count for the pixel data.
-    pub fn expected_data_len(width: u32, height: u32, format: PixelFormat) -> usize {
-        let bytes_per_pixel = match format {
-            PixelFormat::Rgba8 | PixelFormat::Bgra8 => 4,
-            PixelFormat::Rgb8 => 3,
-        };
-        (width as usize) * (height as usize) * bytes_per_pixel
-    }
-}
-
-/// Metadata summary of a PDF document.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DocumentInfo {
-    pub title: Option<String>,
-    pub author: Option<String>,
-    pub subject: Option<String>,
-    pub keywords: Option<String>,
-    pub creator: Option<String>,
-    pub producer: Option<String>,
-    pub page_count: usize,
 }
 
 pub type RequestId = u64;
@@ -101,7 +74,7 @@ pub type RequestId = u64;
 pub enum EngineCmd {
     /// Open a PDF file, optionally with a password.
     Open {
-        path: std::path::PathBuf,
+        path: PathBuf,
         password: Option<String>,
     },
     /// Render a specific page at a given scale.
@@ -156,13 +129,13 @@ pub fn clamp_zoom(scale: f32) -> f32 {
     scale.clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
-/// Abstraction over a PDF rendering and manipulation backend.
+/// Abstraction over a PDF rendering backend.
 pub trait PdfEngine {
     /// Associated error type produced by engine operations.
     type Error: Error + Send + Sync + 'static;
 
-    /// Opens a PDF document from the filesystem.
-    fn open_document(&mut self, path: &Path) -> Result<DocumentInfo, Self::Error>;
+    /// Opens a PDF document from the filesystem with an optional password.
+    fn open_document(&mut self, path: &Path, password: Option<&str>) -> Result<usize, Self::Error>;
 
     /// Returns the total number of pages in the currently opened document.
     fn page_count(&self) -> usize;
@@ -170,41 +143,9 @@ pub trait PdfEngine {
     /// Queries the dimensions of a specific page (0-indexed).
     fn page_size(&self, page_index: usize) -> Result<Rect, Self::Error>;
 
-    /// Renders a page or sub-rectangle of a page to an in-memory bitmap.
-    fn render_page(
-        &self,
-        page_index: usize,
-        scale: f32,
-        bounds: Option<Rect>,
-    ) -> Result<Bitmap, Self::Error>;
+    /// Renders a page to an in-memory bitmap.
+    fn render_page(&self, page_index: usize, scale: f32) -> Result<Bitmap, Self::Error>;
 }
-
-/// Trait representing an invertible action for undo/redo stacks.
-pub trait Command {
-    /// Error type returned if command execution or reversal fails.
-    type Error: Error;
-
-    /// Human-readable label for this command (e.g. for display in undo menus).
-    fn name(&self) -> &str;
-
-    /// Executes the command, applying changes to the state.
-    fn execute(&mut self) -> Result<(), Self::Error>;
-
-    /// Reverses the changes applied by [`Command::execute`].
-    fn undo(&mut self) -> Result<(), Self::Error>;
-}
-
-/// Minimal command error type for testing and generic usage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandError(pub String);
-
-impl Display for CommandError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl Error for CommandError {}
 
 #[cfg(test)]
 mod tests {
@@ -229,56 +170,12 @@ mod tests {
         assert_eq!(b.data.len(), 16);
     }
 
-    struct MockCommand {
-        applied: bool,
-    }
-
-    impl Command for MockCommand {
-        type Error = CommandError;
-
-        fn name(&self) -> &str {
-            "MockAction"
-        }
-
-        fn execute(&mut self) -> Result<(), Self::Error> {
-            self.applied = true;
-            Ok(())
-        }
-
-        fn undo(&mut self) -> Result<(), Self::Error> {
-            self.applied = false;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn test_command_undo_redo() {
-        let mut cmd = MockCommand { applied: false };
-        assert_eq!(cmd.name(), "MockAction");
-        assert!(cmd.execute().is_ok());
-        assert!(cmd.applied);
-        assert!(cmd.undo().is_ok());
-        assert!(!cmd.applied);
-    }
-
     #[test]
     fn test_clamp_zoom() {
         assert_eq!(clamp_zoom(0.05), ZOOM_MIN);
         assert_eq!(clamp_zoom(1.0), 1.0);
         assert_eq!(clamp_zoom(15.0), ZOOM_MAX);
         assert_eq!(clamp_zoom(5.0), 5.0);
-    }
-
-    #[test]
-    fn test_expected_data_len() {
-        assert_eq!(
-            Bitmap::expected_data_len(100, 200, PixelFormat::Rgba8),
-            80_000
-        );
-        assert_eq!(
-            Bitmap::expected_data_len(100, 200, PixelFormat::Rgb8),
-            60_000
-        );
     }
 
     #[test]

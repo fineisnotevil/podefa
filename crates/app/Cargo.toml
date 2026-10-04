@@ -16,6 +16,5 @@ workspace = true
 
 [dependencies]
 pdf-core = { workspace = true }
-render = { workspace = true }
 engine-mupdf = { workspace = true }
 slint = { workspace = true }

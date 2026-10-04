@@ -9,15 +9,12 @@
 //! - [`EngineHandle`]: A thread-safe actor handle that sends [`pdf_core::EngineCmd`] messages
 //!   to a dedicated background thread owning the `mupdf::Document`, receiving [`pdf_core::EngineEvent`]s.
 
-use pdf_core::{
-    Bitmap, DocumentInfo, EngineCmd, EngineEvent, PageSize, PdfEngine, PixelFormat, Rect,
-    RequestId,
-};
 use mupdf::{Colorspace, Document, Matrix};
+use pdf_core::{Bitmap, EngineCmd, EngineEvent, PageSize, PdfEngine, PixelFormat, Rect, RequestId};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use thiserror::Error;
 
@@ -26,10 +23,7 @@ use thiserror::Error;
 pub enum MupdfError {
     /// Failed to open document (e.g. invalid path, corrupted format).
     #[error("Failed to open document '{path}': {source}")]
-    OpenFailed {
-        path: PathBuf,
-        source: mupdf::Error,
-    },
+    OpenFailed { path: PathBuf, source: mupdf::Error },
 
     /// The document is password protected and requires authentication.
     #[error("Document is password protected")]
@@ -105,12 +99,12 @@ impl MupdfEngine {
         }
     }
 
-    /// Opens a PDF document with an optional password.
+    /// Opens a PDF document with an optional password, returning the page count.
     pub fn open_document_with_password(
         &mut self,
         path: &Path,
         password: Option<&str>,
-    ) -> Result<DocumentInfo, MupdfError> {
+    ) -> Result<usize, MupdfError> {
         let path_str = path
             .to_str()
             .ok_or_else(|| MupdfError::InvalidPath(path.to_path_buf()))?;
@@ -132,22 +126,15 @@ impl MupdfEngine {
             }
         }
 
-        let count = doc.page_count().map_err(|e| MupdfError::Backend(e.to_string()))? as usize;
-
-        let info = DocumentInfo {
-            title: doc.metadata(mupdf::MetadataName::Title).ok().filter(|s| !s.is_empty()),
-            author: doc.metadata(mupdf::MetadataName::Author).ok().filter(|s| !s.is_empty()),
-            subject: doc.metadata(mupdf::MetadataName::Subject).ok().filter(|s| !s.is_empty()),
-            keywords: doc.metadata(mupdf::MetadataName::Keywords).ok().filter(|s| !s.is_empty()),
-            creator: doc.metadata(mupdf::MetadataName::Creator).ok().filter(|s| !s.is_empty()),
-            producer: doc.metadata(mupdf::MetadataName::Producer).ok().filter(|s| !s.is_empty()),
-            page_count: count,
-        };
+        let count = doc
+            .page_count()
+            .map_err(|e| MupdfError::Backend(e.to_string()))?
+            .max(0) as usize;
 
         self.doc = Some(doc);
         self.path = Some(path.to_path_buf());
 
-        Ok(info)
+        Ok(count)
     }
 
     /// Returns a list of all page dimensions in points.
@@ -168,8 +155,8 @@ impl MupdfEngine {
 impl PdfEngine for MupdfEngine {
     type Error = MupdfError;
 
-    fn open_document(&mut self, path: &Path) -> Result<DocumentInfo, Self::Error> {
-        self.open_document_with_password(path, None)
+    fn open_document(&mut self, path: &Path, password: Option<&str>) -> Result<usize, Self::Error> {
+        self.open_document_with_password(path, password)
     }
 
     fn page_count(&self) -> usize {
@@ -197,22 +184,15 @@ impl PdfEngine for MupdfEngine {
                 source: e,
             })?;
 
-        let b = page
-            .bounds()
-            .map_err(|e| MupdfError::PageBoundsFailed {
-                page_index,
-                source: e,
-            })?;
+        let b = page.bounds().map_err(|e| MupdfError::PageBoundsFailed {
+            page_index,
+            source: e,
+        })?;
 
         Ok(Rect::new(b.x0, b.y0, b.width(), b.height()))
     }
 
-    fn render_page(
-        &self,
-        page_index: usize,
-        scale: f32,
-        _bounds: Option<Rect>,
-    ) -> Result<Bitmap, Self::Error> {
+    fn render_page(&self, page_index: usize, scale: f32) -> Result<Bitmap, Self::Error> {
         let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
         let total = self.page_count();
         if page_index >= total {
@@ -232,12 +212,12 @@ impl PdfEngine for MupdfEngine {
         let ctm = Matrix::new_scale(scale, scale);
         let cs = Colorspace::device_rgb();
         // alpha = true produces 4 channels: RGBA (non-premultiplied)
-        let pixmap = page
-            .to_pixmap(&ctm, &cs, true, false)
-            .map_err(|e| MupdfError::RenderFailed {
-                page_index,
-                source: e,
-            })?;
+        let pixmap =
+            page.to_pixmap(&ctm, &cs, true, false)
+                .map_err(|e| MupdfError::RenderFailed {
+                    page_index,
+                    source: e,
+                })?;
 
         let width = pixmap.width();
         let height = pixmap.height();
@@ -282,8 +262,7 @@ impl EngineHandle {
                     match cmd {
                         EngineCmd::Open { path, password } => {
                             match engine.open_document_with_password(&path, password.as_deref()) {
-                                Ok(_info) => {
-                                    let page_count = engine.page_count();
+                                Ok(page_count) => {
                                     let page_sizes = engine.all_page_sizes().unwrap_or_default();
                                     let _ = event_tx.send(EngineEvent::Opened {
                                         page_count,
@@ -308,10 +287,11 @@ impl EngineHandle {
                                 continue;
                             }
 
-                            match engine.render_page(page, scale, None) {
+                            match engine.render_page(page, scale) {
                                 Ok(bitmap) => {
                                     // Check cancellation again after render before sending
-                                    let latest_cancelled = cancelled_for_worker.load(Ordering::Relaxed);
+                                    let latest_cancelled =
+                                        cancelled_for_worker.load(Ordering::Relaxed);
                                     if latest_cancelled != request_id {
                                         let _ = event_tx.send(EngineEvent::PageRendered {
                                             page,
@@ -382,9 +362,12 @@ mod tests {
     fn test_mupdf_engine_uninitialized() {
         let engine = MupdfEngine::new();
         assert_eq!(engine.page_count(), 0);
-        assert!(matches!(engine.page_size(0), Err(MupdfError::NoDocumentOpen)));
         assert!(matches!(
-            engine.render_page(0, 1.0, None),
+            engine.page_size(0),
+            Err(MupdfError::NoDocumentOpen)
+        ));
+        assert!(matches!(
+            engine.render_page(0, 1.0),
             Err(MupdfError::NoDocumentOpen)
         ));
     }
