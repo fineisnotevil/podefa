@@ -8,9 +8,19 @@
 //! - [`Rect`]: 2D floating-point rectangle for geometry and coordinates.
 //! - [`Bitmap`]: Raw pixel buffer for rendered pages.
 //! - [`EngineCmd`] and [`EngineEvent`]: Inter-thread messages for actor engines.
+//! - [`tiling`]: pure tile geometry, and [`scheduler`]: the pure tile cache/request policy.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
+
+pub mod scheduler;
+pub mod tiling;
+
+pub use scheduler::{TileAction, TileScheduler};
+pub use tiling::{
+    PageGeometry, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileKey, TileRect, ZOOM_MAX_MILLI,
+    ZOOM_MIN_MILLI, clamp_zoom_milli, scale_from_milli, zoom_anchor, zoom_in_milli, zoom_out_milli,
+};
 
 /// 2D floating-point rectangle representing coordinates and dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -77,10 +87,15 @@ pub enum EngineCmd {
         path: PathBuf,
         password: Option<String>,
     },
-    /// Render a specific page at a given scale.
-    RenderPage {
-        page: usize,
-        scale: f32,
+    /// Render one tile of one page.
+    ///
+    /// `geometry` is plain data (page index, page origin and size in points, permille scale), so
+    /// the engine can validate the tile against the page it loads instead of trusting the caller
+    /// blindly.
+    RenderTile {
+        geometry: PageGeometry,
+        col: i32,
+        row: i32,
         request_id: RequestId,
     },
     /// Cancel a pending render request.
@@ -92,8 +107,19 @@ pub enum EngineCmd {
 /// Page dimensions in PDF points (1 point = 1/72 inch).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageSize {
+    /// Page bound origin on the x axis, PDF points.
+    pub x: f32,
+    /// Page bound origin on the y axis, PDF points.
+    pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+impl PageSize {
+    /// Bounds as a [`Rect`] for [`PageGeometry::new`].
+    pub fn bounds(&self) -> Rect {
+        Rect::new(self.x, self.y, self.width, self.height)
+    }
 }
 
 /// Events sent from the engine actor thread back to the UI thread.
@@ -104,10 +130,12 @@ pub enum EngineEvent {
         page_count: usize,
         page_sizes: Vec<PageSize>,
     },
-    /// A page has been rendered to a bitmap.
-    PageRendered {
-        page: usize,
-        scale: f32,
+    /// One tile has been rendered.
+    ///
+    /// `request_id` is the epoch the request was issued under; results carrying an older epoch
+    /// are stale and must be dropped by the receiver.
+    TileRendered {
+        key: TileKey,
         request_id: RequestId,
         bitmap: Bitmap,
     },
@@ -119,13 +147,14 @@ pub enum EngineEvent {
 pub const ZOOM_MIN: f32 = 0.1;
 /// Maximum allowed zoom scale factor.
 ///
-/// Interim ceiling inherited from the pre-tiling (full-page raster) implementation.
-/// It is kept only so full-page buffers stay bounded while the tiled renderer is
-/// built; the tiled renderer replaces it with a configurable limit (default 6400%).
-pub const ZOOM_MAX: f32 = 10.0;
-/// Default zoom scale factor (fit to actual size).
+/// Tiling makes the full-page buffer cost irrelevant, so 6400% is a precision/UX ceiling rather
+/// than a memory one. Must agree with [`ZOOM_MAX_MILLI`]; `test_zoom_limits_agree` enforces that.
+pub const ZOOM_MAX: f32 = 64.0;
+/// Default zoom scale factor (actual size).
 pub const ZOOM_DEFAULT: f32 = 1.0;
-/// Zoom step multiplier for zoom-in/zoom-out.
+/// Default zoom in permille (actual size).
+pub const ZOOM_DEFAULT_MILLI: u32 = 1_000;
+/// Zoom step multiplier for zoom-in/zoom-out, kept for the full-page primitive API.
 pub const ZOOM_STEP: f32 = 1.25;
 
 /// Clamps a zoom scale factor to the allowed range.
@@ -178,17 +207,32 @@ mod tests {
     fn test_clamp_zoom() {
         assert_eq!(clamp_zoom(0.05), ZOOM_MIN);
         assert_eq!(clamp_zoom(1.0), 1.0);
-        assert_eq!(clamp_zoom(5.0), ZOOM_MAX);
+        assert_eq!(clamp_zoom(5.0), 5.0);
         assert_eq!(clamp_zoom(2.0), 2.0);
+        // The ceiling is now the tiled renderer's 6400%, not the old full-page 1000%.
+        assert_eq!(clamp_zoom(64.0), ZOOM_MAX);
+        assert_eq!(clamp_zoom(1_000.0), ZOOM_MAX);
+    }
+
+    #[test]
+    fn test_zoom_limits_agree() {
+        // The tiled renderer works in permille while the full-page primitive stays in f32, so the
+        // two representations must not drift apart.
+        assert_eq!(ZOOM_MAX, scale_from_milli(ZOOM_MAX_MILLI));
+        assert_eq!(ZOOM_MIN, scale_from_milli(ZOOM_MIN_MILLI));
+        assert_eq!(ZOOM_DEFAULT, scale_from_milli(ZOOM_DEFAULT_MILLI));
     }
 
     #[test]
     fn test_page_size() {
         let ps = PageSize {
+            x: 10.0,
+            y: 20.0,
             width: 612.0,
             height: 792.0,
         };
         assert_eq!(ps.width, 612.0);
         assert_eq!(ps.height, 792.0);
+        assert_eq!(ps.bounds(), Rect::new(10.0, 20.0, 612.0, 792.0));
     }
 }

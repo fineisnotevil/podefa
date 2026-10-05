@@ -9,8 +9,11 @@
 //! - [`EngineHandle`]: A thread-safe actor handle that sends [`pdf_core::EngineCmd`] messages
 //!   to a dedicated background thread owning the `mupdf::Document`, receiving [`pdf_core::EngineEvent`]s.
 
-use mupdf::{Colorspace, Document, Matrix};
-use pdf_core::{Bitmap, EngineCmd, EngineEvent, PageSize, PdfEngine, PixelFormat, Rect, RequestId};
+use mupdf::{Colorspace, Device, DisplayList, Document, Matrix, Pixmap};
+use pdf_core::{
+    Bitmap, EngineCmd, EngineEvent, PageGeometry, PageSize, PdfEngine, PixelFormat, Rect,
+    RequestId, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileRect,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +68,32 @@ pub enum MupdfError {
         source: mupdf::Error,
     },
 
+    /// Failed to rasterize one tile.
+    #[error("Failed to render tile ({col},{row}) of page {page_index}: {source}")]
+    TileRenderFailed {
+        page_index: u32,
+        col: i32,
+        row: i32,
+        source: mupdf::Error,
+    },
+
+    /// The requested cell does not intersect the page.
+    #[error("Tile ({col},{row}) lies outside page {page_index}")]
+    TileOutsidePage { page_index: u32, col: i32, row: i32 },
+
+    /// The caller's tile grid and MuPDF disagree about the page raster size.
+    ///
+    /// This means the grid would place tiles at the wrong offsets, so it is reported instead of
+    /// silently drawing the wrong region.
+    #[error(
+        "Tile grid disagrees with MuPDF on page {page_index}: grid {expected:?}, renderer {actual:?}"
+    )]
+    TileGeometryMismatch {
+        page_index: u32,
+        expected: (u32, u32),
+        actual: (u32, u32),
+    },
+
     /// Non-UTF8 path provided.
     #[error("Path is not valid UTF-8: '{0}'")]
     InvalidPath(PathBuf),
@@ -79,9 +108,21 @@ pub enum MupdfError {
 /// Encapsulates a [`mupdf::Document`] and provides direct, synchronous access.
 /// Note that `mupdf::Document` is not thread-safe; use [`EngineHandle`] when interacting
 /// across threads.
+///
+/// The tiled renderer keeps two reusable buffers so that rendering a tile allocates no pixel
+/// memory (Plan 0001, amendments 5 and 6):
+///
+/// - `scratch` is one `TILE_STRIDE_PX` square RGBA8 pixmap, cleared per tile. It is allocated
+///   with origin `(0, 0)`, which makes the draw device transform the identity, so device
+///   coordinates and buffer coordinates coincide and the tile offset lives in the CTM.
+/// - `display_list` caches the page's display list, which is scale independent, so every zoom
+///   level of a page reuses one parse of its content. One such list per engine means one per
+///   rasterizing thread, as Phase 2's worker pool requires.
 pub struct MupdfEngine {
     doc: Option<Document>,
     path: Option<PathBuf>,
+    scratch: Option<Pixmap>,
+    display_list: Option<(u32, DisplayList)>,
 }
 
 impl Default for MupdfEngine {
@@ -96,6 +137,8 @@ impl MupdfEngine {
         Self {
             doc: None,
             path: None,
+            scratch: None,
+            display_list: None,
         }
     }
 
@@ -133,6 +176,8 @@ impl MupdfEngine {
 
         self.doc = Some(doc);
         self.path = Some(path.to_path_buf());
+        // A display list belongs to the document that produced it.
+        self.display_list = None;
 
         Ok(count)
     }
@@ -144,11 +189,192 @@ impl MupdfEngine {
         for i in 0..count {
             let rect = self.page_size(i)?;
             sizes.push(PageSize {
+                x: rect.x,
+                y: rect.y,
                 width: rect.width,
                 height: rect.height,
             });
         }
         Ok(sizes)
+    }
+
+    /// Renders one tile of one page at the scale carried by `geometry`.
+    ///
+    /// The tile is drawn into a single reused scratch pixmap with a bleed band around it and
+    /// cropped down to the tile size, so the result is pixel-identical to the same region of a
+    /// full-page render while no buffer is allocated per tile (Plan 0001, §3.3 and §4.3).
+    pub fn render_tile(
+        &mut self,
+        geometry: &PageGeometry,
+        col: i32,
+        row: i32,
+    ) -> Result<Bitmap, MupdfError> {
+        let page_index = geometry.page;
+        let total = self.page_count();
+        if page_index as usize >= total {
+            return Err(MupdfError::PageOutOfBounds {
+                page_index: page_index as usize,
+                total_pages: total,
+            });
+        }
+        let Some(tile) = geometry.tile_rect(col, row) else {
+            return Err(MupdfError::TileOutsidePage {
+                page_index,
+                col,
+                row,
+            });
+        };
+
+        // Take the scratch out of `self` so the display-list cache can still be borrowed
+        // mutably; it is put back before returning, including on the error path.
+        let mut scratch = match self.scratch.take() {
+            Some(scratch) => scratch,
+            None => {
+                let cs = Colorspace::device_rgb();
+                let side = TILE_STRIDE_PX as i32;
+                Pixmap::new(&cs, 0, 0, side, side, true).map_err(|e| {
+                    MupdfError::TileRenderFailed {
+                        page_index,
+                        col,
+                        row,
+                        source: e,
+                    }
+                })?
+            }
+        };
+        let outcome = self.rasterize_tile(&mut scratch, geometry, col, row, tile);
+        self.scratch = Some(scratch);
+        outcome
+    }
+
+    /// Draws one tile into `scratch` and crops it out. See [`Self::render_tile`].
+    fn rasterize_tile(
+        &mut self,
+        scratch: &mut Pixmap,
+        geometry: &PageGeometry,
+        col: i32,
+        row: i32,
+        tile: TileRect,
+    ) -> Result<Bitmap, MupdfError> {
+        let page_index = geometry.page;
+        let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
+        let page = doc
+            .load_page(page_index as i32)
+            .map_err(|e| MupdfError::PageLoadFailed {
+                page_index: page_index as usize,
+                source: e,
+            })?;
+
+        // The full-page raster is `fz_round_rect(transform(bounds, scale))`; check that the grid
+        // agrees before trusting its cell offsets, otherwise tiles land at the wrong offsets.
+        let scale = geometry.scale();
+        let scale_matrix = Matrix::new_scale(scale, scale);
+        let bbox = page
+            .bounds()
+            .map_err(|e| MupdfError::PageBoundsFailed {
+                page_index: page_index as usize,
+                source: e,
+            })?
+            .transform(&scale_matrix)
+            .round();
+        let actual = (
+            (bbox.x1 - bbox.x0).max(0) as u32,
+            (bbox.y1 - bbox.y0).max(0) as u32,
+        );
+        let expected = geometry.device_size();
+        if actual != expected {
+            return Err(MupdfError::TileGeometryMismatch {
+                page_index,
+                expected,
+                actual,
+            });
+        }
+
+        // Scratch origin in device pixels: the cell's top-left corner minus the bleed band.
+        let x0 = bbox.x0 + col * TILE_SIZE_PX as i32 - TILE_BLEED_PX;
+        let y0 = bbox.y0 + row * TILE_SIZE_PX as i32 - TILE_BLEED_PX;
+
+        scratch.clear().map_err(|e| MupdfError::TileRenderFailed {
+            page_index,
+            col,
+            row,
+            source: e,
+        })?;
+
+        let display_list = self.display_list_for(page_index, &page)?;
+        {
+            let device =
+                Device::from_pixmap(scratch).map_err(|e| MupdfError::TileRenderFailed {
+                    page_index,
+                    col,
+                    row,
+                    source: e,
+                })?;
+            let mut ctm = Matrix::new_scale(scale, scale);
+            ctm.concat(Matrix::new_translate(-(x0 as f32), -(y0 as f32)));
+            // The scratch device transform is the identity, so the scissor is expressed in the
+            // same space as the CTM applied to page coordinates.
+            let area = mupdf::Rect::new(0.0, 0.0, TILE_STRIDE_PX as f32, TILE_STRIDE_PX as f32);
+            display_list
+                .run(&device, &ctm, area)
+                .map_err(|e| MupdfError::TileRenderFailed {
+                    page_index,
+                    col,
+                    row,
+                    source: e,
+                })?;
+        }
+
+        // Crop the inner tile out of the padded scratch, tightly packed (stride == w * 4).
+        let stride = scratch.stride().max(0) as usize;
+        let bleed = TILE_BLEED_PX as usize;
+        let row_bytes = tile.row_bytes();
+        let mut data = vec![0u8; tile.byte_len()];
+        {
+            let samples = scratch.samples();
+            for r in 0..tile.h as usize {
+                let src = (r + bleed) * stride + bleed * 4;
+                let dst = r * row_bytes;
+                data[dst..dst + row_bytes].copy_from_slice(&samples[src..src + row_bytes]);
+            }
+        }
+        Ok(Bitmap::new(
+            tile.w,
+            tile.h,
+            row_bytes,
+            PixelFormat::Rgba8,
+            data,
+        ))
+    }
+
+    /// Returns the cached display list for a page, rebuilding it when the page changes.
+    ///
+    /// Display lists are scale independent, so one list serves every zoom level of a page and a
+    /// zoom step re-interprets the page content not at all.
+    fn display_list_for(
+        &mut self,
+        page_index: u32,
+        page: &mupdf::Page,
+    ) -> Result<&DisplayList, MupdfError> {
+        let stale = self
+            .display_list
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != page_index);
+        if stale {
+            let list = page
+                .to_display_list(false)
+                .map_err(|e| MupdfError::RenderFailed {
+                    page_index: page_index as usize,
+                    source: e,
+                })?;
+            self.display_list = Some((page_index, list));
+        }
+        match &self.display_list {
+            Some((_, list)) => Ok(list),
+            None => Err(MupdfError::Backend(
+                "display list cache was not populated".to_string(),
+            )),
+        }
     }
 }
 
@@ -258,17 +484,7 @@ impl EngineHandle {
             .spawn(move || {
                 let mut engine = MupdfEngine::new();
 
-                let mut buffered_cmd = None;
-                loop {
-                    let cmd = if let Some(c) = buffered_cmd.take() {
-                        c
-                    } else {
-                        match cmd_rx.recv() {
-                            Ok(c) => c,
-                            Err(_) => break,
-                        }
-                    };
-
+                while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
                         EngineCmd::Open { path, password } => {
                             match engine.open_document_with_password(&path, password.as_deref()) {
@@ -286,55 +502,29 @@ impl EngineHandle {
                                 }
                             }
                         }
-                        EngineCmd::RenderPage {
-                            page,
-                            scale,
+                        EngineCmd::RenderTile {
+                            geometry,
+                            col,
+                            row,
                             request_id,
                         } => {
-                            // Coalesce / drain any subsequent RenderPage commands queued up
-                            let mut target_page = page;
-                            let mut target_scale = scale;
-                            let mut target_req_id = request_id;
-
-                            while let Ok(next) = cmd_rx.try_recv() {
-                                match next {
-                                    EngineCmd::RenderPage {
-                                        page: p,
-                                        scale: s,
-                                        request_id: r,
-                                    } => {
-                                        // Supersedes previous render!
-                                        target_page = p;
-                                        target_scale = s;
-                                        target_req_id = r;
-                                    }
-                                    EngineCmd::Cancel { request_id: r } => {
-                                        cancelled_for_worker.store(r, Ordering::Relaxed);
-                                    }
-                                    other => {
-                                        // Store for next iteration and break drain
-                                        buffered_cmd = Some(other);
-                                        break;
-                                    }
-                                }
-                            }
-
-                            // Check if this request was cancelled
-                            let latest_cancelled = cancelled_for_worker.load(Ordering::Relaxed);
-                            if latest_cancelled == target_req_id {
+                            // Tiles are additive, so unlike the old full-page request there is
+                            // nothing to coalesce: each command is one tile. A request from a
+                            // superseded epoch is dropped before any raster time is spent.
+                            let cancelled = cancelled_for_worker.load(Ordering::Relaxed);
+                            if cancelled == request_id {
                                 continue;
                             }
 
-                            match engine.render_page(target_page, target_scale) {
+                            match engine.render_tile(&geometry, col, row) {
                                 Ok(bitmap) => {
-                                    // Check cancellation again after render before sending
-                                    let latest_cancelled =
-                                        cancelled_for_worker.load(Ordering::Relaxed);
-                                    if latest_cancelled != target_req_id {
-                                        let _ = event_tx.send(EngineEvent::PageRendered {
-                                            page: target_page,
-                                            scale: target_scale,
-                                            request_id: target_req_id,
+                                    // The epoch may have moved on while this tile rendered; the
+                                    // UI thread would drop such a result anyway, so keep it off
+                                    // the event channel.
+                                    if cancelled_for_worker.load(Ordering::Relaxed) != request_id {
+                                        let _ = event_tx.send(EngineEvent::TileRendered {
+                                            key: geometry.key(col, row),
+                                            request_id,
                                             bitmap,
                                         });
                                     }
