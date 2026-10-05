@@ -9,7 +9,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Desktop PDF viewer application for [PROJECT_NAME]"
+description = "Desktop PDF viewer application for PODEFA"
 
 [lints]
 workspace = true

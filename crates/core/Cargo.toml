@@ -9,7 +9,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Engine-agnostic core types and traits for [PROJECT_NAME]"
+description = "Engine-agnostic core types and traits for PODEFA"
 
 [lints]
 workspace = true

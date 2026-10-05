@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 name: Bug Report
-description: Create a report to help us improve [PROJECT_NAME]
+description: Create a report to help us improve PODEFA
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for taking the time to report an issue!
-        If you suspect this is a security vulnerability, please consult our [Security Policy](https://github.com/TODO/[PROJECT_NAME]/security/policy) rather than opening a public issue.
+        If you suspect this is a security vulnerability, please consult our [Security Policy](https://github.com/fineisnotevil/podefa/security/policy) rather than opening a public issue.
   - type: textarea
     id: description
     attributes:

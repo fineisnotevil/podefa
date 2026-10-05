@@ -11,14 +11,14 @@ Accepted
 
 ## Context
 
-Choosing a license for `[PROJECT_NAME]` involves balancing external dependency licensing constraints with our philosophy on open-source software:
+Choosing a license for `PODEFA` involves balancing external dependency licensing constraints with our philosophy on open-source software:
 1. **MuPDF Dependency**: MuPDF is published by Artifex Software under the GNU Affero General Public License (AGPL-3.0-or-later) or commercial licenses. Any binary linking against MuPDF without a commercial license must comply with AGPL-3.0 copyleft terms.
 2. **Slint Dependency**: Slint is dual-licensed under GPLv3, a proprietary license, and a paid ambassador agreement. Utilizing Slint in an open-source project without a proprietary license requires adherence to GPLv3.
 3. **Contribution Management**: We need a frictionless yet legally sound contribution model that ensures contributors retain copyright and certify their contributions without burdensome CLA paperwork.
 
 ## Decision
 
-1. **License**: We license `[PROJECT_NAME]` under the **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)**.
+1. **License**: We license `PODEFA` under the **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)**.
    - AGPL-3.0 satisfies MuPDF's AGPL requirements.
    - Slint is consumed under its GPLv3 option, which is compatible with AGPL-3.0-or-later (GPLv3 section 13 permits combining with AGPLv3 code).
    - Third-party dependencies must carry licenses compatible with AGPL-3.0 (enforced in CI by `cargo-deny`).
@@ -36,4 +36,4 @@ Choosing a license for `[PROJECT_NAME]` involves balancing external dependency l
 - Automated compliance auditing via `cargo-deny` and `reuse lint` prevents accidental inclusion of incompatible code.
 
 ### Negative
-- Proprietary commercial entities cannot link or embed `[PROJECT_NAME]` without complying with AGPL-3.0 obligations.
+- Proprietary commercial entities cannot link or embed `PODEFA` without complying with AGPL-3.0 obligations.

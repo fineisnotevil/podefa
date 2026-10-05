@@ -11,7 +11,7 @@ Accepted
 
 ## Context
 
-`[PROJECT_NAME]` requires rendering complex PDF pages and responding interactively to UI inputs (such as rapid zoom and page flips) without stalling the user interface.
+`PODEFA` requires rendering complex PDF pages and responding interactively to UI inputs (such as rapid zoom and page flips) without stalling the user interface.
 
 Two fundamental architectural constraints govern this interaction:
 1. **MuPDF Thread Safety Limitations**: MuPDF documents (`fz_document`) and context structures (`fz_context`) are not safely shareable across multiple threads simultaneously. Attempting to access or render pages from multiple threads without locks leads to race conditions, and passing raw pointers across threads violates Rust's memory model (`*mut fz_document` is neither `Send` nor `Sync`).

@@ -3,9 +3,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 -->
 
-# Contributing to [PROJECT_NAME]
+# Contributing to PODEFA
 
-Thank you for your interest in contributing to [PROJECT_NAME]! We welcome code contributions, issue reports, documentation improvements, and architectural feedback.
+Thank you for your interest in contributing to PODEFA! We welcome code contributions, issue reports, documentation improvements, and architectural feedback.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -39,7 +39,7 @@ Commits missing a valid sign-off will fail the automated pull request checks.
 
 ## Branch and Pull Request Workflow
 
-1. Fork the repository on GitHub: `[GITHUB_URL]`.
+1. Fork the repository on GitHub: `https://github.com/fineisnotevil/podefa`.
 2. Clone your fork locally and create a feature branch:
    ```bash
    git checkout -b feature/my-new-feature

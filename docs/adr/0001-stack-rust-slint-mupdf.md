@@ -11,7 +11,7 @@ Accepted
 
 ## Context
 
-`[PROJECT_NAME]` aims to provide a lightweight, cross-platform PDF viewer and editor with:
+`PODEFA` aims to provide a lightweight, cross-platform PDF viewer and editor with:
 - Minimal startup latency and instantaneous document display.
 - Modest memory consumption (avoiding the high baseline RAM demands of web runtimes like Electron or heavy toolkits).
 - Robust type safety, memory safety, and cross-platform compilation targets (Windows, Linux, macOS initially; mobile later).

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 # Architecture Decision Records (ADRs)
 
-This directory documents key architectural, technical, and licensing decisions made throughout the lifecycle of `[PROJECT_NAME]`.
+This directory documents key architectural, technical, and licensing decisions made throughout the lifecycle of `PODEFA`.
 
 ## Record Format
 

@@ -9,7 +9,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "MuPDF backend implementation of PdfEngine for [PROJECT_NAME]"
+description = "MuPDF backend implementation of PdfEngine for PODEFA"
 
 [lints]
 workspace = true

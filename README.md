@@ -3,9 +3,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 -->
 
-# [PROJECT_NAME]
+# PODEFA
 
 A lightweight, cross-platform PDF viewer and editor designed for low resource consumption, instantaneous startup, and robust architectural separation.
+
+PODEFA is developed and maintained by FINE Association (FINE, FA).
 
 ## Status
 
@@ -17,7 +19,7 @@ A lightweight, cross-platform PDF viewer and editor designed for low resource co
 - **Minimal Resource Footprint**: Modest memory usage and negligible idle CPU consumption, suitable for low-end hardware.
 - **Fast Startup**: Near-instant window display and document opening.
 - **Cross-Platform**: First-class support for Windows 10+, Linux, and macOS; architected for potential future expansion to mobile (Android/iOS).
-- **Clean Architectural Separation**: Strict crate boundaries isolating UI (`crates/app`), rendering logic (`crates/render`), backend engine implementations (`crates/engine-mupdf`), and domain primitives (`crates/core`).
+- **Clean Architectural Separation**: Strict crate boundaries isolating UI (`crates/app`), backend engine implementations (`crates/engine-mupdf`), and domain primitives plus the tile scheduler (`crates/core`).
 - **Strict Copyleft & FOSS Compliance**: Strong adherence to open-source copyleft licenses and comprehensive REUSE specification compliance.
 
 ### Non-Goals
@@ -27,7 +29,7 @@ A lightweight, cross-platform PDF viewer and editor designed for low resource co
 
 ## Prerequisites & Build Instructions
 
-Building `[PROJECT_NAME]` requires a Rust toolchain (pinned in `rust-toolchain.toml`) and native C/LLVM tooling required by `mupdf` (`bindgen` / `libclang`).
+Building `PODEFA` requires a Rust toolchain (pinned in `rust-toolchain.toml`) and native C/LLVM tooling required by `mupdf` (`bindgen` / `libclang`).
 
 ### Platform Prerequisites
 
@@ -53,8 +55,8 @@ export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
 Clone the repository and build the workspace:
 
 ```bash
-git clone [GITHUB_URL]
-cd [PROJECT_NAME]
+git clone https://github.com/fineisnotevil/podefa.git
+cd podefa
 
 # Build all workspace crates
 cargo build --workspace
@@ -68,9 +70,8 @@ cargo run -p app
 
 ## Repository Structure
 
-- `crates/core`: Engine-agnostic domain traits (`PdfEngine`, `Command`) and geometry/buffer types (`Rect`, `Bitmap`). Free of UI or engine dependencies.
-- `crates/engine-mupdf`: Implementation of `PdfEngine` wrapping MuPDF.
-- `crates/render`: Viewport tile scheduler, LRU rasterization cache, and background render dispatching.
+- `crates/core`: Engine-agnostic domain traits (`PdfEngine`, `Command`) and geometry/buffer types (`Rect`, `Bitmap`), plus the pure tile geometry (`tiling`) and tile cache/request scheduler (`scheduler`). Free of UI or engine dependencies.
+- `crates/engine-mupdf`: Implementation of `PdfEngine` wrapping MuPDF, including tiled rendering.
 - `crates/app`: Declarative desktop frontend powered by Slint.
 
 ## Licensing

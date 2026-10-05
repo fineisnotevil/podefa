@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 name: Feature Request
-description: Suggest an idea or enhancement for [PROJECT_NAME]
+description: Suggest an idea or enhancement for PODEFA
 labels: ["enhancement"]
 body:
   - type: markdown

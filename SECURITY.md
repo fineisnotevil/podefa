@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Threat Model & Untrusted File Handling
 
-`[PROJECT_NAME]` is a PDF viewer and editor. By definition, **PDF viewers process complex, untrusted binary files** sourced from arbitrary origins (e.g. web downloads, email attachments). The PDF specification is vast, historically error-prone, and frequently targeted by malicious documents attempting parser exploitation, memory corruption, infinite parsing loops, or resource exhaustion.
+`PODEFA` is a PDF viewer and editor. By definition, **PDF viewers process complex, untrusted binary files** sourced from arbitrary origins (e.g. web downloads, email attachments). The PDF specification is vast, historically error-prone, and frequently targeted by malicious documents attempting parser exploitation, memory corruption, infinite parsing loops, or resource exhaustion.
 
 Our security posture relies on:
 1. **Memory Safety in Rust**: Core abstractions, data manipulation, and UI logic are implemented in safe Rust.
@@ -29,7 +29,7 @@ During active development (pre-1.0.0), only the latest commit on the `main` bran
 
 If you discover a vulnerability, suspect a memory corruption issue, or identify an exploit vector in file parsing or rendering:
 
-1. Send an email directly to the project maintainers at: **[YOUR_EMAIL]**.
+1. Send an email directly to the project maintainers at: **su@fa.org.tr**.
 2. Include the following details:
    - A description of the vulnerability and its potential impact.
    - Minimal proof-of-concept (PoC) document or reproduction steps.

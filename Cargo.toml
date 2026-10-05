@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["FINE Association <su@fa.org.tr>"]
-repository = "https://github.com/TODO/fa-pdf"
+repository = "https://github.com/fineisnotevil/podefa"
 rust-version = "1.85"
 
 [workspace.dependencies]
