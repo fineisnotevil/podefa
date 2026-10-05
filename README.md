@@ -11,7 +11,7 @@ PODEFA is developed and maintained by FINE Association (FINE, FA).
 
 ## Status
 
-**Early development**: The core workspace architecture, dependency graph, and initial scaffolding are established. Rendering pipelines and UI features are currently under active design and development.
+**Early development**: The workspace, the tiled viewport rendering pipeline, and a Slint desktop UI are in place. PODEFA currently opens documents and supports zooming (up to 6400%), panning, and page-by-page navigation, with memory bounded by the tile cache. Continuous multi-page scrolling, text selection, and document editing are under active development.
 
 ## Goals and Non-Goals
 
