@@ -9,7 +9,8 @@
 
 use engine_mupdf::MupdfEngine;
 use pdf_core::{
-    PageGeometry, PdfEngine, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, scale_from_milli,
+    PageGeometry, PdfEngine, PixelFormat, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX,
+    scale_from_milli,
 };
 use std::path::{Path, PathBuf};
 
@@ -47,7 +48,8 @@ fn mupdf_raster(path: &Path, page: u32, scale_milli: u32) -> (u32, u32, i32, i32
 /// Renders every tile of a page and blits each one into its place in a full-page buffer.
 fn assemble_tiles(engine: &mut MupdfEngine, geo: &PageGeometry) -> Vec<u8> {
     let (dev_w, dev_h) = geo.device_size();
-    let stride = dev_w as usize * 4;
+    let n = PixelFormat::Rgb8.bytes_per_pixel();
+    let stride = dev_w as usize * n;
     let mut canvas = vec![0u8; stride * dev_h as usize];
     for row in 0..geo.rows() {
         for col in 0..geo.cols() {
@@ -59,7 +61,7 @@ fn assemble_tiles(engine: &mut MupdfEngine, geo: &PageGeometry) -> Vec<u8> {
             let tile_stride = tile.stride;
             for r in 0..tile.height as usize {
                 let src = r * tile_stride;
-                let dst = (rect.y as usize + r) * stride + rect.x as usize * 4;
+                let dst = (rect.y as usize + r) * stride + rect.x as usize * n;
                 canvas[dst..dst + tile_stride].copy_from_slice(&tile.data[src..src + tile_stride]);
             }
         }
@@ -143,8 +145,18 @@ fn tile_dimensions_cover_the_page_exactly() {
 
     let tile = engine.render_tile(&geo, 1, 1).expect("edge tile");
     assert_eq!((tile.width, tile.height), (100, 280));
-    assert_eq!(tile.stride, 100 * 4);
-    assert_eq!(tile.data.len(), 100 * 280 * 4);
+    assert_eq!(tile.stride, 100 * 3);
+    assert_eq!(tile.data.len(), 100 * 280 * 3);
+
+    // The approved RGB8 change: the tile carries three channels rather than four, and the paper
+    // behind this fixture's red square is *white* rather than transparent - which is what makes
+    // dropping the alpha byte safe. Tile (1,1) covers the page's bottom-right corner, away from
+    // the square, so it is paper from corner to corner.
+    assert_eq!(&tile.data[..3], [255, 255, 255], "bottom-right corner");
+    assert!(
+        tile.data.iter().all(|&b| b == 255),
+        "the whole cell is white paper"
+    );
 
     // Off-grid cells are refused rather than rasterized from a bogus origin.
     assert!(engine.render_tile(&geo, 3, 0).is_err());
@@ -239,7 +251,9 @@ fn render_reference(
     let y0 = bbox.y0 + row0 * TILE_SIZE_PX as i32 - TILE_BLEED_PX;
 
     let cs = mupdf::Colorspace::device_rgb();
-    let mut pix = mupdf::Pixmap::new(&cs, 0, 0, side as i32, side as i32, true).expect("pixmap");
+    // Alpha-free, like the path under test: the reference has to be the same format for a
+    // byte-for-byte comparison, and both are white paper where the page draws nothing.
+    let mut pix = mupdf::Pixmap::new(&cs, 0, 0, side as i32, side as i32, false).expect("pixmap");
     pix.clear().expect("clear");
     {
         let device = mupdf::Device::from_pixmap(&pix).expect("draw device");
@@ -252,10 +266,11 @@ fn render_reference(
 
 /// Compares one tile against its sub-region of the reference pixmap.
 fn diff_region(reference: &[u8], side: usize, i: usize, j: usize, tile: &pdf_core::Bitmap) -> Diff {
-    let ref_stride = side * 4;
-    let x_off = (TILE_BLEED_PX as usize + i * TILE_SIZE_PX as usize) * 4;
+    let n = PixelFormat::Rgb8.bytes_per_pixel();
+    let ref_stride = side * n;
+    let x_off = (TILE_BLEED_PX as usize + i * TILE_SIZE_PX as usize) * n;
     let y_off = TILE_BLEED_PX as usize + j * TILE_SIZE_PX as usize;
-    let row_bytes = tile.width as usize * 4;
+    let row_bytes = tile.width as usize * n;
     let mut region = Vec::with_capacity(row_bytes * tile.height as usize);
     for r in 0..tile.height as usize {
         let src = (y_off + r) * ref_stride + x_off;
@@ -277,10 +292,14 @@ fn a0_at_6400_percent_is_deterministic_and_precise() {
     assert_eq!((geo.cols(), geo.rows()), (298, 422));
     assert_eq!(TILE_STRIDE_PX, 516);
 
-    // A 2x2 block straddling two tile boundaries near the middle of the page: the offsets here
-    // are ~100 million pixels, which is where a float precision problem shows up first.
-    let col0 = geo.cols() / 2 - 1;
-    let row0 = geo.rows() / 2 - 1;
+    // A 2x2 block on a grid crossing: `1100 pt` and `1600 pt` are two of the fixture's 100 pt grid
+    // lines, and at 6400% their 2 pt stroke is 128 px wide. The crossing is inside the block's
+    // first tile, so the comparison is over real antialiased edges rather than over paper - a
+    // block that happens to land inside one of the grid's 100 pt cells would compare two blank
+    // buffers and prove nothing. The offsets are ~70,000 device px (1100 pt at 64x), which is
+    // where a float precision problem in the tile mapping shows up first.
+    let col0 = 137;
+    let row0 = 221;
 
     // Deterministic: the same tile rendered twice is byte-identical.
     let first = engine.render_tile(&geo, col0, row0).expect("tile");
@@ -291,7 +310,10 @@ fn a0_at_6400_percent_is_deterministic_and_precise() {
     );
     assert_eq!((first.width, first.height), (TILE_SIZE_PX, TILE_SIZE_PX));
     assert!(
-        first.data.chunks_exact(4).any(|px| px[3] != 0),
+        first
+            .data
+            .chunks_exact(PixelFormat::Rgb8.bytes_per_pixel())
+            .any(|px| px.iter().any(|&channel| channel != 255)),
         "the tile must contain rendered content, otherwise this test proves nothing"
     );
 

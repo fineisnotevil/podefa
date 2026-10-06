@@ -51,6 +51,39 @@ impl Cookie {
             (*self.inner).incomplete = val;
         }
     }
+
+    /// A handle that aborts this cookie from another thread.
+    pub fn abort_handle(&self) -> CookieAbort {
+        CookieAbort(self.inner)
+    }
+}
+
+/// An abort handle for a [`Cookie`] that may be used from another thread.
+///
+/// Upstream documents `fz_cookie` as the channel "for multi-threaded applications where one
+/// thread is rendering pages and another thread wants to read progress feedback or abort a job
+/// that takes a long time to finish", and the only field this touches is the `abort` flag, which
+/// MuPDF polls as a plain `int` while it runs. [`Cookie::abort`] cannot be called from the
+/// cancelling thread because it needs `&mut Cookie`, and the rendering thread is inside the
+/// raster; this handle is what lets a render pool abort an in-flight raster instead of waiting
+/// for it to finish and discarding the result.
+#[derive(Debug, Clone, Copy)]
+pub struct CookieAbort(*mut fz_cookie);
+
+// SAFETY: the handle is only used while the `Cookie` it came from is alive (the caller owns both),
+// and every use is a single write of the `abort` flag - the one cross-thread use upstream
+// documents. MuPDF reads that flag without synchronisation by design.
+unsafe impl Send for CookieAbort {}
+// SAFETY: see the `Send` impl; there is no shared state beyond that flag.
+unsafe impl Sync for CookieAbort {}
+
+impl CookieAbort {
+    /// Asks the rendering thread to stop.
+    pub fn abort(self) {
+        unsafe {
+            (*self.0).abort = 1;
+        }
+    }
 }
 
 impl Drop for Cookie {
