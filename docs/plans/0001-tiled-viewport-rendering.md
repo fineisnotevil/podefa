@@ -12,8 +12,17 @@ are folded in (§0.2). Phase 1 (geometry, tile rendering, viewport-only app) is 
 its gate** — see the "Phase 1 results" block in §5 for the evidence and the numbers.
 
 - Phase 0 (research + measurement + this document) is complete.
-- Phase 1 is implemented, verified and gated; Phase 2 has not started.
-- Phases 2-3 remain proposals.
+- Phase 1 is implemented, verified and gated.
+- Phase 2 (worker pool, epoch cancellation through MuPDF's cancel cookie, low-res base layer,
+  prefetch ring) is **implemented, measured and closed**: every item on its list is in the code,
+  it is gated by the same checks as Phase 1, and both halves of its acceptance have measured
+  results — the working-set target in §5 Phase 2, with the numbers in
+  [`../benchmarks.md`](../benchmarks.md) §7.6, and the app-level gate run re-measured on the pooled
+  build in §7.5. That gate run's one FAIL belongs to the document's own cold open when a zoom burst
+  interrupts it — the §7.2-7.3 one-off, which the pool does not move because the display-list build
+  it waits on is serial — and the stretched-level item that covers it is Phase 3's.
+- Phase 3 remains a proposal.
+- The next plan to execute is [`0002-continuous-multipage-scroll.md`](./0002-continuous-multipage-scroll.md).
 
 ## 0. Gate record
 
@@ -22,7 +31,7 @@ its gate** — see the "Phase 1 results" block in §5 for the evidence and the n
 | Question | Decision |
 | :--- | :--- |
 | Target `ZOOM_MAX` | **6400%** (`ZOOM_MAX_MILLI = 64_000`). Add an acceptance test that renders the A0 fixture at 6400% and checks for precision jitter; if jitter appears, propose a per-page maximum virtual extent as a precision guard instead of lowering the zoom. |
-| Tile cache ceiling | **64 MiB** of bitmap data for desktop, **configurable**, with a **lower default for mobile**. On a zoom change, **evict old-scale tiles first**. |
+| Tile cache ceiling | **64 MiB** of bitmap data for desktop, **configurable**, with a **lower default for mobile**. The ceiling a run actually reaches is usually the *row* count instead (a viewport-sized model holds 12 MiB at 900x700), so `--cache-rows` exists to raise that too; on a zoom change, **evict old-scale tiles first**. |
 | Tile size | **512 physical px**, as a single named constant (`TILE_SIZE_PX`). |
 
 ### 0.2 Amendments (all applied in this revision)
@@ -105,8 +114,8 @@ parallel tile rendering, progressive/low-res previews.
 - Confirmed empirically: Letter at 1000% costs 200-290 MB over the 87 MB baseline against
   an 184.90 MiB buffer, i.e. ~2x the buffer (see `../benchmarks.md` section 5.2).
 
-**Consequence:** each live tile costs roughly `2 x 1 MiB` at 512x512 RGBA8, and releasing a
-tile means dropping its `Image` from the model.
+**Consequence:** each live tile costs roughly `2 x 768 KiB` at 512x512 RGB8 (3 bytes a pixel, §4.9),
+and releasing a tile means dropping its `Image` from the model.
 
 ### 3.3 MuPDF region rendering (`patches/mupdf`)
 
@@ -116,7 +125,8 @@ The tile recipe is fully supported:
 // Per rasterizing thread, allocated once (amendment 5). The origin is (0,0) on purpose:
 // fz_new_draw_device gives the device the identity transform, so device space and buffer
 // space coincide and the *CTM* carries the tile offset instead of the pixmap origin.
-let mut scratch = Pixmap::new(&cs, 0, 0, TILE_STRIDE_PX, TILE_STRIDE_PX, true)?;
+// alpha = false: three channels, and fz_clear_pixmap then clears to 0xff, i.e. white paper.
+let mut scratch = Pixmap::new(&cs, 0, 0, TILE_STRIDE_PX, TILE_STRIDE_PX, false)?;
 
 // Per tile:
 let dl   = page.to_display_list(false)?;                  // scale-independent, cached per page
@@ -124,13 +134,13 @@ let s    = scale_from_milli(key.scale_milli);             // exact, straight fro
 let bbox = page.bounds()?.transform(&Matrix::new_scale(s, s)).round(); // page raster bbox
 let x0   = bbox.x0 + key.col * TILE_SIZE_PX as i32 - TILE_BLEED_PX;    // scratch origin, device px
 let y0   = bbox.y0 + key.row * TILE_SIZE_PX as i32 - TILE_BLEED_PX;
-scratch.clear()?;                               // fz_clear_pixmap: same init as the alpha=true page path
+scratch.clear()?;                               // fz_clear_pixmap: white, the same init as the page path
 let dev  = Device::from_pixmap(&scratch)?;      // identity transform, clip = 0..TILE_STRIDE
 let mut ctm = Matrix::new_scale(s, s);          // page pt -> device px
 ctm.concat(Matrix::new_translate(-(x0 as f32), -(y0 as f32)));         // concat post-multiplies
 dl.run(&dev, &ctm, Rect::new(0.0, 0.0, TILE_STRIDE_PX as f32, TILE_STRIDE_PX as f32))?;
 drop(dev);
-// copy rows [B .. B+h] x [B .. B+w] out of the scratch into a tight w*h*4 Bitmap
+// copy rows [B .. B+h] x [B .. B+w] out of the scratch into a tight w*h*3 Bitmap
 ```
 
 Verified (re-checked for this revision):
@@ -153,12 +163,15 @@ Verified (re-checked for this revision):
   has in a full-page raster whose bbox origin is `bbox.x0/bbox.y0`.
 - The full-page path is `fz_new_pixmap_from_page_contents`: bbox =
   `fz_round_rect(fz_transform_rect(fz_bound_page, ctm))`, `fz_clear_pixmap` when `alpha=1`
-  (zeros, i.e. transparent), then `fz_new_draw_device(ctx, ctm, pix)` with the page run at
-  `fz_identity` (`fitz/util.c:155-190`). So `page.to_pixmap(&S(s), &cs, true, false)` and a
+  (zeros, i.e. transparent) or `fz_clear_pixmap_with_value(..., 0xFF)` when `alpha=0` (white,
+  i.e. opaque paper), then `fz_new_draw_device(ctx, ctm, pix)` with the page run at
+  `fz_identity` (`fitz/util.c:155-190`). So `page.to_pixmap(&S(s), &cs, false, false)` and a
   tiled render of the same page draw the same objects with the same CTM; tiling only changes
-  which objects are culled and where the buffer starts. `fz_round_rect` is
-  `floor(x0+0.001)..ceil(x1-0.001)` (`fitz/geometry.c`), reproduced bit-for-bit by
-  `PageGeometry::device_size` in `core`.
+  which objects are culled and where the buffer starts. Both the tiles and the full-page
+  primitive are `alpha=0`, which is what makes a 3-channel bitmap safe - the paper is white
+  rather than a transparent hole, and the tests assert that corner pixel.
+  `fz_round_rect` is `floor(x0+0.001)..ceil(x1-0.001)` (`fitz/geometry.c`), reproduced
+  bit-for-bit by `PageGeometry::device_size` in `core`.
 - The scratch is always `TILE_SIZE_PX + 2*TILE_BLEED_PX` a side, so one allocation serves every
   tile including the clamped edge tiles; edge tiles rasterize slightly past the page edge and
   the surplus is cropped on copy-out.
@@ -188,7 +201,7 @@ pub fn scale_from_milli(milli: u32) -> f32;         // milli as f32 / 1000.0
 pub fn zoom_in_milli(milli: u32) -> u32;            // round(milli * 5/4), clamped
 pub fn zoom_out_milli(milli: u32) -> u32;           // round(milli * 4/5), clamped
 
-pub const TILE_SIZE_PX: u32 = 512;          // 1 MiB RGBA8 per tile
+pub const TILE_SIZE_PX: u32 = 512;          // 768 KiB RGB8 per tile
 pub const TILE_BLEED_PX: i32 = 2;           // hidden guard band so AA straddles no seam
 pub const TILE_STRIDE_PX: u32 = TILE_SIZE_PX + 2 * TILE_BLEED_PX as u32;
 
@@ -282,9 +295,9 @@ Per tile the engine:
    wrong region;
 2. clears the scratch and runs the cached display list into it with the tile CTM and the
    scratch rect as the scissor (§3.3), creating and dropping the lightweight draw device per
-   tile while the 1 MiB scratch pixels are reused;
-3. copies rows `[B .. B+h] x [B .. B+w]` out of the scratch into a tight `w*h*4` `Bitmap`
-   (`stride == width * 4`, so the UI side needs no stride fixup).
+   tile while the 786 KiB scratch pixels are reused;
+3. copies rows `[B .. B+h] x [B .. B+w]` out of the scratch into a tight `w*h*3` `Bitmap`
+   (`stride == width * 3`, so the UI side needs no stride fixup).
 
 The bleed guard band is what makes the crop exact: the clip boundary sits `B` pixels outside
 the returned tile, so every returned pixel is identical to the corresponding pixel of a
@@ -380,7 +393,7 @@ actions". The callbacks keep their existing shape (`on_prev_page`, `on_next_page
 - `tiles-requested` is incremented for every emitted `Request`, so the animated-wheel-scroll
   and programmatic-write manual checks have something objective to watch.
 
-Because every tile is tightly packed (`stride == width * 4`), the existing ~25-line
+Because every tile is tightly packed (`stride == width * 3`), the existing ~25-line
 stride-to-stride copy branch in `main.rs:216-229` collapses into a single
 `SharedPixelBuffer::clone_from_slice(&bitmap.data, w, h)` call. `set_page_image` and the
 `page_image` property go away, replaced by the `tiles` model.
@@ -405,6 +418,11 @@ impl TileScheduler {
     /// Diff the live viewport against the cache: set the current scale, clear rows that are no
     /// longer wanted, promote hits, queue misses (skipping keys already pending).
     pub fn update_view(&mut self, desired: &[TileKey], current_scale_milli: u32) -> Vec<TileAction>;
+    /// Request tiles *ahead* of the viewport (the one-tile ring). They are cached like any other
+    /// tile but are never visible, so they stay evictable and never count as a hole; only rows
+    /// the visible set does not claim are used, and nothing is requested once the cache holds its
+    /// whole byte budget.
+    pub fn prefetch(&mut self, ring: &[TileKey]) -> Vec<TileAction>;
     /// A tile has arrived. Returns the model row it was placed in, or `None` when it is stale,
     /// already present, or no row is free. Enforces the byte budget by eviction.
     pub fn insert(&mut self, key: TileKey, bytes: usize) -> Option<usize>;
@@ -426,7 +444,16 @@ impl TileScheduler {
 - `TILE_CACHE_MAX_BYTES` is a byte budget rather than a tile count, because the last
   row/column tiles are smaller. **64 MiB of bitmap data by default on desktop, configurable,
   with a lower mobile default** (`TILE_CACHE_MAX_BYTES_MOBILE = 16 MiB`). Per §3.2 the resident
-  cost is about twice the budget once GPU copies are counted.
+  cost was about twice the budget while tiles were RGBA8; with RGB8 tiles the Slint image is
+  3 bytes a pixel too, so the two now match and the budget is the resident cost.
+- **The ring is speculation and is kept apart from what is visible.** `prefetch` requests the
+  cells one tile outside the viewport so that a pan finds the column it uncovers already
+  rendered; the tiles land in the cache as *hidden* entries, so they are ordinary eviction
+  candidates and the hole count (`docs/benchmarks.md` §7.5) does not see them. The visible set
+  claims its rows first, and a ring request that would arrive into a cache already at its byte
+  budget is not made at all. Measured on the §7.6 sweep: 0 hole frames against 241 of 296
+  without it, at the cost of rendering the ring cells the model cannot hold (~3x the tile count
+  at the default row count).
 - Eviction order when the budget is exceeded: **(1) tiles whose `scale_milli` differs from the
   current scale, oldest first** — a zoom change is what makes the budget overflow, and the
   previous scale's tiles are exactly the ones that can no longer be shown; **(2) then LRU among
@@ -446,9 +473,12 @@ impl TileScheduler {
 4. immediately recompute and enqueue the desired set under the new epoch.
 
 This is correct because the engine command channel is FIFO: the `Cancel` reaches the actor
-before the new epoch's `RenderTile` messages, so the stale tiles are discarded
-(`cancelled == request_id`) while the new ones are not (`cancelled != request_id`, the check
-at `engine-mupdf/src/lib.rs:331-340`). Without step 4 the viewport would stay partially
+before the new epoch's `RenderTile` messages, so the stale tiles are discarded while the new
+ones are not. Whether a finished raster may be published is decided under the pool's registry
+lock, in the same critical section the cancel sets the epoch flag in, so a raster whose epoch
+was cancelled cannot be published whatever the timing of the two threads
+(`crates/engine-mupdf/src/pool.rs`); the flag read before a raster starts is only a way to skip
+work that would be discarded anyway. Without step 4 the viewport would stay partially
 blank until the next `viewport_moved`, because the tiles dropped by the cancel are still
 marked pending.
 
@@ -463,13 +493,19 @@ capacity = (ceil(view_w_device / TILE_SIZE_PX) + 2)      // + 2: one margin ring
 ```
 
 with `view_*_device = viewport_logical_px * scale_factor`, recomputed from the real window on
-resize. That is the bound: it is derived from window size x scale factor plus a one-tile
+resize. The `+ 2` is the **prefetch ring** of §4.5: the ring requests the cells one tile outside
+the viewport, a viewport that straddles a tile boundary touches at most `ceil(...) + 1` columns, so
+the ring's cells always fit inside `ceil(...) + 2` - the ring is prefetched *inside* the model
+rather than growing it.
+
+That is the bound: it is derived from window size x scale factor plus a one-tile
 margin, and it does **not** grow with the page or with the zoom level, because the number of
 visible tiles depends on the viewport, not the page extent. Reference numbers: a 900x700
 logical window at scale factor 1.0 needs `(2+2) x (2+2) = 16` rows; the same window at scale
 factor 3.0 needs `(6+2) x (5+2) = 56` rows (~3 KB of model memory, since a row is an image
 handle plus four lengths and a bool). The *bitmap budget*, not the row count, is what bounds
-memory.
+memory - which is why a run whose cache plateau has to follow the budget has to raise the row
+count with `--cache-rows` (`docs/benchmarks.md` §7.6).
 
 Graceful behaviour on overflow, in the order it can happen:
 
@@ -511,7 +547,9 @@ changed content-x / content-y / width / height ──> viewport_moved()
    │
    ├─ device_rect = (content-x, content-y, viewport-w, viewport-h) * scale_factor
    ├─ desired = PageGeometry::visible_cells(device_rect) -> [TileKey]
-   └─ scheduler.update_view(desired, scale_milli) -> [TileAction]
+   ├─ ring    = PageGeometry::visible_cells(device_rect grown by one tile) -> [TileKey]
+   ├─ scheduler.update_view(desired, scale_milli) -> [TileAction]   // the cells on screen
+   └─ scheduler.prefetch(ring) -> [TileAction]                      // the ones a pan takes next
         Display{slot,key} ──> model[slot].image = cached image, visible: true
         Clear{slot}       ──> model[slot].image = default,    visible: false
         Request{key}      ──> EngineCmd::RenderTile { geometry, col, row, epoch } ──┐
@@ -522,28 +560,47 @@ changed content-x / content-y / width / height ──> viewport_moved()
                                                  scratch.clear()
                                                  dl.run(dev, S(s) ∥ T(-x0,-y0),
                                                         (0,0,TILE_STRIDE,TILE_STRIDE))
-                                                 crop inner tile -> Bitmap (stride == w*4)
+                                                 crop inner tile -> Bitmap (stride == w*3)
                                                        │
    event listener thread  <── EngineEvent::TileRendered {key, epoch, bitmap} <──────────┘
         └─ upgrade_in_event_loop ──> epoch stale? drop
                                      else scheduler.insert(key, bytes) -> slot
-                                          -> model[slot].image = Image::from_rgba8(...)
+                                          -> model[slot].image = Image::from_rgb8(...)
 ```
 
 ### 4.9 Memory and time budget
 
+Tiles are **opaque RGB8** (3 bytes a pixel): MuPDF clears an alpha-free pixmap to `0xff`, so the
+paper is white, and an alpha channel would spend a quarter of every tile on a byte that is always
+`255`. That is the same change as the tiles' format in `core` (`PixelFormat::Rgb8`) and it halves
+the "CPU + GPU" pair below from the RGBA8 revision.
+
 | Quantity | Value |
 | :--- | :--- |
-| Tile, 512x512 RGBA8 | 1.00 MiB CPU + ~1.00 MiB GPU |
-| Scratch raster, `TILE_STRIDE_PX^2` RGBA8 | 1.02 MiB, **allocated once per rasterizing thread** |
+| Tile, 512x512 RGB8 | 768 KiB CPU + 768 KiB GPU |
+| Scratch raster, `TILE_STRIDE_PX^2` RGB8 | 786 KiB, **allocated once per rasterizing thread** |
 | Tile model rows | `ceil(view_w/sf/TILE+2) * ceil(view_h/sf/TILE+2)`; 16 rows at 900x700 @ sf 1.0 |
-| Viewport, 900x700 logical px @ scale factor 1.0 | 2x2 = 4 tiles = ~8 MiB |
-| Viewport, 900x700 logical px @ scale factor 2.0 | 4x3 = 12 tiles = ~24 MiB |
-| New tiles per pan step | ~1-2 (one new row or column) |
+| Viewport, 900x700 logical px @ scale factor 1.0 | 2x2 = 4 tiles = 3 MiB |
+| Viewport, 900x700 logical px @ scale factor 2.0 | 4x3 = 12 tiles = 9 MiB |
+| New tiles per pan step | ~1-2 visible (one new row or column) + ~1-2 prefetched ring cells |
 | Tiles re-rendered per zoom step | 4-12 (the whole viewport, but nothing else) |
-| Cache ceiling (64 MiB bitmap budget) | ~128 MiB resident including GPU copies |
-| Total worst case | ~215 MB, vs 474 MB measured today |
-| A0 @ 6400% | ~215 MB (scale-invariant) vs 125 GiB full-page |
+| Cache ceiling (64 MiB bitmap budget) | ~64 MiB resident, since the Slint copy is 3 bytes too |
+| Base layer per page | ~2.3 MiB (1024 px long side, RGB8) |
+| Measured plateau, default configuration | 12 MiB of cache, `ws` 160.4 MiB median, `peak_ws` 192.7 MiB |
+| A0 @ 6400% | scale-invariant, vs 125 GiB for a full-page buffer |
+
+**The memory target is one metric: the process working set.** `WorkingSetSize`, the number a task
+manager shows and the one `docs/benchmarks.md` §7.6 samples every 250 ms as `ws` / `peak_ws`. The
+target is **`peak_ws` <= 250 MiB while panning the A0 at 6400% in the default configuration**, and
+the measured result is **192.7 MiB**, with no growth across 19 zoom steps and a 296-step pan (§7.6).
+Two things are not claimed. The 250 MiB ceiling is a property of the default configuration, not of
+every configuration: §7.6's run B raises the row count so the 64 MiB budget can bind and measures
+`peak_ws` 267.3 MiB, over the target. And the cache explains only 12 MiB of that 160 MiB plateau:
+the process sits about 75 MiB above its own empty baseline (84.9 MiB `ws`) with the default cache,
+and an earlier framing of this target - "tiling costs at most +50 MiB over the baseline" - is
+**not** met by that measurement. Where the rest goes (MuPDF's store, the display list, the
+allocator, committed-but-unresident pages) is not explained here: `docs/backlog.md` tracks it as
+investigation, and the target above is stated against the metric that was measured.
 
 Per-tile raster cost extrapolated from the A0 measurements (541 ms for 128.5 M px at 400%,
 about 4.2 ns/px) is ~1.1 ms of pixel work per tile, plus a small fixed cost per tile for
@@ -598,12 +655,18 @@ Steps:
   current-scale ones; a desired (visible) tile is never evicted; the model never exceeds its
   capacity and `insert` on a full model returns `None` instead of panicking; a duplicate or
   stale arrival is ignored.
+- `core`, **prefetch ring** (Phase 2): a prefetched tile is cached but not visible, and is
+  evictable like any other hidden tile; the ring takes only the rows the visible set does not
+  claim; it advances on a full cache by taking rows the old ring held; and a ring tile that
+  arrives after the ring moved on is cached rather than counted as stale.
 - `core`, **rapid zoom**: 20 zoom-in steps in one simulated second
   (`update_view` + `insert` for each step, no waiting) must keep the cache within budget, keep
   the pending set bounded, never exceed the model capacity, and never panic. This is the
   in-process stand-in for the 20-clicks-in-1-second GUI test.
 - `engine-mupdf`: `render_tile` returns exact bitmap dimensions for a full tile and for a
-  clamped edge tile, with non-blank content, and the returned stride is `width * 4`.
+  clamped edge tile, with non-blank content, an RGB8 buffer of `width * height * 3` bytes
+  (`stride == width * 3`), and white paper in the cell's corner - which is what makes dropping
+  the alpha channel safe.
 - `engine-mupdf`, **identity test**: reassembling all tiles of `large_200p.pdf` page 0 at 100%
   by their raster rects reproduces `render_page` byte for byte, for every pixel, with no
   tolerance. This is the strongest form of the seam test at a scale where a full-page
@@ -613,12 +676,14 @@ Steps:
   full-page `render_page`, allowing a small antialiasing tolerance. This is the test that
   catches a wrong CTM or a missing bleed.
 - `engine-mupdf`, **A0 @ 6400% acceptance** (approved decision 1): the grid is 298 x 422 cells;
-  rendering a 3x3 block of tiles about the page centre must (a) succeed, (b) be deterministic
+  rendering a 2x2 block of tiles on a grid crossing must (a) succeed, (b) be deterministic
   (rendering the same tile twice is byte-identical), (c) stay consistent with an independent
   reference produced by `Page::run` into a pixmap for the same region, and (d) show no jitter
-  at the tile boundaries. If (c)/(d) fail, the plan's fallback is a per-page maximum virtual
-  extent as a precision guard, *not* a lower zoom ceiling; the measurement is recorded either
-  way.
+  at the tile boundaries. The block sits on a crossing (`1100 pt` and `1600 pt`, ~70,000 device
+  px in) rather than on the page centre: the centre is inside one of the fixture's 100 pt cells,
+  and a block of white paper would compare two blank buffers and prove nothing. If (c)/(d) fail,
+  the plan's fallback is a per-page maximum virtual extent as a precision guard, *not* a lower
+  zoom ceiling; the measurement is recorded either way.
 - `just check` clean (`fmt-check`, `lint`, `test`, `deny`, `reuse`).
 
 **Manual acceptance**
@@ -660,8 +725,9 @@ bury:
    it is a one-off MuPDF initialization, the same phenomenon Phase 0 recorded at A0 100%
    (4.3 s). Tiling neither causes nor fixes it; it is now measured in `benchmarks.md` §7.2.
 2. **The viewport-derived row capacity binds before the byte budget** for a normal window
-   (16 rows = 16 MiB against a 64 MiB budget), so the budget is the safety net for large or
-   high-DPI windows rather than the everyday bound (§4.6, §6).
+   (16 rows = 16 MiB against a 64 MiB budget, and 12 MiB now that tiles are RGB8, §7.6), so the
+   budget is the safety net for large or high-DPI windows rather than the everyday bound
+   (§4.6, §6).
 3. `PageSize` gained the page **origin**, because the app needs it to build `PageGeometry` and
    `all_page_sizes` was dropping it. Required by amendment 3, and reused by Plan 0002.
 4. The app was smoke-run (A0 fixture): no panic, and it settles at 137 MB RSS / 0.21% idle CPU,
@@ -682,14 +748,66 @@ status bar exist for exactly those checks.
   threads, one `Document` per thread (MuPDF's `fz_context` is thread-local), sharing the
   display list as `Arc<DisplayList>` (`DisplayList: Send + Sync`). Required test: a
   parallel render of a tile set is **pixel-identical** to the serial result, tile by tile.
+  Done in `pool_test.rs`: every cell of the Letter page's 8x10 grid plus an A0 sample, compared
+  byte for byte against `MupdfEngine::render_tile`, and the tiles delivered *during* a
+  cancellation compared the same way.
 - **Low-res base layer** (moved here): a single stretched bitmap of the page for the frame
   during which the new scale's tiles are still in flight.
 - **Cookie**: answered in §3.3 — the patched crate already exposes `Cookie::abort()` and
   `DisplayList::run_with_cookie`, so a worker check inside `render_tile` can abort a stale
   in-flight tile in the middle of a raster instead of completing and discarding it. Use the
-  epoch as the abort signal; report the measured time-to-abort.
-- Acceptance: pan the A0 fixture at 6400% for 30 s; RSS plateau holds, no visible blank tiles
-  after the first frame of a pan step, and a zoom during heavy panning aborts stale tiles.
+  epoch as the abort signal; report the measured time-to-abort. Implemented; the honest reading
+  of "time-to-abort" is that it is bounded by the *node* the rasterizer is inside, not by a fixed
+  ceiling, because MuPDF tests the cookie at node boundaries — a page of small nodes aborts in well
+  under a millisecond, while one expensive node cannot be interrupted until it ends. Reported as
+  `EngineEvent::TileAborted`; `abort_latency_on_a_heavy_tile` measures both shapes rather than
+  asserting a ceiling, which only the fine-grained case can meet.
+- **Prefetch ring**: the app requests the cells one tile outside the viewport after the visible
+  ones, so a pan finds the column it uncovers already rendered; the scheduler keeps them hidden
+  and evictable (`TileScheduler::prefetch`, §4.5) and asks for nothing once the cache holds its
+  budget. Done: `docs/benchmarks.md` §7.6 measures **0 hole frames** over a 296-step pan against
+  241 of 296 with the ring blocked, and ~3x the tile rasters at the default row count, which is
+  the trade the note on `AppState::ring` records.
+- Acceptance: pan the A0 fixture at 6400% for 30 s; *working-set* plateau holds within the §4.9
+  target, no visible blank tiles after the first frame of a pan step, and a zoom during heavy
+  panning aborts stale tiles.
+
+**Phase 2 results (closed)**
+
+Every item above is implemented and tested, and the acceptance run has been made as a release
+build in a real window through the `--bench-*` harness. `just check`'s equivalent is clean
+(`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`; 28 `pdf-core`, 5 `app`, and 2 + 5 + 5 + 6 `engine-mupdf` tests).
+
+| Evidence (`cargo test -p engine-mupdf --test pool_test`) | Result |
+| :--- | :--- |
+| Pool vs serial, Letter @ 6400% (all 80 cells) and an A0 sample | byte-identical, 0 differing bytes |
+| A superseded epoch, Letter @ 6400% | queued tiles dropped; in-flight rasters aborted, latency 0 ms |
+| An epoch cancelled before its dispatch | 0 deliveries, 0 aborts, 0 strays; the control batch delivered 80/80 |
+| Abort latency, `large_format_a0.pdf` @ 6400% (tile 0.9 ms serially) | worst 0 ms |
+| Abort latency, `dense_vector.pdf` @ 6400% (one node, tile 24 ms serially) | worst 48 ms |
+
+The last row is the point of the measurement rather than an exception: the cookie is tested between
+nodes, so a page whose content is one expensive node bounds the delay, and the abort lands when that
+node ends whether or not the epoch is already gone.
+
+The RSS half of the acceptance item is measured in `docs/benchmarks.md` §7.6: a 250 ms sampler, the
+cache's row ceiling told apart from its byte budget, and the A0 at 6400% panned to the page edge at
+three configurations. Against the §4.9 target - `peak_ws` <= 250 MiB in the default configuration -
+the measured result is **192.7 MiB**, the cache plateau follows whichever ceiling is lower (12 MiB of
+rows by default, 63.8 MiB of the 64 MiB budget when the rows are raised, 7.5 MiB of 8), and the pan
+shows no hole frames. §7.6's table is that half of the acceptance; the app-level gate run is §7.5.
+
+The other half - zoom and pan driven through the real window - is `docs/benchmarks.md` §7.5,
+re-measured on the pooled, RGB8, ring build. Settled zoom steps and six-step bursts land in 1-3 ms
+`t_blank`, with the *whole-viewport* wait (`t_full`) down from a pre-pool worst of 22 ms to 9 ms on
+the A0; panning reports **0 hole frames** at 3900 and 24700 px/s where the pre-ring build reported
+3, 9 and 13; `abort_ms` never exceeds 2 ms on any run that sampled one (0 ms in the interrupted-open
+run's three aborts, 2 ms worst across the five repeats); running the burst five times per process
+passes all five. Its single FAIL is a zoom burst fired while the document's own first
+render is still running (714 ms, inside the pre-pool 124-929 ms envelope): the pool parallelizes
+tile rasters, not the display-list build, so that one-off is unmoved, and it is the item Phase 3's
+stretched level exists to cover. Nothing else on this phase's list is open.
 
 ### Phase 3 - Zoom UX and tile pyramid
 
@@ -705,7 +823,8 @@ status bar exist for exactly those checks.
 | :--- | :--- | :--- |
 | Wrong CTM/scissor composition produces shifted or blank tiles | High, silent | The scratch device transform is the identity and the scissor is post-CTM, both verified in source (§3.3); the tile-identity test and the seam test pin it down |
 | Visible 1 px seams between tiles | Medium, cosmetic | Bleed band of 2 px, cropped after rasterizing (§4.3) |
-| Each live tile costs 2x its bytes (CPU + GPU) | Medium | Byte-budgeted cache; documented in §3.2 |
+| Each live tile costs 2x its bytes (CPU + GPU) | Medium | Byte-budgeted cache; documented in §3.2 (768 KiB a side since the RGB8 change) |
+| The prefetch ring renders tiles the model cannot hold | Low, CPU only | The ring is hidden and evictable, so it costs no memory and is not counted as a hole; §7.6 measures ~3x the tile rasters at the default row count against 0 hole frames, and `AppState::ring` records the upgrade path (a direction-weighted ring) |
 | Programmatic `content-x/y` writes re-enter `viewport_moved` | Medium | Re-entrancy guard; `update_view` is idempotent, so a second pass over the same set emits no requests |
 | `core`'s `fz_round_rect` replication drifts from MuPDF by 1 px | Low, layout shift only | The engine validates the real bbox size against `PageGeometry::device_size()` and fails the tile loudly; an `engine-mupdf` test compares both for every fixture and scale |
 | Deep zoom gives f32 sub-pixel jitter (A0 @ 6400%) | Medium | Measured deterministically against an independent `Page::run` reference by the A0 @ 6400% acceptance test; the agreed fallback is a per-page maximum virtual extent, not a lower ceiling |
@@ -723,6 +842,11 @@ status bar exist for exactly those checks.
 - **No parallel tile rendering in Phase 1.** It needs one document per thread under MuPDF's
   thread-local contexts, and ADR 0003 already documents this as a deferred concern; amendment 6
   moves it to Phase 2, where the abort path (Cookie) is available too.
+- **No direction-aware prefetch ring.** The ring requests one tile on *every* side of the
+  viewport, so a pan also pays for the tile it is not moving towards (§4.9, §6). One ring for all
+  directions is what makes `prefetch` a pure function of the viewport rect - no travel history, no
+  extra state - and it is the version §7.6 measured; a ring weighted by the last movement is the
+  upgrade path if the extra rasters ever matter more than the blank frames they remove.
 - **No scrollbars in Phase 1.** This plan deliberately replaces `ScrollView` with `Flickable` to
   own the content extent. A scrollbar is only another writer of `content-x/y`, so it adds no new
   tracking path (amendment 1); add one in Phase 3 if the UX needs it.

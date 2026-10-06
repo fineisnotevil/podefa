@@ -71,8 +71,8 @@ cargo run -p app
 ## Repository Structure
 
 - `crates/core`: Engine-agnostic domain traits (`PdfEngine`, `Command`) and geometry/buffer types (`Rect`, `Bitmap`), plus the pure tile geometry (`tiling`) and tile cache/request scheduler (`scheduler`). Free of UI or engine dependencies.
-- `crates/engine-mupdf`: Implementation of `PdfEngine` wrapping MuPDF, including tiled rendering.
-- `crates/app`: Declarative desktop frontend powered by Slint.
+- `crates/engine-mupdf`: Implementation of `PdfEngine` wrapping MuPDF, including tiled rendering on a worker pool (`clamp(cores - 1, 1, 4)` threads), epoch cancellation through MuPDF's cancel cookie, and a low-resolution base layer per page for the frames while a new scale's tiles are in flight.
+- `crates/app`: Declarative desktop frontend powered by Slint, plus a `--bench-*` harness that drives zoom and pan through the real window and reports per-phase blank-frame and process-memory traces (`docs/benchmarks.md` §7.5-7.6).
 
 ## Licensing
 

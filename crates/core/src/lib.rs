@@ -18,8 +18,9 @@ pub mod tiling;
 
 pub use scheduler::{TileAction, TileScheduler};
 pub use tiling::{
-    PageGeometry, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileKey, TileRect, ZOOM_MAX_MILLI,
-    ZOOM_MIN_MILLI, clamp_zoom_milli, scale_from_milli, zoom_anchor, zoom_in_milli, zoom_out_milli,
+    BASE_LONG_PX, PageGeometry, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileKey, TileRect,
+    ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli, clamp_zoom_milli, scale_from_milli,
+    zoom_anchor, zoom_in_milli, zoom_out_milli,
 };
 
 /// 2D floating-point rectangle representing coordinates and dimensions.
@@ -46,15 +47,31 @@ impl Rect {
 /// Pixel format representation for rasterized buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
-    Rgba8,
+    /// Opaque 8-bit RGB, 3 bytes per pixel.
+    ///
+    /// Every raster this workspace produces is opaque: MuPDF clears an alpha-free pixmap to
+    /// `0xff`, so the page is white paper, and an alpha channel would spend a quarter of every
+    /// cached tile on a byte that is always `255`.
+    Rgb8,
+}
+
+impl PixelFormat {
+    /// Bytes one pixel occupies in a tightly packed buffer: what `Bitmap::stride` equals for a
+    /// row of `width` pixels.
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Rgb8 => 3,
+        }
+    }
 }
 
 /// In-memory bitmap containing raw rasterized pixels.
 ///
 /// # Pixel format
 ///
-/// Pixel data is in **non-premultiplied RGBA8** format (4 bytes per pixel: R, G, B, A).
-/// Slint natively consumes non-premultiplied RGBA8.
+/// Pixel data is in **opaque RGB8** format (3 bytes per pixel: R, G, B), tightly packed:
+/// `stride == width * [`PixelFormat::bytes_per_pixel`]`. Slint consumes it as an `Rgb8Pixel`
+/// buffer, so the pixels are copied into a Slint image once and never converted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitmap {
     pub width: u32,
@@ -98,6 +115,20 @@ pub enum EngineCmd {
         row: i32,
         request_id: RequestId,
     },
+    /// Render the low-resolution base layer of one page (Plan 0001, §5 Phase 2).
+    ///
+    /// `scale_milli` is the page's *base* scale (see [`base_scale_milli`]), not a zoom level: the
+    /// base layer is one raster of the whole page that every zoom level stretches, so a page needs
+    /// it once. It is rendered as soon as the document is opened and again on a page change.
+    ///
+    /// Unlike a tile, base work is never cancelled: it belongs to a page rather than to a zoom
+    /// level, so superseding an epoch must not drop it. `request_id` names the epoch it was asked
+    /// under, which the receiver can report but must not use to reject a result.
+    RenderBase {
+        page: u32,
+        scale_milli: u32,
+        request_id: RequestId,
+    },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -139,6 +170,24 @@ pub enum EngineEvent {
         request_id: RequestId,
         bitmap: Bitmap,
     },
+    /// The low-resolution base layer of a page (Plan 0001, §5 Phase 2).
+    ///
+    /// The bitmap covers the page's whole raster rect at `scale_milli`, so the receiver stretches
+    /// it to whatever extent the page currently has. It is *not* stale by epoch - one raster serves
+    /// every zoom of its page - so the receiver validates it by `page` instead.
+    BaseRendered {
+        page: u32,
+        scale_milli: u32,
+        request_id: RequestId,
+        bitmap: Bitmap,
+    },
+    /// A tile was aborted mid-raster because its epoch had been superseded (Plan 0001, §5 Phase 2).
+    ///
+    /// `ms` is the measured time from the abort signal to the rasterizer noticing it, which is the
+    /// number the Phase 2 gate reports. No pixels follow: the receiver has nothing to draw. The pool
+    /// reports this from its own abort registry, because a display list stopped by the cancel cookie
+    /// returns as normally as one that ran to the end.
+    TileAborted { request_id: RequestId, ms: u64 },
     /// An error occurred.
     Error { message: String },
 }
@@ -195,12 +244,15 @@ mod tests {
 
     #[test]
     fn test_bitmap_creation() {
-        let b = Bitmap::new(2, 2, 8, PixelFormat::Rgba8, vec![0; 16]);
+        let b = Bitmap::new(2, 2, 6, PixelFormat::Rgb8, vec![0; 12]);
         assert_eq!(b.width, 2);
         assert_eq!(b.height, 2);
-        assert_eq!(b.stride, 8);
-        assert_eq!(b.format, PixelFormat::Rgba8);
-        assert_eq!(b.data.len(), 16);
+        assert_eq!(b.stride, 6);
+        assert_eq!(b.format, PixelFormat::Rgb8);
+        assert_eq!(b.data.len(), 12);
+        // The stride every producer writes is this, and the tests that blit tiles into a
+        // full-page canvas read it from here rather than repeating the `3`.
+        assert_eq!(PixelFormat::Rgb8.bytes_per_pixel(), 3);
     }
 
     #[test]

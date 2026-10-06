@@ -11,20 +11,24 @@
 use engine_mupdf::EngineHandle;
 use pdf_core::{
     Bitmap, EngineCmd, EngineEvent, PageGeometry, PageSize, TILE_SIZE_PX, TileAction, TileKey,
-    TileScheduler, ZOOM_DEFAULT_MILLI, ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, zoom_anchor, zoom_in_milli,
-    zoom_out_milli,
+    TileScheduler, ZOOM_DEFAULT_MILLI, ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli,
+    zoom_anchor, zoom_in_milli, zoom_out_milli,
 };
 use slint::{
-    ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
+    ComponentHandle, Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel,
 };
 use std::cell::{Cell, RefCell};
 use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
+
+/// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001, Phase 2 gate).
+mod bench;
 
 slint::slint! {
     import { Button } from "std-widgets.slint";
@@ -52,6 +56,11 @@ slint::slint! {
         in-out property <[TileView]> tiles;
         in-out property <length> page-w: 0px;
         in-out property <length> page-h: 0px;
+
+        // The whole page at its base scale, stretched over the full page extent and drawn under
+        // the tiles (Plan 0001, §5 Phase 2). Empty until the base layer arrives, and drawn under
+        // tiles at every zoom level, so a zoom shows a coarse page instead of blank cells.
+        in-out property <image> base-image;
 
         // Read side: the Flickable pushes its position and size here on every change, so Rust
         // never has to rely on `flicked` (user input only, once per wheel animation).
@@ -172,6 +181,13 @@ slint::slint! {
                     changed width  => { root.view-w = viewport.width;  root.viewport_moved(); }
                     changed height => { root.view-h = viewport.height; root.viewport_moved(); }
 
+                    // Declared before the tiles so it paints under them: every tile that is on
+                    // screen covers its own cell of this, and cells still in flight show it.
+                    Image {
+                        source: root.base-image;
+                        x: 0px; y: 0px; width: root.page-w; height: root.page-h;
+                    }
+
                     for tile in root.tiles : Image {
                         source: tile.image;
                         visible: tile.visible;
@@ -216,16 +232,25 @@ slint::slint! {
     }
 }
 
-/// Spare model rows above the strictly visible tile count, so a one-tile pan does not have to
-/// evict anything.
+/// Spare model rows above the strictly visible tile count: the one-tile ring the prefetch
+/// requests, so a one-tile pan finds its next column already rendered instead of blank.
 const TILE_MARGIN_RING: usize = 2;
 
 /// Model capacity: viewport size x tile size, plus a margin ring.
 ///
 /// This bound depends only on the window and the device scale factor - never on the page extent
 /// or the zoom level, because a bigger page or a deeper zoom shows the same number of tiles
-/// (Plan 0001, §4.6).
+/// (Plan 0001, §4.6), and it is exactly the visible cells plus the ring `ring` requests.
+/// `--cache-rows` replaces it; see the comment in the body.
 fn tile_capacity(view_w_device: f32, view_h_device: f32) -> usize {
+    // The row count is the cache's *real* ceiling: the scheduler never holds more tiles than it
+    // has rows, so a window-sized viewport caps the cache near its own tile count and the byte
+    // budget above that can never bind. A memory run that has to see the budget bind asks for the
+    // rows it needs (`--cache-rows`); the override is read here rather than passed in, because
+    // this function is what both the startup model and `ensure_capacity` size themselves with.
+    if let Some(rows) = bench::cache_rows() {
+        return rows.max(4);
+    }
     let cols = (view_w_device / TILE_SIZE_PX as f32).ceil().max(1.0) as usize;
     let rows = (view_h_device / TILE_SIZE_PX as f32).ceil().max(1.0) as usize;
     ((cols + TILE_MARGIN_RING) * (rows + TILE_MARGIN_RING)).max(4)
@@ -243,6 +268,17 @@ fn empty_tile() -> TileView {
     }
 }
 
+/// A rendered [`Bitmap`] as a Slint image: one copy into a shared pixel buffer, which Slint then
+/// uploads once. It may be called from the event-loop thread, where Slint's image types live.
+///
+/// `Rgb8Pixel`, not an RGBA expansion: the tiles are opaque, so the pixels stay 3 bytes each in
+/// the model and in the upload instead of growing by a quarter on the way in.
+fn to_image(bitmap: &Bitmap) -> Image {
+    let mut buffer = SharedPixelBuffer::<Rgb8Pixel>::new(bitmap.width, bitmap.height);
+    buffer.make_mut_bytes().copy_from_slice(&bitmap.data);
+    Image::from_rgb8(buffer)
+}
+
 /// Everything the UI thread needs to turn a viewport into tiles.
 struct AppState {
     cmd_tx: Sender<EngineCmd>,
@@ -255,6 +291,8 @@ struct AppState {
     model: Rc<VecModel<TileView>>,
     scale_factor: f32,
     rendered: i32,
+    /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
+    bench: bench::Trace,
 }
 
 impl AppState {
@@ -283,20 +321,66 @@ impl AppState {
         )
     }
 
-    /// Diffs the live viewport against the cache and applies the result.
-    fn refresh(&mut self, ui: &MainWindow) {
+    /// The tile cells the live viewport actually shows: what `refresh` diffs against, and what the
+    /// trace counts holes over. Empty when there is no page or no viewport yet.
+    fn visible(&self, ui: &MainWindow) -> Vec<TileKey> {
         let Some(geo) = self.geometry() else {
-            return;
+            return Vec::new();
         };
         let view = self.view_rect(ui);
         if view.width <= 0.0 || view.height <= 0.0 {
+            return Vec::new();
+        }
+        geo.visible_cells(view)
+            .map(|(c, r)| geo.key(c, r))
+            .collect()
+    }
+
+    /// The prefetch ring: the same viewport grown by one tile on every side.
+    ///
+    /// These cells are requested but never *visible*: the scheduler holds them as ordinary
+    /// evictable entries, so a one-tile pan finds the column it uncovers already rendered - the
+    /// single-frame gaps `docs/benchmarks.md` §7.5 measures - and a budget that cannot hold them
+    /// simply evicts them again. Requested after the visible cells, so it cannot delay them.
+    ///
+    /// ponytail: one ring for every direction of travel, so a pan pays for the ring it is not
+    /// moving towards. At the default row count the model holds the visible cells plus only some
+    /// of the ring, so ring cells that never become visible are rendered and evicted again:
+    /// `docs/benchmarks.md` §7.6 run A renders 1937 tiles for a sweep that rendered 601 before the
+    /// ring existed. The measured effect on what the user sees is the other way round - 0 hole
+    /// frames against 241 - and the upgrade path is a ring weighted by the direction the viewport
+    /// last moved in (or a row count with room for the whole ring).
+    fn ring(&self, ui: &MainWindow) -> Vec<TileKey> {
+        let Some(geo) = self.geometry() else {
+            return Vec::new();
+        };
+        let view = self.view_rect(ui);
+        if view.width <= 0.0 || view.height <= 0.0 {
+            return Vec::new();
+        }
+        let tile = TILE_SIZE_PX as f32;
+        geo.visible_cells(pdf_core::Rect::new(
+            view.x - tile,
+            view.y - tile,
+            view.width + 2.0 * tile,
+            view.height + 2.0 * tile,
+        ))
+        .map(|(c, r)| geo.key(c, r))
+        .collect()
+    }
+
+    /// Diffs the live viewport against the cache and applies the result.
+    fn refresh(&mut self, ui: &MainWindow) {
+        let visible = self.visible(ui);
+        if visible.is_empty() {
             return;
         }
-        let desired: Vec<TileKey> = geo
-            .visible_cells(view)
-            .map(|(c, r)| geo.key(c, r))
-            .collect();
-        let actions = self.scheduler.update_view(&desired, self.scale_milli);
+        // Visible cells first, then the ring: the pool's queue is FIFO, so the tiles on screen
+        // rasterize before the ones that are only candidates for the next pan step.
+        let ring = self.ring(ui);
+        let mut actions = self.scheduler.update_view(&visible, self.scale_milli);
+        actions.extend(self.scheduler.prefetch(&ring));
+        self.bench.frame(&self.scheduler, &visible, &ring);
         self.apply(ui, actions);
     }
 
@@ -382,6 +466,25 @@ impl AppState {
         });
     }
 
+    /// Asks the engine for the low-resolution base layer of the page on screen (Plan 0001, §5
+    /// Phase 2).
+    ///
+    /// The base layer is a page property, not a level one: one raster serves every zoom of that
+    /// page, so this is called once per page - on open and on a page change - rather than on a zoom
+    /// step. The epoch it carries is the one in flight, but no `Cancel` can reach it: the pool only
+    /// registers tiles as abortable, so a zoom during panning cannot blank the page it was supposed
+    /// to cover.
+    fn request_base(&mut self) {
+        let Some(size) = self.page_sizes.get(self.page as usize) else {
+            return;
+        };
+        let _ = self.cmd_tx.send(EngineCmd::RenderBase {
+            page: self.page,
+            scale_milli: base_scale_milli(size.width.max(size.height)),
+            request_id: self.current_epoch.load(Ordering::Relaxed),
+        });
+    }
+
     /// A tile arrived: cache it and put it on screen.
     fn apply_tile(&mut self, ui: &MainWindow, key: &TileKey, bitmap: &Bitmap) {
         let outcome = self.scheduler.insert(*key, bitmap.data.len());
@@ -390,9 +493,7 @@ impl AppState {
             return;
         };
 
-        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(bitmap.width, bitmap.height);
-        buffer.make_mut_bytes().copy_from_slice(&bitmap.data);
-        let image = Image::from_rgba8(buffer);
+        let image = to_image(bitmap);
 
         // Only show it if it is still part of the viewport; otherwise it waits in the cache.
         let visible = self.scheduler.is_visible(key);
@@ -401,6 +502,24 @@ impl AppState {
         self.rendered += 1;
         ui.set_tiles_rendered(self.rendered);
         ui.set_is_loading(false);
+        let visible = self.visible(ui);
+        self.bench.tile(&self.scheduler, &visible);
+    }
+
+    /// The base layer arrived: stretch it under the tiles of the page it belongs to.
+    ///
+    /// A base layer *is* the page, so it is accepted whenever it is the page the user is on: it
+    /// stays valid across every zoom of that page, which is the whole point of having it.
+    fn apply_base(&mut self, ui: &MainWindow, page: u32, bitmap: &Bitmap) {
+        if page != self.page {
+            return;
+        }
+        ui.set_base_image(to_image(bitmap));
+    }
+
+    /// Drops the base layer, for a page change: it describes the page that just left the screen.
+    fn clear_base(&self, ui: &MainWindow) {
+        ui.set_base_image(Image::default());
     }
 
     /// Drops every row and its pixels, for a page change or a model resize.
@@ -437,6 +556,7 @@ impl AppState {
         self.scheduler = TileScheduler::new(needed, budget);
         self.model = Rc::new(VecModel::from(vec![empty_tile(); needed]));
         ui.set_tiles(ModelRc::from(self.model.clone()));
+        self.bench.model_rebuilt(needed);
     }
 
     /// Publishes the page extent and the zoom readout, without re-entering `viewport_moved`.
@@ -461,8 +581,11 @@ impl AppState {
         self.rendered = 0;
         ui.set_tiles_rendered(0);
         ui.set_tiles_requested(0);
+        self.bench.level_changed(ZOOM_DEFAULT_MILLI, "open");
         self.begin_epoch();
         self.release_all(ui);
+        self.clear_base(ui);
+        self.request_base();
         self.update_extent(ui);
         with_programmatic_guard(|| {
             ui.set_scroll_x(0.0);
@@ -478,8 +601,11 @@ impl AppState {
         }
         self.page = page;
         ui.set_current_page(page as i32);
+        self.bench.level_changed(self.scale_milli, "page");
         self.begin_epoch();
         self.release_all(ui);
+        self.clear_base(ui);
+        self.request_base();
         self.update_extent(ui);
         with_programmatic_guard(|| {
             ui.set_scroll_x(0.0);
@@ -501,6 +627,7 @@ impl AppState {
         let new_offset_y = zoom_anchor(old_offset_y, anchor_y * sf, self.scale_milli, new_milli);
 
         self.scale_milli = new_milli;
+        self.bench.level_changed(new_milli, "zoom");
         // The old scale's tiles stay cached: only the in-flight requests belong to a dead epoch.
         self.begin_epoch();
 
@@ -572,6 +699,25 @@ fn viewport_center(ui: &MainWindow) -> (f32, f32) {
 fn main() -> Result<(), slint::PlatformError> {
     let main_window = MainWindow::new()?;
 
+    // `--bench-*` flags script a run; `FA_PDF_TRACE=1` records one by hand. Both are inert
+    // otherwise, and neither belongs in CI: every number here is machine-specific.
+    let args: Vec<String> = env::args().collect();
+    let (path, cfg) = bench::parse_args(&args);
+    let trace_on = bench::trace_enabled() || !cfg.is_empty();
+    // The two memory knobs describe the scheduler the app builds, not the run: `--cache-mib 8`
+    // alone is a valid experiment (trace it by hand with `FA_PDF_TRACE=1`), and neither flag
+    // starts one. `--cache-rows` is read where the model is sized, so it covers the rebuild
+    // `ensure_capacity` does as well.
+    let cache_bytes = cfg
+        .cache_bytes
+        .unwrap_or_else(pdf_core::scheduler::default_cache_bytes);
+    if let Some(rows) = cfg.cache_rows {
+        bench::set_cache_rows(rows);
+    }
+    // The `Opened` handler runs on the UI thread inside a `Send` closure, so the run's config
+    // crosses over in a shared cell and is taken by the first open.
+    let bench_cfg = Arc::new(Mutex::new((!cfg.is_empty()).then_some(cfg)));
+
     // Spawn engine actor
     let (engine, event_rx) = EngineHandle::spawn();
     let cmd_tx = engine.sender().clone();
@@ -594,21 +740,31 @@ fn main() -> Result<(), slint::PlatformError> {
             page_sizes: Vec::new(),
             page: 0,
             scale_milli: ZOOM_DEFAULT_MILLI,
-            scheduler: TileScheduler::new(capacity, pdf_core::scheduler::default_cache_bytes()),
+            scheduler: TileScheduler::new(capacity, cache_bytes),
             model: model.clone(),
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
+            bench: bench::Trace::new(trace_on),
         });
     });
 
     // Engine events are applied on the UI thread; a tile from a superseded epoch is dropped
     // before it reaches the scheduler.
     let weak = main_window.as_weak();
+
+    // The memory sampler starts here rather than at the first document: the resident set before
+    // anything is open is the baseline a plateau is read against, and on a `--bench-*` run it also
+    // covers the document's own first render.
+    if trace_on {
+        bench::start_sampler();
+    }
     let epoch_for_events = Arc::clone(&current_epoch);
+    let bench_for_events = Arc::clone(&bench_cfg);
     thread::spawn(move || {
         while let Ok(event) = event_rx.recv() {
             let weak = weak.clone();
             let epoch = Arc::clone(&epoch_for_events);
+            let bench_cfg = Arc::clone(&bench_for_events);
             let _ = weak.upgrade_in_event_loop(move |ui| match event {
                 EngineEvent::Opened {
                     page_count,
@@ -621,6 +777,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_is_loading(false);
                     ui.set_status_text(SharedString::from(format!("{page_count} pages")));
                     with_state(|state| state.set_document(&ui, page_sizes));
+                    // A scripted run starts on the open, so its first step is a real zoom or pan
+                    // rather than a no-op against an empty document.
+                    if let Some(cfg) = bench_cfg.lock().unwrap().take() {
+                        bench::start(&ui, cfg);
+                    }
                 }
                 EngineEvent::TileRendered {
                     key,
@@ -631,6 +792,14 @@ fn main() -> Result<(), slint::PlatformError> {
                         return;
                     }
                     with_state(|state| state.apply_tile(&ui, &key, &bitmap));
+                }
+                EngineEvent::BaseRendered { page, bitmap, .. } => {
+                    // No epoch guard: a base layer belongs to a page, not to a zoom level, and it
+                    // arrives while the epoch it was requested under is already superseded.
+                    with_state(|state| state.apply_base(&ui, page, &bitmap));
+                }
+                EngineEvent::TileAborted { ms, .. } => {
+                    with_state(|state| state.bench.aborted(ms));
                 }
                 EngineEvent::Error { message } => {
                     ui.set_has_error(true);
@@ -714,8 +883,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     // CLI argument handling: open the file passed as the first argument.
-    let args: Vec<String> = env::args().collect();
-    if let Some(path_arg) = args.get(1) {
+    if let Some(path_arg) = path {
         let pdf_path = PathBuf::from(path_arg);
         main_window.set_status_text(SharedString::from(format!(
             "Opening '{}'...",
