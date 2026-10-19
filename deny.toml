@@ -13,6 +13,12 @@ targets = [
 ignore = [
     # ttf-parser is unmaintained upstream, pulled transitively by winit -> sctk-adwaita on Linux
     "RUSTSEC-2026-0192",
+    # zvariant, zvariant_derive and zbus_names are deprecated upstream (merged into zbus 6), pulled
+    # transitively on Linux by slint 1.18.1 -> accesskit_unix / ksni -> zbus 5. slint 1.18.1 is the
+    # latest release, so there is no upgrade to take yet; drop these once slint moves to zbus 6.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
