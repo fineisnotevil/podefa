@@ -122,15 +122,26 @@ pub enum MupdfError {
 /// - `scratch` is one `TILE_STRIDE_PX` square RGB8 pixmap, cleared per tile. It is allocated
 ///   with origin `(0, 0)`, which makes the draw device transform the identity, so device
 ///   coordinates and buffer coordinates coincide and the tile offset lives in the CTM.
-/// - `display_list` caches the page's display list, which is scale independent, so every zoom
-///   level of a page reuses one parse of its content. It is handed to the pool as an `Arc`, so one
-///   list per *page* serves every rasterizing thread at once.
+/// - `display_lists` caches the display lists of the last [`DISPLAY_LIST_CACHE_PAGES`] pages used,
+///   most recent last. A list is scale independent, so every zoom level of a page reuses one parse
+///   of its content, and it is handed to the pool as an `Arc`, so one list per *page* serves every
+///   rasterizing thread at once. Several entries because continuous scroll shows several pages at
+///   once: a one-page cache would rebuild each visible page's list every time a tile of the other
+///   one was requested (Plan 0002, §3.3).
 pub struct MupdfEngine {
     doc: Option<Document>,
     path: Option<PathBuf>,
     scratch: Option<Pixmap>,
-    display_list: Option<(u32, Arc<DisplayList>)>,
+    display_lists: Vec<(u32, Arc<DisplayList>)>,
 }
+
+/// Display lists kept per document: the pages near the viewport, plus room for the one the user
+/// just left (Plan 0002, §4.3).
+///
+/// Bounded by count, not bytes, because a list's size is not known yet (`docs/backlog.md` item 1
+/// investigates it); a page that is drawn as tiles is at least one tile tall, so a viewport shows
+/// only a handful, and smaller pages are one-tile jobs whose list is rebuilt cheaply if evicted.
+pub const DISPLAY_LIST_CACHE_PAGES: usize = 8;
 
 impl Default for MupdfEngine {
     fn default() -> Self {
@@ -145,7 +156,7 @@ impl MupdfEngine {
             doc: None,
             path: None,
             scratch: None,
-            display_list: None,
+            display_lists: Vec::new(),
         }
     }
 
@@ -184,9 +195,33 @@ impl MupdfEngine {
         self.doc = Some(doc);
         self.path = Some(path.to_path_buf());
         // A display list belongs to the document that produced it.
-        self.display_list = None;
+        self.display_lists.clear();
 
         Ok(count)
+    }
+
+    /// Every page's displayed size, never failing as a whole: a page whose bounds cannot be read
+    /// gets Letter, and its index is returned beside the table so the caller can say so.
+    ///
+    /// The actor used `all_page_sizes().unwrap_or_default()`, so one unreadable page emptied the
+    /// whole table and the app showed no document at all (Plan 0002, §3.3).
+    pub fn page_sizes_lenient(&self) -> (Vec<PageSize>, Vec<u32>) {
+        let count = self.page_count();
+        let mut sizes = Vec::with_capacity(count);
+        let mut failed = Vec::new();
+        for i in 0..count {
+            let rect = self.page_size(i).unwrap_or_else(|_| {
+                failed.push(i as u32);
+                Rect::new(0.0, 0.0, 612.0, 792.0)
+            });
+            sizes.push(PageSize {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            });
+        }
+        (sizes, failed)
     }
 
     /// Returns a list of all page dimensions in points.
@@ -317,7 +352,13 @@ impl MupdfEngine {
         self.prepare(&geometry)
     }
 
-    /// Returns the cached display list for a page, rebuilding it when the page changes.
+    /// Pages whose display list is cached, least recently used first.
+    pub fn display_list_pages(&self) -> Vec<u32> {
+        self.display_lists.iter().map(|(page, _)| *page).collect()
+    }
+
+    /// Returns the cached display list for a page, building it on a miss and evicting the least
+    /// recently used one beyond [`DISPLAY_LIST_CACHE_PAGES`].
     ///
     /// Display lists are scale independent, so one list serves every zoom level of a page and a
     /// zoom step re-interprets the page content not at all. The list comes back as an `Arc` because
@@ -328,25 +369,28 @@ impl MupdfEngine {
         page_index: u32,
         page: &mupdf::Page,
     ) -> Result<Arc<DisplayList>, MupdfError> {
-        let stale = self
-            .display_list
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != page_index);
-        if stale {
-            let list = page
-                .to_display_list(false)
+        if let Some(at) = self
+            .display_lists
+            .iter()
+            .position(|(cached, _)| *cached == page_index)
+        {
+            let entry = self.display_lists.remove(at);
+            let list = Arc::clone(&entry.1);
+            self.display_lists.push(entry);
+            return Ok(list);
+        }
+        let list = Arc::new(
+            page.to_display_list(false)
                 .map_err(|e| MupdfError::RenderFailed {
                     page_index: page_index as usize,
                     source: e,
-                })?;
-            self.display_list = Some((page_index, Arc::new(list)));
+                })?,
+        );
+        if self.display_lists.len() >= DISPLAY_LIST_CACHE_PAGES {
+            self.display_lists.remove(0);
         }
-        match &self.display_list {
-            Some((_, list)) => Ok(Arc::clone(list)),
-            None => Err(MupdfError::Backend(
-                "display list cache was not populated".to_string(),
-            )),
-        }
+        self.display_lists.push((page_index, Arc::clone(&list)));
+        Ok(list)
     }
 }
 
@@ -463,10 +507,11 @@ impl EngineHandle {
                         EngineCmd::Open { path, password } => {
                             match engine.open_document_with_password(&path, password.as_deref()) {
                                 Ok(page_count) => {
-                                    let page_sizes = engine.all_page_sizes().unwrap_or_default();
+                                    let (page_sizes, unsized_pages) = engine.page_sizes_lenient();
                                     let _ = event_tx.send(EngineEvent::Opened {
                                         page_count,
                                         page_sizes,
+                                        unsized_pages,
                                     });
                                 }
                                 Err(err) => {

@@ -769,13 +769,24 @@ fn main() -> Result<(), slint::PlatformError> {
                 EngineEvent::Opened {
                     page_count,
                     page_sizes,
+                    unsized_pages,
                 } => {
                     ui.set_has_error(false);
                     ui.set_error_text(SharedString::from(""));
                     ui.set_total_pages(page_count as i32);
                     ui.set_current_page(0);
                     ui.set_is_loading(false);
-                    ui.set_status_text(SharedString::from(format!("{page_count} pages")));
+                    // A page whose bounds could not be read is laid out as Letter; say so rather
+                    // than draw it at a size the document never had without a word.
+                    let status = if unsized_pages.is_empty() {
+                        format!("{page_count} pages")
+                    } else {
+                        format!(
+                            "{page_count} pages ({} with unreadable sizes, shown as Letter)",
+                            unsized_pages.len()
+                        )
+                    };
+                    ui.set_status_text(SharedString::from(status));
                     with_state(|state| state.set_document(&ui, page_sizes));
                     // A scripted run starts on the open, so its first step is a real zoom or pan
                     // rather than a no-op against an empty document.

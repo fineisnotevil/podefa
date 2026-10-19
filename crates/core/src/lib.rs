@@ -166,6 +166,9 @@ pub enum EngineEvent {
     Opened {
         page_count: usize,
         page_sizes: Vec<PageSize>,
+        /// Pages whose bounds could not be read; they are in `page_sizes` as Letter, so the
+        /// layout stays complete, and the receiver can tell the user which ones are guesses.
+        unsized_pages: Vec<u32>,
     },
     /// One tile has been rendered.
     ///

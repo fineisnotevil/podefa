@@ -351,3 +351,54 @@ fn a0_at_6400_percent_is_deterministic_and_precise() {
         "{differing} of {total} bytes differ"
     );
 }
+
+#[test]
+fn display_lists_are_kept_per_page_and_evicted_least_recently_used() {
+    // Plan 0002 §4.3: continuous scroll interleaves tiles of several visible pages, so the engine
+    // keeps one list per page instead of rebuilding a single slot on every switch.
+    let mut engine = MupdfEngine::new();
+    engine
+        .open_document(&fixture_path("large_200p.pdf"), None)
+        .expect("open");
+    let cap = engine_mupdf::DISPLAY_LIST_CACHE_PAGES as u32;
+
+    for page in [0, 1, 0, 1] {
+        engine
+            .render_tile(&geometry(&engine, page, 1_000), 0, 0)
+            .expect("tile");
+    }
+    assert_eq!(
+        engine.display_list_pages(),
+        vec![0, 1],
+        "interleaving rebuilt nothing"
+    );
+
+    for page in 0..cap + 2 {
+        engine
+            .render_tile(&geometry(&engine, page, 1_000), 0, 0)
+            .expect("tile");
+    }
+    engine
+        .render_tile(&geometry(&engine, 5, 1_000), 0, 0)
+        .expect("tile");
+    let pages = engine.display_list_pages();
+    assert_eq!(pages.len(), cap as usize, "bounded by count");
+    assert!(!pages.contains(&0) && !pages.contains(&1), "oldest evicted");
+    assert_eq!(
+        pages.last(),
+        Some(&5),
+        "a hit moves the page to most recent"
+    );
+}
+
+#[test]
+fn every_page_size_is_read_and_none_is_reported_missing() {
+    let mut engine = MupdfEngine::new();
+    engine
+        .open_document(&fixture_path("large_200p.pdf"), None)
+        .expect("open");
+    let (sizes, failed) = engine.page_sizes_lenient();
+    assert_eq!(sizes.len(), 200);
+    assert!(failed.is_empty());
+    assert_eq!((sizes[0].width, sizes[0].height), (612.0, 792.0));
+}
