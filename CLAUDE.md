@@ -116,7 +116,7 @@ Plan 0001 is closed (verified 2026-10-20 against the code, tests and docs):
 
 ## 7. What comes next
 
-**Plan 0002 — continuous multi-page scroll with page virtualization** (`docs/plans/0002-continuous-multipage-scroll.md`). Phase 0 (investigation and plan, no feature code) is the next task, then stop for approval.
+**Plan 0002 — continuous multi-page scroll with page virtualization** (`docs/plans/0002-continuous-multipage-scroll.md`). Phase 0 (investigation and plan, no feature code) is **done and at its gate** (2026-10-20): the plan's §9 lists the questions awaiting the maintainer; do not start Phase 1 before they are answered and recorded in its §0.
 
 Key questions for Phase 0:
 - **Coordinate precision:** Slint lengths are f32 (exact integers only up to ~16.7 M). A 1000-page document at 6400% is ~50 M px tall. Design exact scrolling at any zoom (e.g. f64 scroll offset in Rust with a bounded, re-anchored canvas window) without capping document height.

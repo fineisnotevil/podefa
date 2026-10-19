@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- `docs/plans/0002-continuous-multipage-scroll.md`: Phase 0 done and at its gate - verified findings (Slint's `f32` coordinates and the `Flickable`'s own scroll animations, what the single-page app does that continuous scroll cannot keep, page bounds already carrying rotation and crop box), a design (an exact integer layout in `core`, the document position in Rust over a re-anchored canvas window, tiled pages vs single page images for small pages, a display-list LRU, epochs across pages, a page-relative zoom anchor), phases with acceptance rows, and five questions for the approver. No feature code.
+- `crates/engine-mupdf/tests/page_sizes_bench.rs` (ignored, not in CI) and `docs/benchmarks.md` §8: reading every page size at open costs 7-13 us a page on generated 1,000-20,000-page documents (8-13 ms per 1,000 pages), and skipping the page load saves at most ~20%; the metrics the Plan 0002 runs will report are defined in §8.2 before any run.
 - Plan 0001 is closed through Phase 2; its Phase 3 (ctrl+wheel/pinch zoom, stretched second tile level) is deferred rather than cancelled, and Plan 0002 no longer waits on it.
 - `deny.toml` ignores RUSTSEC-2026-0370/0371/0372 (`zvariant`, `zvariant_derive`, `zbus_names` deprecated in favour of zbus 6), which reach the Linux build only through slint 1.18.1's zbus 5 dependency; slint 1.18.1 is the latest release, so there is no upgrade to take yet.
 - `CLAUDE.md`: agent guidance for this repository, REUSE-annotated.
