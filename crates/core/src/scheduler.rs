@@ -123,6 +123,24 @@ impl TileScheduler {
         self.capacity
     }
 
+    /// Adds model rows without dropping anything cached; a smaller `capacity` is ignored.
+    ///
+    /// Continuous scroll needs this where a page change used to rebuild the model: at a low zoom
+    /// many small pages are visible, each with at least one tile, so the visible-cell count depends
+    /// on the zoom and the page sizes, not only on the window (Plan 0002, §4.3). Growing keeps the
+    /// cache, so a zoom or a scroll that needs more rows never blanks the tiles already on screen.
+    pub fn grow(&mut self, capacity: usize) {
+        if capacity > self.capacity {
+            self.slots.resize(capacity, None);
+            self.capacity = capacity;
+        }
+    }
+
+    /// Keys of every cached tile, visible or not.
+    pub fn cached_keys(&self) -> impl Iterator<Item = &TileKey> {
+        self.entries.keys()
+    }
+
     /// Configured bitmap budget in bytes.
     pub fn cache_max_bytes(&self) -> usize {
         self.budget
@@ -464,6 +482,30 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn growing_keeps_every_cached_tile_and_adds_rows() {
+        let mut sched = TileScheduler::new(2, TILE_CACHE_MAX_BYTES);
+        let first = [key(0, 0, 1_000), key(1, 0, 1_000)];
+        sched.update_view(&first, 1_000);
+        insert_all(&mut sched, &first);
+        let slots: Vec<Option<usize>> = first.iter().map(|k| sched.slot_of(k)).collect();
+
+        sched.grow(4);
+        sched.grow(3); // shrinking is ignored
+        assert_eq!(sched.capacity(), 4);
+        assert_eq!(sched.cache_len(), 2);
+        assert_eq!(
+            first.iter().map(|k| sched.slot_of(k)).collect::<Vec<_>>(),
+            slots
+        );
+
+        let more = [first[0], first[1], key(0, 1, 1_000), key(1, 1, 1_000)];
+        let actions = sched.update_view(&more, 1_000);
+        assert_eq!(requests(&actions), more[2..].to_vec());
+        insert_all(&mut sched, &more[2..]);
+        assert_eq!(sched.cached_keys().count(), 4);
     }
 
     #[test]

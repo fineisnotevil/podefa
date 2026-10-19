@@ -24,7 +24,15 @@ below depends on it.
 
 ## 0. Gate record
 
-*Empty until the maintainer answers §9.*
+Phase 0 gate passed 2026-10-20. The maintainer approved every proposal in §9:
+
+| Question | Decision |
+| :--- | :--- |
+| 1. Scrolling model | `Flickable` with a re-anchored canvas window (§4.2); Rust-side scrolling stays the fallback if row E fails. |
+| 2. Level of detail | Tiled pages vs single page images for small pages (§4.3), with the engine's display-list LRU. |
+| 3. Layout defaults | Single column, pages centred, 8 logical px gap, open at **100%** (as today). |
+| 4. Ctrl+wheel | Moves into this plan's Phase 2; pinch and the stretched level stay in Plan 0001's deferred Phase 3. |
+| 5. Real-world documents | The maintainer will supply them separately; row G waits for them. |
 
 ## 1. Problem
 

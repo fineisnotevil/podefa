@@ -9,13 +9,19 @@
 //! - [`Bitmap`]: Raw pixel buffer for rendered pages.
 //! - [`EngineCmd`] and [`EngineEvent`]: Inter-thread messages for actor engines.
 //! - [`tiling`]: pure tile geometry, and [`scheduler`]: the pure tile cache/request policy.
+//! - [`layout`]: the continuous page layout and the canvas window (Plan 0002).
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+pub mod layout;
 pub mod scheduler;
 pub mod tiling;
 
+pub use layout::{
+    CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, PAGE_GAP_LOGICAL_PX, PageSlot,
+    REANCHOR_MARGIN_LOGICAL_PX,
+};
 pub use scheduler::{TileAction, TileScheduler};
 pub use tiling::{
     BASE_LONG_PX, PageGeometry, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileKey, TileRect,
