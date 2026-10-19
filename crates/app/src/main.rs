@@ -1,23 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! Slint front end for the tiled, viewport-only renderer (Plan 0001).
+//! Slint front end for the continuous, tiled, viewport-only renderer (Plans 0001 and 0002).
 //!
 //! The UI keeps no rendering policy of its own: it mirrors the `Flickable`'s viewport into Rust,
-//! asks [`pdf_core::TileScheduler`] what should be on screen, and applies the returned actions to
-//! a fixed-size tile model. Every viewport change - wheel scroll, drag, programmatic scroll,
-//! zoom or window resize - funnels through one function, `viewport_moved`.
+//! asks [`pdf_core::DocLayout`] which cells of which pages it shows and
+//! [`pdf_core::TileScheduler`] what should be on screen, and applies the returned actions to a
+//! tile model. Every viewport change - wheel scroll, drag, programmatic scroll, zoom or window
+//! resize - funnels through one function, `viewport_moved`.
+//!
+//! The document position lives here, in `f64` document pixels, never in Slint: Slint's lengths are
+//! `f32`, which cannot address a long document exactly (Plan 0002, §3.1). The `Flickable` is given
+//! a [`CanvasWindow`] of the document around the viewport, and every coordinate it sees is relative
+//! to that window's start.
 
 use engine_mupdf::EngineHandle;
 use pdf_core::{
-    Bitmap, EngineCmd, EngineEvent, PageGeometry, PageSize, TILE_SIZE_PX, TileAction, TileKey,
+    Bitmap, CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, EngineCmd, EngineEvent,
+    PAGE_GAP_LOGICAL_PX, PageSize, REANCHOR_MARGIN_LOGICAL_PX, TILE_SIZE_PX, TileAction, TileKey,
     TileScheduler, ZOOM_DEFAULT_MILLI, ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli,
-    zoom_anchor, zoom_in_milli, zoom_out_milli,
+    zoom_in_milli, zoom_out_milli,
 };
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -26,14 +34,15 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
+use std::time::Instant;
 
-/// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001, Phase 2 gate).
+/// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
 mod bench;
 
 slint::slint! {
     import { Button } from "std-widgets.slint";
 
-    // One model row: an image plus where it goes, in logical pixels.
+    // One model row: an image plus where it goes, in canvas logical pixels.
     //
     // A row keeps its image even while `visible` is false, so panning or zooming back to a cached
     // tile needs no re-render; the scheduler decides when a row is released.
@@ -46,6 +55,16 @@ slint::slint! {
         visible: bool,
     }
 
+    // One page near the viewport: white paper, with the page's low-resolution base layer stretched
+    // over it when the page is drawn as tiles (Plan 0002, §4.3).
+    export struct PageView {
+        image: image,
+        x: length,
+        y: length,
+        w: length,
+        h: length,
+    }
+
     export component MainWindow inherits Window {
         title: "PODEFA - PDF Viewer";
         min-width: 600px;
@@ -54,23 +73,17 @@ slint::slint! {
         preferred-height: 700px;
 
         in-out property <[TileView]> tiles;
-        in-out property <length> page-w: 0px;
-        in-out property <length> page-h: 0px;
+        in-out property <[PageView]> pages;
+        // Extent of the canvas window, not of the document (Plan 0002, §4.2).
+        in-out property <length> canvas-w: 0px;
+        in-out property <length> canvas-h: 0px;
 
-        // The whole page at its base scale, stretched over the full page extent and drawn under
-        // the tiles (Plan 0001, §5 Phase 2). Empty until the base layer arrives, and drawn under
-        // tiles at every zoom level, so a zoom shows a coarse page instead of blank cells.
-        in-out property <image> base-image;
-
-        // Read side: the Flickable pushes its position and size here on every change, so Rust
-        // never has to rely on `flicked` (user input only, once per wheel animation).
-        in-out property <length> view-x: 0px;
-        in-out property <length> view-y: 0px;
-        in-out property <length> view-w: 0px;
-        in-out property <length> view-h: 0px;
-        // Write side: Rust sets these to scroll programmatically (anchored zoom).
+        // The Flickable's position, bound both ways: the Flickable writes it on every scroll and
+        // Rust writes it to scroll programmatically (anchored zoom, re-anchor, go-to-page).
         in-out property <length> scroll-x: 0px;
         in-out property <length> scroll-y: 0px;
+        in-out property <length> view-w: 0px;
+        in-out property <length> view-h: 0px;
 
         in-out property <string> status_text: "No document loaded";
         in-out property <string> error_text: "";
@@ -171,21 +184,27 @@ slint::slint! {
 
                 viewport := Flickable {
                     visible: !root.has_error && root.total_pages > 0;
-                    content-width: root.page-w;
-                    content-height: root.page-h;
+                    content-width: root.canvas-w;
+                    content-height: root.canvas-h;
+                    content-x <=> root.scroll-x;
+                    content-y <=> root.scroll-y;
 
                     // These fire on every change, user or programmatic, including each tick of
                     // the 180 ms wheel animation, which makes them the viewport source of truth.
-                    changed content-x => { root.view-x = viewport.content-x; root.viewport_moved(); }
-                    changed content-y => { root.view-y = viewport.content-y; root.viewport_moved(); }
+                    changed content-x => { root.viewport_moved(); }
+                    changed content-y => { root.viewport_moved(); }
                     changed width  => { root.view-w = viewport.width;  root.viewport_moved(); }
                     changed height => { root.view-h = viewport.height; root.viewport_moved(); }
 
-                    // Declared before the tiles so it paints under them: every tile that is on
-                    // screen covers its own cell of this, and cells still in flight show it.
-                    Image {
-                        source: root.base-image;
-                        x: 0px; y: 0px; width: root.page-w; height: root.page-h;
+                    // Declared before the tiles so they paint under them: a cell still in flight
+                    // shows its page's base layer, or white paper on a page drawn as one image.
+                    for page in root.pages : Rectangle {
+                        x: page.x; y: page.y; width: page.w; height: page.h;
+                        background: white;
+                        Image {
+                            source: page.image;
+                            width: parent.width; height: parent.height;
+                        }
                     }
 
                     for tile in root.tiles : Image {
@@ -194,8 +213,6 @@ slint::slint! {
                         x: tile.x; y: tile.y; width: tile.w; height: tile.h;
                     }
                 }
-
-                // Programmatic scroll: Rust writes these and the Flickable follows.
 
                 if (root.total_pages == 0 && !root.has_error) : Text {
                     text: "Open a PDF by running: cargo run -p app -- <file.pdf>";
@@ -223,12 +240,6 @@ slint::slint! {
                 }
             }
         }
-
-        // Programmatic scroll: Rust writes scroll-x/scroll-y and the Flickable follows. Declared
-        // after the layout so the `viewport` id is already known, and on the root so `changed`
-        // refers to the root property rather than an enclosing element's.
-        changed scroll-x => { viewport.content-x = root.scroll-x; }
-        changed scroll-y => { viewport.content-y = root.scroll-y; }
     }
 }
 
@@ -236,12 +247,12 @@ slint::slint! {
 /// requests, so a one-tile pan finds its next column already rendered instead of blank.
 const TILE_MARGIN_RING: usize = 2;
 
-/// Model capacity: viewport size x tile size, plus a margin ring.
+/// Model capacity for a window: viewport size x tile size, plus a margin ring.
 ///
-/// This bound depends only on the window and the device scale factor - never on the page extent
-/// or the zoom level, because a bigger page or a deeper zoom shows the same number of tiles
-/// (Plan 0001, §4.6), and it is exactly the visible cells plus the ring `ring` requests.
-/// `--cache-rows` replaces it; see the comment in the body.
+/// The window alone is a floor, not a bound, in continuous mode: at a low zoom many small pages
+/// are visible, each with at least one cell, so `refresh` grows the model past this when the
+/// visible set needs it (Plan 0002, §4.3). `--cache-rows` replaces both; see the comment in the
+/// body.
 fn tile_capacity(view_w_device: f32, view_h_device: f32) -> usize {
     // The row count is the cache's *real* ceiling: the scheduler never holds more tiles than it
     // has rows, so a window-sized viewport caps the cache near its own tile count and the byte
@@ -279,16 +290,35 @@ fn to_image(bitmap: &Bitmap) -> Image {
     Image::from_rgb8(buffer)
 }
 
+/// One page row as last written to the model: page index and canvas rect in logical pixels, and
+/// whether it carried a base layer. Compared before a write, so a scroll that keeps the same pages
+/// near the viewport does not touch the model.
+type PageRow = (u32, f32, f32, f32, f32, bool);
+
 /// Everything the UI thread needs to turn a viewport into tiles.
 struct AppState {
     cmd_tx: Sender<EngineCmd>,
     next_epoch: Arc<AtomicU64>,
     current_epoch: Arc<AtomicU64>,
     page_sizes: Vec<PageSize>,
-    page: u32,
+    /// Every page at the current scale (Plan 0002, §4.1).
+    layout: DocLayout,
     scale_milli: u32,
+    /// Top-left of the viewport in document pixels: the scroll position, exact at any length.
+    pos: (f64, f64),
+    /// The bands of the document Slint is given (Plan 0002, §4.2).
+    win_x: CanvasWindow,
+    win_y: CanvasWindow,
+    /// Device pixels the column is shifted right to centre a document narrower than the viewport.
+    shift_x: f64,
     scheduler: TileScheduler,
     model: Rc<VecModel<TileView>>,
+    pages_model: Rc<VecModel<PageView>>,
+    page_rows: Vec<PageRow>,
+    /// Base layers of the tiled pages near the viewport, by page (Plan 0002, §4.3).
+    bases: HashMap<u32, Image>,
+    /// Base layers requested and not yet arrived.
+    base_pending: HashSet<u32>,
     scale_factor: f32,
     rendered: i32,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
@@ -296,47 +326,115 @@ struct AppState {
 }
 
 impl AppState {
-    /// Geometry of a page at a scale, from the document's page table.
-    fn geometry_of(&self, page: u32, scale_milli: u32) -> Option<PageGeometry> {
-        let size = self.page_sizes.get(page as usize)?;
-        Some(PageGeometry::new(page, size.bounds(), scale_milli))
+    fn sf(&self) -> f64 {
+        self.scale_factor as f64
     }
 
-    /// Geometry of the page on screen.
-    fn geometry(&self) -> Option<PageGeometry> {
-        self.geometry_of(self.page, self.scale_milli)
+    /// The page gap in device pixels: constant in logical pixels, so it does not grow with zoom.
+    fn gap_px(&self) -> u32 {
+        (PAGE_GAP_LOGICAL_PX * self.scale_factor).round() as u32
     }
 
-    /// The viewport in page-raster device pixels.
-    ///
-    /// `content-x` is the scrollable content's position relative to the viewport, so it is
-    /// negative while scrolled: the visible region starts at `-content-x`.
-    fn view_rect(&self, ui: &MainWindow) -> pdf_core::Rect {
-        let sf = self.scale_factor;
-        pdf_core::Rect::new(
-            -ui.get_view_x() * sf,
-            -ui.get_view_y() * sf,
-            ui.get_view_w() * sf,
-            ui.get_view_h() * sf,
+    /// The viewport size in device pixels.
+    fn view_size(&self, ui: &MainWindow) -> (f64, f64) {
+        (
+            ui.get_view_w() as f64 * self.sf(),
+            ui.get_view_h() as f64 * self.sf(),
         )
     }
 
-    /// The tile cells the live viewport actually shows: what `refresh` diffs against, and what the
-    /// trace counts holes over. Empty when there is no page or no viewport yet.
-    fn visible(&self, ui: &MainWindow) -> Vec<TileKey> {
-        let Some(geo) = self.geometry() else {
-            return Vec::new();
-        };
-        let view = self.view_rect(ui);
-        if view.width <= 0.0 || view.height <= 0.0 {
-            return Vec::new();
-        }
-        geo.visible_cells(view)
-            .map(|(c, r)| geo.key(c, r))
-            .collect()
+    /// Reads the scroll position back from the `Flickable`, which the user may have moved.
+    ///
+    /// `scroll-x/y` is the canvas's position relative to the viewport, so it is negative while
+    /// scrolled: the viewport starts at `-scroll` inside the canvas window.
+    fn read_pos(&mut self, ui: &MainWindow) {
+        let sf = self.sf();
+        self.pos = (
+            self.win_x.start - self.shift_x - ui.get_scroll_x() as f64 * sf,
+            self.win_y.start - ui.get_scroll_y() as f64 * sf,
+        );
     }
 
-    /// The prefetch ring: the same viewport grown by one tile on every side.
+    /// Keeps the scroll position inside the document, and a document narrower than the viewport
+    /// centred in it.
+    fn clamp_pos(&mut self, ui: &MainWindow) {
+        let (view_w, view_h) = self.view_size(ui);
+        let doc_w = self.layout.width() as f64;
+        let doc_h = self.layout.height() as f64;
+        self.shift_x = ((view_w - doc_w) / 2.0).max(0.0).floor();
+        self.pos.0 = if self.shift_x > 0.0 {
+            -self.shift_x
+        } else {
+            self.pos.0.clamp(0.0, (doc_w - view_w).max(0.0))
+        };
+        self.pos.1 = self.pos.1.clamp(0.0, (doc_h - view_h).max(0.0));
+    }
+
+    /// A document x in canvas logical pixels.
+    fn canvas_x(&self, x: f64) -> f32 {
+        ((self.win_x.local(x) + self.shift_x) / self.sf()) as f32
+    }
+
+    /// A document y in canvas logical pixels.
+    fn canvas_y(&self, y: f64) -> f32 {
+        (self.win_y.local(y) / self.sf()) as f32
+    }
+
+    /// Re-centres the canvas window on the current position and rewrites everything placed in it:
+    /// the extent, the scroll position, every visible tile and the page rows. The view does not
+    /// move; only the numbers under it do (Plan 0002, §4.2).
+    fn reanchor(&mut self, ui: &MainWindow) {
+        let started = Instant::now();
+        let (view_w, view_h) = self.view_size(ui);
+        let half = CANVAS_HALF_LOGICAL_PX * self.sf();
+        let doc_x = self.pos.0.max(0.0);
+        self.win_x = CanvasWindow::around(doc_x, view_w, self.layout.width() as f64, half);
+        self.win_y = CanvasWindow::around(self.pos.1, view_h, self.layout.height() as f64, half);
+        let sf = self.sf();
+        let canvas_w = ((self.win_x.len + self.shift_x) / sf) as f32;
+        let canvas_h = (self.win_y.len / sf) as f32;
+        let scroll_x = -((self.pos.0 - self.win_x.start + self.shift_x) / sf) as f32;
+        let scroll_y = -(self.win_y.local(self.pos.1) / sf) as f32;
+        with_programmatic_guard(|| {
+            ui.set_canvas_w(canvas_w);
+            ui.set_canvas_h(canvas_h);
+            ui.set_scroll_x(scroll_x);
+            ui.set_scroll_y(scroll_y);
+        });
+        for slot in 0..self.scheduler.capacity() {
+            if let Some(key) = self.scheduler.slot_key(slot)
+                && self.scheduler.is_visible(&key)
+            {
+                self.place(slot, &key, None, true);
+            }
+        }
+        self.page_rows.clear();
+        self.bench
+            .reanchored(started.elapsed().as_micros(), self.pos.1, self.win_y.start);
+    }
+
+    /// Whether the viewport has come close enough to a canvas window edge to move the window.
+    fn needs_reanchor(&self, ui: &MainWindow) -> bool {
+        let (view_w, view_h) = self.view_size(ui);
+        let margin = REANCHOR_MARGIN_LOGICAL_PX * self.sf();
+        self.win_y
+            .needs_reanchor(self.pos.1, view_h, self.layout.height() as f64, margin)
+            || self.win_x.needs_reanchor(
+                self.pos.0.max(0.0),
+                view_w,
+                self.layout.width() as f64,
+                margin,
+            )
+    }
+
+    /// The tile cells the live viewport actually shows, across every page in view: what `refresh`
+    /// diffs against, and what the trace counts holes over.
+    fn visible(&self, ui: &MainWindow) -> Vec<TileKey> {
+        let (w, h) = self.view_size(ui);
+        self.layout.visible_cells(self.pos.0, self.pos.1, w, h)
+    }
+
+    /// The prefetch ring: the same viewport grown by one tile on every side, across pages.
     ///
     /// These cells are requested but never *visible*: the scheduler holds them as ordinary
     /// evictable entries, so a one-tile pan finds the column it uncovers already rendered - the
@@ -351,29 +449,29 @@ impl AppState {
     /// frames against 241 - and the upgrade path is a ring weighted by the direction the viewport
     /// last moved in (or a row count with room for the whole ring).
     fn ring(&self, ui: &MainWindow) -> Vec<TileKey> {
-        let Some(geo) = self.geometry() else {
-            return Vec::new();
-        };
-        let view = self.view_rect(ui);
-        if view.width <= 0.0 || view.height <= 0.0 {
+        let (w, h) = self.view_size(ui);
+        if w <= 0.0 || h <= 0.0 {
             return Vec::new();
         }
-        let tile = TILE_SIZE_PX as f32;
-        geo.visible_cells(pdf_core::Rect::new(
-            view.x - tile,
-            view.y - tile,
-            view.width + 2.0 * tile,
-            view.height + 2.0 * tile,
-        ))
-        .map(|(c, r)| geo.key(c, r))
-        .collect()
+        let tile = TILE_SIZE_PX as f64;
+        self.layout.visible_cells(
+            self.pos.0 - tile,
+            self.pos.1 - tile,
+            w + 2.0 * tile,
+            h + 2.0 * tile,
+        )
     }
 
     /// Diffs the live viewport against the cache and applies the result.
     fn refresh(&mut self, ui: &MainWindow) {
-        let visible = self.visible(ui);
-        if visible.is_empty() {
+        if self.layout.is_empty() {
             return;
+        }
+        let visible = self.visible(ui);
+        // Many small pages at a low zoom each need a cell: grow instead of degrading into blank
+        // pages, unless `--cache-rows` fixed the row count for a memory experiment.
+        if bench::cache_rows().is_none() && visible.len() * 2 > self.scheduler.capacity() {
+            self.grow(visible.len() * 2);
         }
         // Visible cells first, then the ring: the pool's queue is FIFO, so the tiles on screen
         // rasterize before the ones that are only candidates for the next pan step.
@@ -382,6 +480,82 @@ impl AppState {
         actions.extend(self.scheduler.prefetch(&ring));
         self.bench.frame(&self.scheduler, &visible, &ring);
         self.apply(ui, actions);
+        self.update_pages(ui);
+
+        let (_, view_h) = self.view_size(ui);
+        if let Some(page) = self.layout.page_near(self.pos.1 + view_h / 2.0) {
+            ui.set_current_page(page as i32);
+        }
+    }
+
+    /// Pages that hold a page row and, when tiled, a base layer: the ones in view plus one page
+    /// either side, so the paper and the base layer are already there when a scroll reaches them.
+    fn near_pages(&self, ui: &MainWindow) -> std::ops::Range<usize> {
+        let (_, view_h) = self.view_size(ui);
+        let range = self.layout.pages_in(self.pos.1, self.pos.1 + view_h);
+        let start = range.start.saturating_sub(1);
+        let end = (range.end + 1).min(self.layout.len());
+        start..end.max(start)
+    }
+
+    /// Rewrites the page rows and keeps exactly the base layers of the tiled pages near the view.
+    ///
+    /// A page that fits in one tile has no base layer: its one tile *is* the page image, and a
+    /// 1024 px base for a page drawn 80 px tall would cost 2.3 MiB to show nothing extra (Plan
+    /// 0002, §4.3).
+    fn update_pages(&mut self, ui: &MainWindow) {
+        let near = self.near_pages(ui);
+        let mut wanted = HashSet::new();
+        let mut rows = Vec::with_capacity(near.len());
+        for page in near {
+            let Some(slot) = self.layout.slot(page).copied() else {
+                continue;
+            };
+            let index = page as u32;
+            if slot.is_tiled() {
+                wanted.insert(index);
+                if !self.bases.contains_key(&index) && self.base_pending.insert(index) {
+                    self.request_base(index);
+                }
+            }
+            let sf = self.sf() as f32;
+            rows.push((
+                index,
+                self.canvas_x(slot.x as f64),
+                self.canvas_y(slot.y as f64),
+                slot.w as f32 / sf,
+                slot.h as f32 / sf,
+                slot.is_tiled() && self.bases.contains_key(&index),
+            ));
+        }
+        self.bases.retain(|page, _| wanted.contains(page));
+        if rows == self.page_rows {
+            return;
+        }
+        let views: Vec<PageView> = rows
+            .iter()
+            .map(|&(page, x, y, w, h, has_base)| PageView {
+                image: if has_base {
+                    self.bases.get(&page).cloned().unwrap_or_default()
+                } else {
+                    Image::default()
+                },
+                x,
+                y,
+                w,
+                h,
+            })
+            .collect();
+        self.pages_model.set_vec(views);
+        self.page_rows = rows;
+    }
+
+    /// Distinct pages holding a cached tile or a base layer: the virtualization claim is that this
+    /// never exceeds the pages near the viewport (`docs/benchmarks.md` §8.2, `pages_resident`).
+    fn pages_resident(&self) -> usize {
+        let mut pages: HashSet<u32> = self.scheduler.cached_keys().map(|key| key.page).collect();
+        pages.extend(self.bases.keys().copied());
+        pages.len()
     }
 
     /// Applies scheduler actions to the model and the engine.
@@ -403,18 +577,15 @@ impl AppState {
         }
     }
 
-    /// Where a tile goes, in logical pixels, resolved from the page table.
+    /// Where a tile goes, in canvas logical pixels, resolved from the layout.
     fn row_geometry(&self, key: &TileKey) -> (f32, f32, f32, f32) {
-        let sf = self.scale_factor;
-        let rect = self
-            .geometry_of(key.page, key.scale_milli)
-            .and_then(|geo| geo.tile_rect(key.col, key.row));
-        match rect {
-            Some(rect) => (
-                rect.x as f32 / sf,
-                rect.y as f32 / sf,
-                rect.w as f32 / sf,
-                rect.h as f32 / sf,
+        let sf = self.sf() as f32;
+        match self.layout.tile_place(key) {
+            Some((x, y, w, h)) => (
+                self.canvas_x(x),
+                self.canvas_y(y),
+                w as f32 / sf,
+                h as f32 / sf,
             ),
             None => (0.0, 0.0, 0.0, 0.0),
         }
@@ -455,31 +626,30 @@ impl AppState {
 
     /// Asks the engine for one tile under the current epoch.
     fn request(&mut self, key: &TileKey) {
-        let Some(geometry) = self.geometry_of(key.page, key.scale_milli) else {
+        let Some(slot) = self.layout.slot(key.page as usize) else {
             return;
         };
         let _ = self.cmd_tx.send(EngineCmd::RenderTile {
-            geometry,
+            geometry: slot.geometry,
             col: key.col,
             row: key.row,
             request_id: self.current_epoch.load(Ordering::Relaxed),
         });
     }
 
-    /// Asks the engine for the low-resolution base layer of the page on screen (Plan 0001, §5
-    /// Phase 2).
+    /// Asks the engine for the low-resolution base layer of one page (Plan 0001, §5 Phase 2).
     ///
     /// The base layer is a page property, not a level one: one raster serves every zoom of that
-    /// page, so this is called once per page - on open and on a page change - rather than on a zoom
+    /// page, so it is requested when a tiled page comes near the viewport rather than on a zoom
     /// step. The epoch it carries is the one in flight, but no `Cancel` can reach it: the pool only
     /// registers tiles as abortable, so a zoom during panning cannot blank the page it was supposed
     /// to cover.
-    fn request_base(&mut self) {
-        let Some(size) = self.page_sizes.get(self.page as usize) else {
+    fn request_base(&mut self, page: u32) {
+        let Some(size) = self.page_sizes.get(page as usize) else {
             return;
         };
         let _ = self.cmd_tx.send(EngineCmd::RenderBase {
-            page: self.page,
+            page,
             scale_milli: base_scale_milli(size.width.max(size.height)),
             request_id: self.current_epoch.load(Ordering::Relaxed),
         });
@@ -506,26 +676,27 @@ impl AppState {
         self.bench.tile(&self.scheduler, &visible);
     }
 
-    /// The base layer arrived: stretch it under the tiles of the page it belongs to.
+    /// A base layer arrived: stretch it under its page's tiles, if the page is still near the view.
     ///
-    /// A base layer *is* the page, so it is accepted whenever it is the page the user is on: it
-    /// stays valid across every zoom of that page, which is the whole point of having it.
+    /// A base layer *is* the page, so it is valid across every zoom of that page; it is only
+    /// dropped when the page has moved away from the viewport since it was requested.
     fn apply_base(&mut self, ui: &MainWindow, page: u32, bitmap: &Bitmap) {
-        if page != self.page {
+        if !self.base_pending.remove(&page) {
             return;
         }
-        ui.set_base_image(to_image(bitmap));
+        if !self.near_pages(ui).contains(&(page as usize)) {
+            return;
+        }
+        self.bases.insert(page, to_image(bitmap));
+        self.update_pages(ui);
     }
 
-    /// Drops the base layer, for a page change: it describes the page that just left the screen.
-    fn clear_base(&self, ui: &MainWindow) {
-        ui.set_base_image(Image::default());
-    }
-
-    /// Drops every row and its pixels, for a page change or a model resize.
+    /// Drops every row and its pixels, and every base layer, for a new document.
     fn release_all(&mut self, ui: &MainWindow) {
         let actions = self.scheduler.clear_all();
         self.apply(ui, actions);
+        self.bases.clear();
+        self.page_rows.clear();
     }
 
     /// Starts a new epoch: in-flight tiles are cancelled and their results are dropped.
@@ -541,113 +712,107 @@ impl AppState {
         self.scheduler.clear_pending();
     }
 
-    /// Grows the model if the window (or device scale factor) needs more rows than it has.
-    ///
-    /// Resizing is the only event that can change the tile count, and it rebuilds the model
-    /// rather than faulting later (Plan 0001, §4.6).
-    fn ensure_capacity(&mut self, ui: &MainWindow) {
-        let sf = self.scale_factor;
-        let needed = tile_capacity(ui.get_view_w() * sf, ui.get_view_h() * sf);
-        if needed <= self.scheduler.capacity() {
+    /// Adds model rows without dropping anything cached (Plan 0002, §4.3).
+    fn grow(&mut self, rows: usize) {
+        if rows <= self.scheduler.capacity() {
             return;
         }
-        let budget = self.scheduler.cache_max_bytes();
-        self.release_all(ui);
-        self.scheduler = TileScheduler::new(needed, budget);
-        self.model = Rc::new(VecModel::from(vec![empty_tile(); needed]));
-        ui.set_tiles(ModelRc::from(self.model.clone()));
-        self.bench.model_rebuilt(needed);
+        self.scheduler.grow(rows);
+        while self.model.row_count() < rows {
+            self.model.push(empty_tile());
+        }
+        self.bench.model_grown(rows);
     }
 
-    /// Publishes the page extent and the zoom readout, without re-entering `viewport_moved`.
-    fn update_extent(&self, ui: &MainWindow) {
-        let Some(geo) = self.geometry() else {
-            return;
-        };
-        let (device_w, device_h) = geo.device_size();
-        let sf = self.scale_factor;
-        with_programmatic_guard(|| {
-            ui.set_page_w(device_w as f32 / sf);
-            ui.set_page_h(device_h as f32 / sf);
-            ui.set_zoom_percent(self.scale_milli as f32 / 10.0);
-        });
+    /// Grows the model if the window (or device scale factor) needs more rows than it has.
+    fn ensure_capacity(&mut self, ui: &MainWindow) {
+        let (view_w, view_h) = self.view_size(ui);
+        self.grow(tile_capacity(view_w as f32, view_h as f32));
     }
 
-    /// A document was opened: forget everything and show page 0 at 100%.
+    /// A document was opened: forget everything and show the top of page 1 at 100%.
     fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>) {
         self.page_sizes = page_sizes;
-        self.page = 0;
         self.scale_milli = ZOOM_DEFAULT_MILLI;
+        self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
         self.rendered = 0;
         ui.set_tiles_rendered(0);
         ui.set_tiles_requested(0);
+        ui.set_zoom_percent(self.scale_milli as f32 / 10.0);
         self.bench.level_changed(ZOOM_DEFAULT_MILLI, "open");
         self.begin_epoch();
         self.release_all(ui);
-        self.clear_base(ui);
-        self.request_base();
-        self.update_extent(ui);
+        self.base_pending.clear();
+        self.pos = (0.0, 0.0);
+        self.clamp_pos(ui);
+        self.reanchor(ui);
+        self.refresh(ui);
+    }
+
+    /// Moves the viewport to `pos` (document pixels) without a new epoch, as a scroll does.
+    ///
+    /// Written under the programmatic guard and followed by its own `refresh`, so the result does
+    /// not depend on when Slint runs the `changed` handlers the write raises; they run
+    /// `viewport_moved` again later, which is idempotent.
+    fn scroll_to(&mut self, ui: &MainWindow, pos: (f64, f64)) {
+        self.pos = pos;
+        self.clamp_pos(ui);
+        if self.needs_reanchor(ui) {
+            self.reanchor(ui);
+        }
+        let sf = self.sf();
+        let scroll_x = -((self.pos.0 - self.win_x.start + self.shift_x) / sf) as f32;
+        let scroll_y = -(self.win_y.local(self.pos.1) / sf) as f32;
         with_programmatic_guard(|| {
-            ui.set_scroll_x(0.0);
-            ui.set_scroll_y(0.0);
+            ui.set_scroll_x(scroll_x);
+            ui.set_scroll_y(scroll_y);
         });
         self.refresh(ui);
     }
 
-    /// Switches page, dropping the previous page's tiles.
-    fn set_page(&mut self, ui: &MainWindow, page: u32) {
-        if page as usize >= self.page_sizes.len() || page == self.page {
+    /// Jumps to the top of a page: everything still pending belongs to a place the user has left,
+    /// so a jump starts an epoch (Plan 0002, §4.4).
+    fn go_to_page(&mut self, ui: &MainWindow, page: usize) {
+        let Some(slot) = self.layout.slot(page).copied() else {
             return;
-        }
-        self.page = page;
-        ui.set_current_page(page as i32);
-        self.bench.level_changed(self.scale_milli, "page");
+        };
         self.begin_epoch();
-        self.release_all(ui);
-        self.clear_base(ui);
-        self.request_base();
-        self.update_extent(ui);
-        with_programmatic_guard(|| {
-            ui.set_scroll_x(0.0);
-            ui.set_scroll_y(0.0);
-        });
+        self.pos.1 = slot.y as f64 - self.layout.gap_px() as f64;
+        self.clamp_pos(ui);
+        self.reanchor(ui);
         self.refresh(ui);
+        ui.set_current_page(page as i32);
+    }
+
+    /// The page the viewport's vertical centre is on.
+    fn current_page(&self, ui: &MainWindow) -> usize {
+        let (_, view_h) = self.view_size(ui);
+        self.layout
+            .page_near(self.pos.1 + view_h / 2.0)
+            .unwrap_or(0)
     }
 
     /// Zooms around a viewport anchor (logical pixels), keeping the page point under it still.
+    ///
+    /// The anchor is resolved on its page, not on the whole document: the gap between pages does
+    /// not scale, so scaling the document offset would drift (Plan 0002, §4.5).
     fn zoom(&mut self, ui: &MainWindow, new_milli: u32, anchor_x: f32, anchor_y: f32) {
         let new_milli = new_milli.clamp(ZOOM_MIN_MILLI, ZOOM_MAX_MILLI);
-        if new_milli == self.scale_milli || self.geometry().is_none() {
+        if new_milli == self.scale_milli || self.layout.is_empty() {
             return;
         }
-        let sf = self.scale_factor;
-        let old_offset_x = -ui.get_view_x() * sf;
-        let old_offset_y = -ui.get_view_y() * sf;
-        let new_offset_x = zoom_anchor(old_offset_x, anchor_x * sf, self.scale_milli, new_milli);
-        let new_offset_y = zoom_anchor(old_offset_y, anchor_y * sf, self.scale_milli, new_milli);
-
+        let sf = self.sf();
+        let to = DocLayout::new(&self.page_sizes, new_milli, self.gap_px());
+        let anchor = (anchor_x as f64 * sf, anchor_y as f64 * sf);
+        self.pos = self.layout.zoom_anchor(&to, self.pos, anchor);
+        self.layout = to;
         self.scale_milli = new_milli;
         self.bench.level_changed(new_milli, "zoom");
         // The old scale's tiles stay cached: only the in-flight requests belong to a dead epoch.
         self.begin_epoch();
-
-        let Some(geo) = self.geometry() else {
-            return;
-        };
-        let (device_w, device_h) = geo.device_size();
-        let view_w = ui.get_view_w() * sf;
-        let view_h = ui.get_view_h() * sf;
-        let offset_x = new_offset_x.clamp(0.0, (device_w as f32 - view_w).max(0.0));
-        let offset_y = new_offset_y.clamp(0.0, (device_h as f32 - view_h).max(0.0));
-
-        with_programmatic_guard(|| {
-            ui.set_page_w(device_w as f32 / sf);
-            ui.set_page_h(device_h as f32 / sf);
-            ui.set_scroll_x(-offset_x / sf);
-            ui.set_scroll_y(-offset_y / sf);
-            ui.set_zoom_percent(new_milli as f32 / 10.0);
-        });
-
+        ui.set_zoom_percent(new_milli as f32 / 10.0);
+        self.clamp_pos(ui);
+        self.reanchor(ui);
         self.refresh(ui);
     }
 }
@@ -679,6 +844,10 @@ fn with_state(f: impl FnOnce(&mut AppState)) {
 }
 
 /// The single entry point for viewport changes.
+///
+/// It reads the position back from the `Flickable`, re-anchors the canvas window when the view
+/// nears its edge (or the window was resized), and diffs the view against the cache. It is
+/// idempotent, so the `changed` callbacks that a programmatic write raises later are harmless.
 fn viewport_moved(ui: &MainWindow) {
     if PROGRAMMATIC.with(Cell::get) {
         return;
@@ -686,6 +855,15 @@ fn viewport_moved(ui: &MainWindow) {
     APP.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
             state.ensure_capacity(ui);
+            if state.layout.is_empty() {
+                return;
+            }
+            state.read_pos(ui);
+            let shift = state.shift_x;
+            state.clamp_pos(ui);
+            if state.shift_x != shift || state.needs_reanchor(ui) {
+                state.reanchor(ui);
+            }
             state.refresh(ui);
         }
     });
@@ -731,6 +909,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let capacity = tile_capacity(window_size.width as f32, window_size.height as f32);
     let model = Rc::new(VecModel::from(vec![empty_tile(); capacity]));
     main_window.set_tiles(ModelRc::from(model.clone()));
+    let pages_model = Rc::new(VecModel::<PageView>::default());
+    main_window.set_pages(ModelRc::from(pages_model.clone()));
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -738,10 +918,18 @@ fn main() -> Result<(), slint::PlatformError> {
             next_epoch: Arc::clone(&next_epoch),
             current_epoch: Arc::clone(&current_epoch),
             page_sizes: Vec::new(),
-            page: 0,
+            layout: DocLayout::default(),
             scale_milli: ZOOM_DEFAULT_MILLI,
+            pos: (0.0, 0.0),
+            win_x: CanvasWindow::default(),
+            win_y: CanvasWindow::default(),
+            shift_x: 0.0,
             scheduler: TileScheduler::new(capacity, cache_bytes),
             model: model.clone(),
+            pages_model: pages_model.clone(),
+            page_rows: Vec::new(),
+            bases: HashMap::new(),
+            base_pending: HashSet::new(),
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -874,8 +1062,8 @@ fn main() -> Result<(), slint::PlatformError> {
         main_window.on_prev_page(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| {
-                    let page = state.page.saturating_sub(1);
-                    state.set_page(&ui, page);
+                    let page = state.current_page(&ui).saturating_sub(1);
+                    state.go_to_page(&ui, page);
                 });
             }
         });
@@ -886,8 +1074,8 @@ fn main() -> Result<(), slint::PlatformError> {
         main_window.on_next_page(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| {
-                    let page = state.page + 1;
-                    state.set_page(&ui, page);
+                    let page = state.current_page(&ui) + 1;
+                    state.go_to_page(&ui, page);
                 });
             }
         });

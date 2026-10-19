@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! Diagnostic harness for the zoom/scroll blank-frame work (Plan 0001, Phase 2 gate).
+//! Diagnostic harness for the zoom/scroll blank-frame work (Plan 0001 Phase 2, Plan 0002 Phase 1).
 //!
 //! Two pieces, both inert unless asked for:
 //!
@@ -10,8 +10,9 @@
 //!   (`blank_ms`, the white flash), full coverage (`full_ms`), the hole/pending counts of
 //!   every frame (`holes` / `pending` / `unwanted`), and the time an in-flight tile took to notice
 //!   it had been superseded (`abort_ms`, Plan 0001 §5 Phase 2).
-//! - a **driver** (`--bench-*`) that repeats zoom or pan steps through the same code paths the
-//!   toolbar and the wheel use, settles between phases, then prints one summary.
+//! - a **driver** (`--bench-*`) that repeats zoom, pan or scroll steps, or jumps to a page, through
+//!   the same code paths the toolbar and the wheel use, settles between phases, then prints one
+//!   summary.
 //!
 //! `--bench-repeat N` runs the whole scenario `N` times and reports each run's worst beside the
 //! min/median/max across runs: one burst on a heavy page leaves `t_blank` a single sample, which
@@ -24,10 +25,11 @@
 //! frames for pan. The first `window run` line is the startup, which on a heavy fixture is the
 //! document's own first render rather than anything the zoom did; the summary leaves it out.
 
-use crate::{MainWindow, viewport_center, with_programmatic_guard, with_state};
+use crate::{MainWindow, viewport_center, with_state};
 use pdf_core::{TileKey, TileScheduler, zoom_in_milli};
 use slint::{ComponentHandle, Timer, TimerMode};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::env;
 use std::fmt;
 use std::sync::OnceLock;
@@ -64,6 +66,14 @@ pub struct Cfg {
     /// rows, so 12 MiB of 512 px RGB8 tiles on a 900x700 window) and the byte budget above that
     /// can never bind. A memory run that needs the budget to bind raises this.
     pub cache_rows: Option<usize>,
+    /// `--bench-scroll`: downward scroll speed in device pixels per second; 0 leaves the scroll
+    /// phase out (Plan 0002, §6 rows A-B).
+    pub scroll_pxs: f64,
+    /// `--bench-scroll-s`: how long the scroll phase lasts, in seconds, unless it reaches the end.
+    pub scroll_s: f64,
+    /// `--bench-jump`: page to jump to (1-based, as the toolbar shows it) before the zoom phase
+    /// (Plan 0002, §6 row D).
+    pub jump_page: Option<usize>,
 }
 
 impl Default for Cfg {
@@ -78,6 +88,9 @@ impl Default for Cfg {
             repeats: 1,
             cache_bytes: None,
             cache_rows: None,
+            scroll_pxs: 0.0,
+            scroll_s: 30.0,
+            jump_page: None,
         }
     }
 }
@@ -85,7 +98,10 @@ impl Default for Cfg {
 impl Cfg {
     /// Whether the flags ask for anything at all.
     pub fn is_empty(&self) -> bool {
-        self.zoom_steps == 0 && self.pan_px <= 0.0
+        self.zoom_steps == 0
+            && self.pan_px <= 0.0
+            && self.scroll_pxs <= 0.0
+            && self.jump_page.is_none()
     }
 }
 
@@ -133,6 +149,18 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             // Not step flags: these describe the scheduler the app builds, so they apply with or
             // without a run (trace a manual session with `FA_PDF_TRACE=1`).
+            "--bench-scroll" => {
+                cfg.scroll_pxs = number.unwrap_or(2000.0).max(0.0);
+                consumed = 2;
+            }
+            "--bench-scroll-s" => {
+                cfg.scroll_s = number.unwrap_or(30.0).max(0.0);
+                consumed = 2;
+            }
+            "--bench-jump" => {
+                cfg.jump_page = number.map(|page| page.max(1.0) as usize);
+                consumed = 2;
+            }
             "--cache-mib" => {
                 cfg.cache_bytes = number.map(|mib| (mib.max(0.0) * 1024.0 * 1024.0) as usize);
                 consumed = 2;
@@ -328,7 +356,7 @@ fn spread(values: &[u128]) -> (u128, u128, u128) {
 
 /// The counters only the trace sees; the summary prints them all.
 ///
-/// `blank_ms`/`full_ms`/`abort_ms`/`rebuilds` are cumulative, because a level change is a single
+/// `blank_ms`/`full_ms`/`abort_ms`/`grows` are cumulative, because a level change is a single
 /// event that must not disappear when a phase window rotates. The exception is the startup `run`
 /// window, whose samples belong to the document's own first render; [`Trace::phase`] drops those.
 /// The rest belong to one phase at a time.
@@ -350,8 +378,8 @@ struct Stats {
     max_pending: u32,
     /// Worst count of in-flight requests the viewport no longer wants.
     max_unwanted: u32,
-    /// Model rebuilds (window or device-scale-factor changes).
-    rebuilds: u32,
+    /// Model growths: a resize, or a zoom that shows more small pages than the rows hold.
+    grows: u32,
 }
 
 impl Stats {
@@ -399,8 +427,8 @@ struct Run {
     full_max: Option<u128>,
     /// Worst `t_abort` of the run.
     abort_max: Option<u128>,
-    /// Model rebuilds during the run.
-    rebuilds: u32,
+    /// Model grows during the run.
+    grows: u32,
 }
 
 /// The opt-in trace. Every method but `new` is one `bool` check when tracing is off.
@@ -426,6 +454,14 @@ pub struct Trace {
     memory: Vec<Mem>,
     /// When the last sample was taken; the timer's period is the cadence, this is the guard.
     last_rss: Instant,
+    /// Distinct pages that were visible at least once (`pages_visited`, benchmarks §8.2).
+    pages_visited: HashSet<u32>,
+    /// Canvas-window re-anchors, each with how long its rewrite took in microseconds.
+    reanchor_us: Vec<u128>,
+    /// Worst `pages_resident` sampled.
+    max_resident: usize,
+    /// Index into `memory` where the scroll phase started, for `ws_growth`.
+    scroll_mem_from: Option<usize>,
 }
 
 impl Trace {
@@ -443,6 +479,10 @@ impl Trace {
             quiet: false,
             memory: Vec::new(),
             last_rss: Instant::now(),
+            pages_visited: HashSet::new(),
+            reanchor_us: Vec::new(),
+            max_resident: 0,
+            scroll_mem_from: None,
         }
     }
 
@@ -521,6 +561,8 @@ impl Trace {
         if !self.on || self.quiet {
             return;
         }
+        self.pages_visited
+            .extend(visible.iter().map(|key| key.page));
         let holes = holes(sched, visible);
         let pending = sched.pending_len() as u32;
         let unwanted = sched
@@ -570,7 +612,7 @@ impl Trace {
     /// Throttled on top of the timer's period: after a long stall (a display-list build blocks the
     /// event loop for over a second) several ticks can arrive together, and duplicated lines would
     /// read as a plateau that is not there.
-    pub fn sample_memory(&mut self, sched: &TileScheduler) {
+    pub fn sample_memory(&mut self, sched: &TileScheduler, pages_resident: usize) {
         if !self.on || self.last_rss.elapsed().as_millis() < RSS_MS {
             return;
         }
@@ -579,10 +621,12 @@ impl Trace {
         if let Some(mem) = mem {
             self.memory.push(mem);
         }
+        self.max_resident = self.max_resident.max(pages_resident);
         let t = self.t_ms();
         let cache_mib = mib(sched.cache_bytes() as u128);
         self.print(format_args!(
-            "rss t={t}ms ws={} private={} cache={cache_mib:.1}MiB/{} rows dropped={} evicted={}",
+            "rss t={t}ms ws={} private={} cache={cache_mib:.1}MiB/{} rows dropped={} evicted={} \
+             pages_resident={pages_resident}",
             mem_str(mem.map(|mem| mem.ws)),
             mem_str(mem.map(|mem| mem.private)),
             sched.cache_len(),
@@ -591,14 +635,27 @@ impl Trace {
         ));
     }
 
-    /// The model grew: every row was rebuilt, so a hole burst here is expected, not a leak.
-    pub fn model_rebuilt(&mut self, capacity: usize) {
+    /// The model grew. Rows are added, nothing cached is dropped (Plan 0002, §4.3).
+    pub fn model_grown(&mut self, capacity: usize) {
         if !self.on {
             return;
         }
-        self.stats.rebuilds += 1;
+        self.stats.grows += 1;
         let t = self.t_ms();
-        self.print(format_args!("rebuild t={t}ms capacity={capacity}"));
+        self.print(format_args!("grow t={t}ms capacity={capacity}"));
+    }
+
+    /// The canvas window moved (Plan 0002, §4.2): `us` is how long rewriting the canvas took,
+    /// `pos_y` the document position and `start` the new window start, both in device pixels.
+    pub fn reanchored(&mut self, us: u128, pos_y: f64, start: f64) {
+        if !self.on || self.quiet {
+            return;
+        }
+        self.reanchor_us.push(us);
+        let t = self.t_ms();
+        self.print(format_args!(
+            "reanchor t={t}ms us={us} pos_y={pos_y:.0} start={start:.0}"
+        ));
     }
 
     /// The repeat in progress, as a [`Run`]: the worst of each metric measured so far.
@@ -607,7 +664,7 @@ impl Trace {
             blank_max: self.stats.blank_ms.iter().copied().max(),
             full_max: self.stats.full_ms.iter().copied().max(),
             abort_max: self.stats.abort_ms.iter().copied().max(),
-            rebuilds: self.stats.rebuilds,
+            grows: self.stats.grows,
         }
     }
 
@@ -653,6 +710,9 @@ impl Trace {
         let closed = std::mem::replace(&mut self.window_name, name.to_owned());
         self.print(format_args!("window {closed} t={t}ms {window}"));
         self.stats.reset_window();
+        if name == "scroll" {
+            self.scroll_mem_from = Some(self.memory.len());
+        }
         if closed == "run" {
             self.stats.blank_ms.clear();
             self.stats.full_ms.clear();
@@ -675,7 +735,14 @@ impl Trace {
     }
 
     /// Prints the run summary and returns whether `t_blank` stayed under its ceiling.
-    pub fn report(&self, cfg: &Cfg, sched: &TileScheduler, rendered: i32, requested: i32) -> bool {
+    pub fn report(
+        &self,
+        cfg: &Cfg,
+        sched: &TileScheduler,
+        rendered: i32,
+        requested: i32,
+        page: i32,
+    ) -> bool {
         let (b_min, b_med, b_max) = spread(&self.stats.blank_ms);
         let (f_min, f_med, f_max) = spread(&self.stats.full_ms);
         let cache_mib = mib(sched.cache_bytes() as u128);
@@ -710,9 +777,46 @@ impl Trace {
             sched.evicted()
         );
         println!(
-            "[bench] tiles       rendered={rendered} requested={requested} rebuilds={}",
-            runs.iter().map(|run| run.rebuilds).sum::<u32>()
+            "[bench] tiles       rendered={rendered} requested={requested} grows={}",
+            runs.iter().map(|run| run.grows).sum::<u32>()
         );
+        let (r_min, r_med, r_max) = spread(&self.reanchor_us);
+        println!(
+            "[bench] pages       visited={} resident_max={} reanchors={} reanchor_us \
+             min={r_min} med={r_med} max={r_max}",
+            self.pages_visited.len(),
+            self.max_resident,
+            self.reanchor_us.len()
+        );
+        println!(
+            "[bench] position    page={} (1-based, under the viewport centre)",
+            page + 1
+        );
+        // `ws_growth` (benchmarks §8.2): the scroll phase's last 5 s against its first 5 s, as
+        // medians of the 250 ms samples, so one allocation spike cannot decide it.
+        let window = (5_000 / RSS_MS) as usize;
+        let scroll = self
+            .scroll_mem_from
+            .and_then(|from| self.memory.get(from..))
+            .unwrap_or(&[]);
+        if scroll.len() >= 2 * window {
+            let median = |samples: &[Mem]| {
+                let mut ws: Vec<usize> = samples.iter().map(|mem| mem.ws).collect();
+                ws.sort_unstable();
+                ws[ws.len() / 2] as f64
+            };
+            let first = median(&scroll[..window]);
+            let last = median(&scroll[scroll.len() - window..]);
+            println!(
+                "[bench] ws_growth   {:+.1} MiB (scroll phase: first 5 s median {:.1}, last 5 s                  median {:.1}, n={})",
+                (last - first) / (1024.0 * 1024.0),
+                first / (1024.0 * 1024.0),
+                last / (1024.0 * 1024.0),
+                scroll.len()
+            );
+        } else {
+            println!("[bench] ws_growth   n/a - the scroll phase has fewer than 10 s of samples");
+        }
         // The memory summary is the process's, not a run's: samples accumulate across repeats.
         if self.memory.is_empty() {
             println!("[bench] rss_mib     n/a - no memory samples (Windows only, and 250 ms in)");
@@ -744,12 +848,12 @@ impl Trace {
             let fulls: Vec<Option<u128>> = runs.iter().map(|run| run.full_max).collect();
             let aborts: Vec<Option<u128>> = runs.iter().map(|run| run.abort_max).collect();
             println!(
-                "[bench] per-run     t_blank {} | t_full {} | t_abort {} | rebuilds {}",
+                "[bench] per-run     t_blank {} | t_full {} | t_abort {} | grows {}",
                 listed(&blanks),
                 listed(&fulls),
                 listed(&aborts),
                 runs.iter()
-                    .map(|run| run.rebuilds.to_string())
+                    .map(|run| run.grows.to_string())
                     .collect::<Vec<_>>()
                     .join(",")
             );
@@ -781,12 +885,54 @@ impl Trace {
 /// Which phase of a `--bench-*` run the timer is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    /// One go-to-page, before the zoom (Plan 0002, §6 row D).
+    Jump,
     /// `+ Zoom` steps.
     Zoom,
-    /// Rightward scroll steps, up to the page edge.
+    /// Rightward scroll steps, up to the document edge.
     Pan,
+    /// Downward scroll at a constant speed, up to the end of the document or of `scroll_s`.
+    Scroll,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
+}
+
+/// The phases a run still has to do after a settle, in order.
+#[derive(Debug, Clone, Copy, Default)]
+struct Pending {
+    jump: bool,
+    zoom: bool,
+    pan: bool,
+    scroll: bool,
+}
+
+impl Pending {
+    /// Every phase the configuration asks for.
+    fn all(cfg: &Cfg) -> Self {
+        Self {
+            jump: cfg.jump_page.is_some(),
+            zoom: cfg.zoom_steps > 0,
+            pan: cfg.pan_px > 0.0 && cfg.pan_steps > 0,
+            scroll: cfg.scroll_pxs > 0.0 && cfg.scroll_s > 0.0,
+        }
+    }
+
+    /// Takes the next phase to run, or `None` when the run is over.
+    fn take(&mut self) -> Option<Phase> {
+        let slots = [
+            (&mut self.jump, Phase::Jump),
+            (&mut self.zoom, Phase::Zoom),
+            (&mut self.pan, Phase::Pan),
+            (&mut self.scroll, Phase::Scroll),
+        ];
+        for (flag, phase) in slots {
+            if *flag {
+                *flag = false;
+                return Some(phase);
+            }
+        }
+        None
+    }
 }
 
 /// One run in progress, driven by the repeating timer on the UI thread.
@@ -797,30 +943,35 @@ struct Driver {
     step: u32,
     /// Ticks left in the settle phase.
     settle_ticks: u32,
-    /// Whether the zoom phase still has to run. A run opens with a settle so the first zoom step
+    /// Phases still to run after the current settle. A run opens with a settle so the first step
     /// does not land inside the document's own first tile, which on a dense page takes over a
     /// second; `--bench-settle-ms 0` gets that case back.
-    zoom_pending: bool,
-    /// Whether the pan phase still has to run after the settle.
-    pan_pending: bool,
+    pending: Pending,
     /// Repeats still to run, including the one in progress.
     runs_left: u32,
-    /// Viewport at the scenario's start, `(scale_milli, view_x, view_y)`: recorded on the first
+    /// Viewport at the scenario's start, `(scale_milli, document position)`: recorded on the first
     /// step and restored before every repeat, so each run measures the same scenario.
-    home: Option<(u32, f32, f32)>,
+    home: Option<(u32, (f64, f64))>,
     /// A repeat boundary is settling after that restore; the run starts when it ends.
     resetting: bool,
 }
 
 impl Driver {
     /// Records the scenario's starting viewport once, so a repeat can return to it.
-    fn remember_home(&mut self, ui: &MainWindow) {
+    fn remember_home(&mut self) {
         if self.home.is_some() || self.cfg.repeats <= 1 {
             return;
         }
         let mut home = None;
-        with_state(|state| home = Some((state.scale_milli, ui.get_view_x(), ui.get_view_y())));
+        with_state(|state| home = Some((state.scale_milli, state.pos)));
         self.home = home;
+    }
+
+    /// Ends the current phase and settles before the next one.
+    fn settle(&mut self) {
+        self.step = 0;
+        self.phase = Phase::Settle;
+        self.settle_ticks = settle_ticks(&self.cfg);
     }
 
     /// Ends the run in progress and puts the viewport back where the scenario started, so the next
@@ -831,36 +982,55 @@ impl Driver {
     /// follows has drained it.
     fn restart(&mut self, ui: &MainWindow) {
         with_state(|state| state.bench.close_run());
-        self.step = 0;
-        self.zoom_pending = self.cfg.zoom_steps > 0;
-        self.pan_pending = self.cfg.pan_px > 0.0 && self.cfg.pan_steps > 0;
-        self.phase = Phase::Settle;
-        self.settle_ticks = settle_ticks(&self.cfg);
-        let Some((scale_milli, view_x, view_y)) = self.home else {
+        self.pending = Pending::all(&self.cfg);
+        self.settle();
+        let Some((scale_milli, pos)) = self.home else {
             return;
         };
         with_state(|state| state.bench.suspend());
         self.resetting = true;
         // The cached tiles go with the viewport: a repeat that inherited the previous run's cache
         // would find every level already rendered and measure nothing at all.
-        with_state(|state| state.release_all(ui));
         let (anchor_x, anchor_y) = viewport_center(ui);
-        with_state(|state| state.zoom(ui, scale_milli, anchor_x, anchor_y));
-        with_programmatic_guard(|| {
-            ui.set_scroll_x(view_x);
-            ui.set_scroll_y(view_y);
+        with_state(|state| {
+            state.release_all(ui);
+            state.zoom(ui, scale_milli, anchor_x, anchor_y);
+            state.scroll_to(ui, pos);
         });
+    }
+
+    /// Starts the next pending phase, opening its trace window; returns whether there was one.
+    fn next_phase(&mut self) -> bool {
+        let Some(phase) = self.pending.take() else {
+            return false;
+        };
+        let name = match phase {
+            Phase::Jump => "jump",
+            Phase::Zoom => "zoom",
+            Phase::Pan => "pan",
+            Phase::Scroll => "scroll",
+            Phase::Settle => "settle",
+        };
+        // The window before this one (the startup, or the previous phase's settle) closes here:
+        // from now on the counters describe this phase.
+        with_state(|state| state.bench.phase(name));
+        self.step = 0;
+        self.phase = phase;
+        true
     }
 
     /// Runs one tick and returns whether the run is over.
     fn tick(&mut self, ui: &MainWindow) -> bool {
         match self.phase {
+            Phase::Jump => {
+                self.remember_home();
+                let page = self.cfg.jump_page.unwrap_or(1).saturating_sub(1);
+                with_state(|state| state.go_to_page(ui, page));
+                self.settle();
+                false
+            }
             Phase::Zoom => {
-                if self.step == 0 {
-                    // The startup window ends here: from now on the counters describe the zoom.
-                    with_state(|state| state.bench.phase("zoom"));
-                }
-                self.remember_home(ui);
+                self.remember_home();
                 // The same call the `+ Zoom` button makes, at the viewport centre.
                 let (anchor_x, anchor_y) = viewport_center(ui);
                 with_state(|state| {
@@ -869,37 +1039,52 @@ impl Driver {
                 });
                 self.step += 1;
                 if self.step >= self.cfg.zoom_steps {
-                    self.step = 0;
-                    self.pan_pending = self.cfg.pan_px > 0.0 && self.cfg.pan_steps > 0;
-                    self.phase = Phase::Settle;
-                    self.settle_ticks = settle_ticks(&self.cfg);
+                    self.settle();
                 }
                 false
             }
             Phase::Pan => {
-                self.remember_home(ui);
-                // The wheel writes `scroll-x`, which is `content-x`: the offset is its negation,
-                // so panning right means subtracting from it. Clamped to the page edge, like
-                // `zoom`. `view-x` mirrors the Flickable's own position, so the next step starts
-                // from where the viewport really is, not from where the last write asked it to go.
-                let sf = ui.window().scale_factor();
-                let reach = (ui.get_page_w() - ui.get_view_w()).max(0.0);
-                let next = (ui.get_view_x() - self.cfg.pan_px / sf).max(-reach);
+                self.remember_home();
+                // Rightward, clamped to the document edge, starting from where the viewport
+                // really is rather than from where the last write asked it to go.
+                let mut done = false;
+                let pan_px = self.cfg.pan_px as f64;
                 with_state(|state| {
+                    let (view_w, _) = state.view_size(ui);
+                    let doc_w = state.layout.width() as f64;
+                    let reach = (doc_w - view_w).max(0.0);
+                    let next = (state.pos.0 + pan_px).min(reach);
                     state.bench.pan_step(
-                        -ui.get_view_x(),
-                        reach,
-                        ui.get_page_w(),
-                        ui.get_view_w(),
-                        next,
-                    )
+                        state.pos.0 as f32,
+                        reach as f32,
+                        doc_w as f32,
+                        view_w as f32,
+                        next as f32,
+                    );
+                    state.scroll_to(ui, (next, state.pos.1));
+                    done = next >= reach;
                 });
-                ui.set_scroll_x(next);
                 self.step += 1;
-                if self.step >= self.cfg.pan_steps || next <= -reach {
-                    self.step = 0;
-                    self.phase = Phase::Settle;
-                    self.settle_ticks = settle_ticks(&self.cfg);
+                if self.step >= self.cfg.pan_steps || done {
+                    self.settle();
+                }
+                false
+            }
+            Phase::Scroll => {
+                self.remember_home();
+                let dy = self.cfg.scroll_pxs * self.cfg.step_ms as f64 / 1000.0;
+                let mut done = false;
+                with_state(|state| {
+                    let (_, view_h) = state.view_size(ui);
+                    let reach = (state.layout.height() as f64 - view_h).max(0.0);
+                    let next = (state.pos.1 + dy).min(reach);
+                    state.scroll_to(ui, (state.pos.0, next));
+                    done = next >= reach;
+                });
+                self.step += 1;
+                let elapsed_ms = self.step as f64 * self.cfg.step_ms as f64;
+                if done || elapsed_ms >= self.cfg.scroll_s * 1000.0 {
+                    self.settle();
                 }
                 false
             }
@@ -909,33 +1094,11 @@ impl Driver {
                     return false;
                 }
                 if self.resetting {
-                    // The reset has drained: this run is measured from here. Consuming the pending
-                    // flag here as well is what keeps a run to one zoom phase: without it the
-                    // settle after the steps would start the same phase again.
+                    // The reset has drained: this run is measured from here.
                     self.resetting = false;
                     with_state(|state| state.bench.resume());
-                    if self.zoom_pending {
-                        self.zoom_pending = false;
-                        self.phase = Phase::Zoom;
-                    } else {
-                        // A pan-only scenario opens on its pan phase, exactly as run one does.
-                        self.pan_pending = false;
-                        self.phase = Phase::Pan;
-                    }
-                    return false;
                 }
-                if self.zoom_pending {
-                    // The document has had its settle: the zoom numbers from here are the zoom's.
-                    self.zoom_pending = false;
-                    self.phase = Phase::Zoom;
-                    return false;
-                }
-                if self.pan_pending {
-                    // The zoom burst has drained: panning now measures the pan path, not the
-                    // zoom backlog. The marker splits the two in the trace.
-                    self.pan_pending = false;
-                    with_state(|state| state.bench.phase("pan"));
-                    self.phase = Phase::Pan;
+                if self.next_phase() {
                     return false;
                 }
                 if self.runs_left > 1 {
@@ -971,7 +1134,12 @@ pub fn start_sampler() {
     timer.start(
         TimerMode::Repeated,
         Duration::from_millis(RSS_MS as u64),
-        move || with_state(|state| state.bench.sample_memory(&state.scheduler)),
+        move || {
+            with_state(|state| {
+                let resident = state.pages_resident();
+                state.bench.sample_memory(&state.scheduler, resident);
+            })
+        },
     );
     RSS_TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
 }
@@ -987,15 +1155,21 @@ pub fn start_sampler() {
 /// what makes the run scriptable.
 pub fn start(ui: &MainWindow, cfg: Cfg) {
     if cfg.is_empty() {
-        println!("[bench] nothing to do: give --bench-zoom and/or --bench-pan");
+        println!(
+            "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll or --bench-jump"
+        );
         return;
     }
     println!(
-        "[bench] run zoom_steps={} pan_px={} pan_steps={} step_ms={} settle_ms={} \
-         max_blank_ms={} repeats={} cache={} rows={}",
+        "[bench] run jump={} zoom_steps={} pan_px={} pan_steps={} scroll_pxs={} scroll_s={} \
+         step_ms={} settle_ms={} max_blank_ms={} repeats={} cache={} rows={}",
+        cfg.jump_page
+            .map_or_else(|| "-".to_owned(), |page| page.to_string()),
         cfg.zoom_steps,
         cfg.pan_px,
         cfg.pan_steps,
+        cfg.scroll_pxs,
+        cfg.scroll_s,
         cfg.step_ms,
         cfg.settle_ms,
         cfg.max_blank_ms,
@@ -1008,10 +1182,15 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             .map_or_else(|| "auto".to_owned(), |rows| rows.to_string())
     );
 
-    let phase = if cfg.zoom_steps > 0 {
-        Phase::Settle
-    } else {
+    // A pan-only scenario opens on its pan phase, as it always did; anything else settles first so
+    // its first step does not land inside the document's own first render.
+    let mut pending = Pending::all(&cfg);
+    let only_pan = !pending.jump && !pending.zoom && !pending.scroll;
+    let phase = if only_pan {
+        pending.pan = false;
         Phase::Pan
+    } else {
+        Phase::Settle
     };
     DRIVER.with(|cell| {
         *cell.borrow_mut() = Some(Driver {
@@ -1019,8 +1198,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             phase,
             step: 0,
             settle_ticks: settle_ticks(&cfg),
-            zoom_pending: cfg.zoom_steps > 0,
-            pan_pending: false,
+            pending,
             runs_left: cfg.repeats.max(1),
             home: None,
             resetting: false,
@@ -1058,6 +1236,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
                         &state.scheduler,
                         ui.get_tiles_rendered(),
                         ui.get_tiles_requested(),
+                        ui.get_current_page(),
                     )
                 })
             });
@@ -1124,7 +1303,7 @@ mod tests {
         assert!(runs.iter().all(|run| run.blank_max.is_some()));
         assert_eq!(runs[0].abort_max, Some(4));
         assert_eq!(runs[1].abort_max, None);
-        assert!(trace.report(&Cfg::default(), &sched, 0, 0));
+        assert!(trace.report(&Cfg::default(), &sched, 0, 0, 0));
     }
 
     /// A command line for `parse_args`: the program, a document path, then the flags.
@@ -1152,6 +1331,34 @@ mod tests {
     }
 
     /// The two memory knobs reach the config, and neither one starts a run on its own.
+    #[test]
+    fn scroll_and_jump_flags_are_parsed() {
+        let (path, cfg) = parse_args(&args(&[
+            "doc.pdf",
+            "--bench-scroll",
+            "4000",
+            "--bench-scroll-s",
+            "12",
+            "--bench-jump",
+            "900",
+        ]));
+        assert_eq!(path.as_deref(), Some("doc.pdf"));
+        assert_eq!(cfg.scroll_pxs, 4000.0);
+        assert_eq!(cfg.scroll_s, 12.0);
+        assert_eq!(cfg.jump_page, Some(900));
+        assert!(!cfg.is_empty());
+
+        let mut pending = Pending::all(&cfg);
+        assert_eq!(pending.take(), Some(Phase::Jump));
+        assert_eq!(pending.take(), Some(Phase::Scroll));
+        assert_eq!(pending.take(), None);
+
+        // A jump alone is a scenario too (Plan 0002 §6 row D), and page 0 means page 1.
+        let (_, cfg) = parse_args(&args(&["--bench-jump", "0"]));
+        assert_eq!(cfg.jump_page, Some(1));
+        assert!(!cfg.is_empty());
+    }
+
     #[test]
     fn cache_flags_are_parsed() {
         let (_, cfg) = parse_args(&args(&["--cache-mib", "8", "--cache-rows", "80"]));
