@@ -7,9 +7,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Approved.** Phase 0 gate passed: the three §8 questions are answered and seven amendments
-are folded in (§0.2). Phase 1 (geometry, tile rendering, viewport-only app) is **done and at
-its gate** — see the "Phase 1 results" block in §5 for the evidence and the numbers.
+**Closed (Phases 0-2); Phase 3 deferred.** Phase 0 gate passed: the three §8 questions are
+answered and seven amendments are folded in (§0.2). Phases 1 and 2 are implemented, measured and
+gated — see the "Phase 1 results" and "Phase 2 results" blocks in §5 for the evidence and numbers.
 
 - Phase 0 (research + measurement + this document) is complete.
 - Phase 1 is implemented, verified and gated.
@@ -21,7 +21,9 @@ its gate** — see the "Phase 1 results" block in §5 for the evidence and the n
   build in §7.5. That gate run's one FAIL belongs to the document's own cold open when a zoom burst
   interrupts it — the §7.2-7.3 one-off, which the pool does not move because the display-list build
   it waits on is serial — and the stretched-level item that covers it is Phase 3's.
-- Phase 3 remains a proposal.
+- Phase 3 (ctrl+wheel and pinch zoom, a stretched second tile level) is **deferred** by the
+  maintainer (2026-10-20), not cancelled: it stays specified in §5, it still owns the cold-open
+  zoom FAIL above, and Plan 0002 does not depend on it.
 - The next plan to execute is [`0002-continuous-multipage-scroll.md`](./0002-continuous-multipage-scroll.md).
 
 ## 0. Gate record

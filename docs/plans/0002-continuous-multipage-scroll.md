@@ -7,10 +7,11 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Recorded follow-up — not started.** Registered at the Plan 0001 Phase 0 gate so that the
-Plan 0001 tile key and geometry types do not have to be reshaped later. Phase 1 of
-[`0001-tiled-viewport-rendering.md`](./0001-tiled-viewport-rendering.md) is a hard
-prerequisite: nothing here starts before Plan 0001 reaches its Phase 3 gate.
+**Phase 0 (investigation and plan) in progress.** Registered at the Plan 0001 Phase 0 gate so that
+the Plan 0001 tile key and geometry types do not have to be reshaped later. The original
+prerequisite - Plan 0001 reaching its Phase 3 gate - was relaxed by the maintainer on 2026-10-20:
+[`0001-tiled-viewport-rendering.md`](./0001-tiled-viewport-rendering.md) is closed through Phase 2,
+its Phase 3 (zoom gestures, stretched tile level) is deferred, and nothing below depends on it.
 
 ## Goal
 
