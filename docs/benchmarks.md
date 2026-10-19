@@ -669,3 +669,74 @@ The §7.5-7.6 fields (`t_blank`, `t_full`, `holes`, `hole_frames`, `unwanted`, `
 | `ws_growth` | `peak_ws` of the run minus `peak_ws` of the same scenario on a one-page document of the same page size; the "RSS does not grow with page count" acceptance compares this against 10 MiB. |
 | `reanchors` | Canvas-window re-anchors (Plan 0002 §4.2) during the run, each with the frame time of the frame it happened in and whether a fling was running. |
 | `t_page_table` | From `EngineCmd::Open` to the layout holding every page size; the open budget of Plan 0002 §6 row G (100 ms) is stated against it. |
+
+> **Amended before the first run (2026-10-20):** `ws_growth` was first defined against "the same
+> scenario on a one-page document", which cannot be run - a one-page document ends a 30 s scroll
+> after one page. It is measured instead as the scroll phase's last 5 s against its first 5 s (medians
+> of the 250 ms samples) in the same run. `reanchors` reports the time the rewrite itself took
+> (`reanchor_us`), not the frame time, which the harness cannot see. Both changes were made before any
+> Phase 1 number existed.
+
+### 8.3 Phase 1 gate run
+
+Release build of `07e3403` plus the summary-line fix, 2026-10-20, the §1 machine, a real 900x700
+window (scale factor 1), `FA_PDF_TRACE=1`, `--bench-step-ms 16 --bench-settle-ms 3000`, one run per
+row unless stated. The synthetic documents are §8.1's annotated ones, written by `page_sizes_bench.rs`
+into `target/tmp/`. `--bench-zoom 10` lands at 931% and `--bench-zoom 19` at 6400% (permille steps of
+1.25 from 100%). `--bench-scroll` writes the scroll position every tick through `AppState::scroll_to`,
+so it measures layout, virtualization and re-anchoring, not the `Flickable`'s own fling animation.
+
+```powershell
+$fx = "crates\engine-mupdf\tests\fixtures"; $t = "target\tmp"
+$env:FA_PDF_TRACE = 1
+target\release\app.exe $fx\large_200p.pdf --bench-zoom 10 --bench-scroll 10000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000                    # A
+target\release\app.exe $t\synthetic_1000p_annots_true.pdf --bench-scroll 10000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000                    # B1
+target\release\app.exe $t\synthetic_1000p_annots_true.pdf --bench-zoom 19 --bench-scroll 200000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000  # B2
+target\release\app.exe $t\synthetic_20000p_annots_true.pdf --bench-scroll 10000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000                   # B3
+target\release\app.exe $t\synthetic_20000p_annots_true.pdf --bench-zoom 19 --bench-scroll 200000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000 # B4
+target\release\app.exe $t\synthetic_1000p_annots_true.pdf --bench-jump 900 --bench-zoom 19 --bench-repeat 3 --bench-step-ms 16 --bench-settle-ms 3000           # D
+```
+
+| Row | Scenario | pages visited | `pages_resident` max | hole frames (scroll) | `t_blank` worst | re-anchors (from scroll) | `ws` start / median / `peak_ws` (MiB) | `ws_growth` |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- | ---: |
+| A | 200p @ 931%, 10,000 px/s, 30 s | 42 | 4 | 682 of ~1875, worst 3 cells | 5 ms | 0 | 88.8 / 150.6 / 165.5 | +3.3 |
+| B1 | 1000p @ 100%, 10,000 px/s, 30 s | 398 | 5 | 0 | - | 0 | 90.0 / 132.8 / 140.7 | -1.2 |
+| B2 | 1000p @ 6400%, 200,000 px/s, 30 s | 126 | 4 | 3750 (every tick) | 6 ms | 7 | 90.2 / 168.2 / 179.7 | **+22.0** |
+| B3 | 20000p @ 100%, 10,000 px/s, 30 s | 398 | 5 | 0 | - | 0 | 116.4 / 161.9 / 169.9 | -1.6 |
+| B4 | 20000p @ 6400%, 200,000 px/s, 30 s | 126 | 3 | 3750 (every tick) | 6 ms | 7 | 117.2 / 194.3 / 204.3 | **+16.6** |
+| D | 1000p, jump to 900, zoom to 6400%, 3 repeats | 3 | 6 | - | 6 ms (5/5/6 per run) | - | 89.8 / 141.1 / 170.5 | n/a |
+
+Re-anchor rewrites took 1-44 us each (B4 worst). The model grew 2-3 times per run and was never
+rebuilt; `dropped` stayed 0 except D's 16 superseded zoom tiles; `evicted` stayed 0.
+
+Reading, row by row against Plan 0002 §6:
+
+- **Virtualization holds.** `pages_resident` never exceeded 6 while 42-398 pages went past, and the
+  same scroll over 1000 and 20,000 pages (B1/B3) rendered the identical 1594 tiles.
+- **RSS does not grow with pages *visited*** at 100% (B1/B3 `ws_growth` -1.2 / -1.6 MiB) or at 931%
+  (A, +3.3). At 6400% and 200,000 px/s (B2/B4) the metric reads **+22.0 / +16.6 MiB - over the 10 MiB
+  line, reported as a FAIL**. Splitting each scroll phase into thirds shows where it comes from: the
+  median `ws` of the thirds is 159.7 / 171.1 / 171.0 MiB in B2 and 189.5 / 198.0 / 195.8 MiB in B4, so
+  the rise is in the first third and the last two are level. Inside them `ws` moves in a band (B2
+  144.0-172.8 MiB after t=11.7 s, B4 176.1-201.2 MiB after t=17 s) without a trend. The first-5 s
+  window catches the warm-up of a scroll that renders 1330 tiles a second; the band is the allocator
+  holding and returning freed tile buffers, the question `backlog.md` item 2 already asks. Two 30 s
+  runs cannot rule out a slower leak; a longer run is the way to settle it.
+- **RSS does grow with the document's page count, at open.** B3 starts 26.4 MiB above B1 and B4 27.0
+  above B2 before a single scroll step: ~1.4 KiB a page for 19,000 more pages, far more than the
+  ~64 bytes of page table the plan's §4.3 counted. It is MuPDF's object cache holding every page
+  object `page_sizes_lenient` loaded at open. Recorded in `backlog.md` item 4; it does not grow after
+  open.
+- **Holes:** 0 hole frames at 100%. At 931% a tick moves 160 px and 682 of the ~1875 ticks had 1-3
+  soft cells; at 6400% and 200,000 px/s a tick moves
+  3200 px, more than five viewports, so every tick is a fresh viewport and the row exists to exercise
+  re-anchoring, not to be read as a hole rate.
+- **Row D passes:** after the jump and 19 zoom steps the page under the viewport centre is still page
+  900 in all three repeats, and the worst `t_blank` is 6 ms against the 50 ms ceiling. The sub-pixel
+  half of row D is the `core` test `a_zoom_keeps_the_anchored_page_point_still_across_the_range`.
+- **Row C** is the `core` test `crossing_a_boundary_only_adds_the_newly_exposed_cells`.
+- **Row E is half measured.** Re-anchors happen where §4.2 says (7 in 6 M px of travel, none in
+  300 k px) and cost microseconds. Whether one interrupts a real *fling* - the `Flickable`'s own
+  animation - cannot be scripted by this harness, which writes positions; it needs a manual check
+  (Plan 0002 Phase 1 results).
+- **Every row stays under the Plan 0001 ceiling** (`peak_ws` <= 250 MiB): worst 204.3 MiB (B4).

@@ -167,3 +167,36 @@ each part is measured, and `benchmarks.md` §7.6 says which counter answers whic
 `GetProcessMemoryInfo` block in `crates/app/src/bench.rs`, so a second platform is a sibling module
 rather than a new dependency.
 
+
+---
+
+## 4. Memory that grows with the document's page count at open (~1.4 KiB a page)
+
+**Labels:** `performance`, `memory`, `investigation`
+
+### Problem Statement
+
+Plan 0002's virtualization keeps the *visited* pages from costing memory, but opening a document still
+costs memory proportional to its page count: the 20,000-page synthetic document starts 26.4-27.0 MiB
+above the 1,000-page one before any scrolling (`benchmarks.md` §8.3, B1/B3 and B2/B4), about 1.4 KiB a
+page. The app's own page table is ~64 bytes a page, so almost all of it is elsewhere - most likely
+MuPDF's object cache holding every page object that `page_sizes_lenient` loaded (`fz_load_page` per
+page, plus its annotations) for the life of the document.
+
+### Proposed Solution
+
+Measure first, in the shape of item 1: `ws` after `Document::open`, after the page count, after the
+sizes, and after dropping the document, on the 1,000- and 20,000-page synthetic files and on a real
+large PDF once the maintainer supplies one. Then, only if the page loads are the cause, compare reading
+the sizes through the page object alone (the *object* path of `page_sizes_bench.rs`, which skips the
+annotation load) and, if MuPDF allows it, letting the xref drop parsed page objects after the sizes
+are read.
+
+### Alternatives Considered
+
+- *Progressive page sizes (Plan 0002 Phase 3)* would spread the same cost over time without reducing
+  it; it is about open latency, not this.
+
+### Additional Context
+
+At 20,000 pages the cost is 27 MiB, inside the 250 MiB ceiling; at 100,000 pages it would be ~135 MiB.

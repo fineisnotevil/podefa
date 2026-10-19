@@ -808,7 +808,7 @@ impl Trace {
             let first = median(&scroll[..window]);
             let last = median(&scroll[scroll.len() - window..]);
             println!(
-                "[bench] ws_growth   {:+.1} MiB (scroll phase: first 5 s median {:.1}, last 5 s                  median {:.1}, n={})",
+                "[bench] ws_growth   {:+.1} MiB (scroll phase: first 5 s median {:.1}, last 5 s median {:.1}, n={})",
                 (last - first) / (1024.0 * 1024.0),
                 first / (1024.0 * 1024.0),
                 last / (1024.0 * 1024.0),

@@ -7,9 +7,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 0 done, at its gate - awaiting approval before Phase 1.** No feature code has been written.
-Phase 0 added one ignored measurement test (`crates/engine-mupdf/tests/page_sizes_bench.rs`) and the
-numbers it produced ([`../benchmarks.md`](../benchmarks.md) §8).
+**Phase 1 implemented and measured, at its gate - awaiting approval before Phase 2.** The evidence
+is the "Phase 1 results" block in §5 and [`../benchmarks.md`](../benchmarks.md) §8.3; one acceptance
+row is reported as a FAIL there, and one needs a manual check that cannot be scripted.
 
 Registered at the Plan 0001 Phase 0 gate so that the Plan 0001 tile key and geometry types do not
 have to be reshaped later. The original prerequisite - Plan 0001 reaching its Phase 3 gate - was
@@ -17,8 +17,8 @@ relaxed by the maintainer on 2026-10-20: [`0001-tiled-viewport-rendering.md`](./
 is closed through Phase 2, its Phase 3 (zoom gestures, stretched tile level) is deferred, and nothing
 below depends on it.
 
-- Phase 0 (research, measurement, this document): **done**. Gate questions in §9.
-- Phase 1 (layout, windowed scroll, virtualization): proposed.
+- Phase 0 (research, measurement, this document): **done**, gate passed (§0).
+- Phase 1 (layout, windowed scroll, virtualization): **implemented, at its gate** (§5).
 - Phase 2 (navigation and input): proposed.
 - Phase 3 (progressive page sizes): conditional - only if §3.5's real-world measurement asks for it.
 
@@ -315,6 +315,52 @@ question 4.
 - Bench harness: `--bench-scroll PX_PER_S --bench-scroll-s N`, `--bench-jump PAGE`, and a
   `pages_resident` field on the `rss` line; metrics defined in `benchmarks.md` §8 before any run.
 - **Acceptance (Phase 1 gate):** §6, rows A-E.
+
+**Phase 1 results (at the gate)**
+
+Implemented in `f4eb6a1` (core layout, canvas window, scheduler growth), `4c0ec85` (display-list LRU,
+lenient page sizes) and `07e3403` (continuous app, harness). `cargo fmt`, `clippy -D warnings`,
+`cargo test --workspace`, `cargo deny` and `reuse lint` are clean; the workspace has 17 new tests
+(16 in `core::layout` and 1 scheduler growth test) plus 2 engine and 1 harness test.
+
+Where the implementation differs from the design above, and why:
+
+- **A small page's image is its one tile.** A page that fits in `TILE_SIZE_PX` has exactly one cell,
+  so §4.3's "page image" is that cell rendered by the existing tile path - no new job type, and it
+  is cached, evicted and cancelled like any tile. While it is in flight after a zoom the page shows
+  white paper (every page near the view gets a white page rectangle), not a stretched image.
+- **The model grows; it is never rebuilt.** `TileScheduler::grow` adds rows without dropping the
+  cache, on a resize and when the visible cells need more than half the rows. That replaces §4.3's
+  closed-form bound with growth on demand; the runs grew 2-3 times each and never rebuilt.
+- **An unreadable page size is reported in `EngineEvent::Opened::unsized_pages`**, not as an
+  `EngineEvent::Error`: the app shows any error as a banner that hides the document, which is the
+  outcome the change exists to avoid. The status bar names the count.
+- **A zoom and a jump also re-anchor**, so the canvas is always centred on where the view lands.
+- **`scroll_to` writes under the programmatic guard and refreshes itself** rather than relying on
+  when Slint runs `changed` handlers; the handlers still run later and `viewport_moved` is idempotent.
+
+Against §6 (numbers in `benchmarks.md` §8.3):
+
+| Row | Result |
+| :--- | :--- |
+| A | `pages_resident` <= 4 over 42 pages; `ws_growth` +3.3 MiB; `t_blank` worst 5 ms. **Pass.** |
+| B | Virtualization holds (`pages_resident` <= 5, identical work for 1,000 and 20,000 pages), and `ws_growth` is -1.2 / -1.6 MiB at 100%. At 6400% and 200,000 px/s it reads **+22.0 / +16.6 MiB, a FAIL** of the 10 MiB line: the rise is in the first third of the scroll and the last two thirds are level (§8.3), so it reads as warm-up into an allocator band rather than a leak, but two 30 s runs cannot rule out a slow leak. Separately, **memory grows with the document's page count at open** (~1.4 KiB a page, 27 MiB at 20,000 pages), which §4.3 did not predict; `backlog.md` item 4. |
+| C | `core` test `crossing_a_boundary_only_adds_the_newly_exposed_cells`. **Pass.** |
+| D | Page 900 stays under the centre through 19 zoom steps in 3 of 3 repeats; `t_blank` worst 6 ms; sub-pixel anchor in a `core` test. **Pass.** |
+| E | 7 re-anchors in 6 M px of travel, none in 300 k px, 1-44 us each. **Whether one stops a real fling is not measured**: the harness writes positions and cannot drive the `Flickable`'s animation. |
+| ceiling | Worst `peak_ws` 204.3 MiB against 250 MiB. **Pass.** |
+
+Left to the maintainer, because they need hand input in a real window:
+
+1. **Fling across a re-anchor (row E).** Open `target\tmp\synthetic_20000p_annots_true.pdf`, zoom to
+   6400% (`+ Zoom` 19 times), then drag-fling or touchpad-fling downward repeatedly. A re-anchor
+   happens about every 786 k px; `FA_PDF_TRACE=1` prints a `reanchor` line when it does. Check whether
+   the fling in progress stops at that moment.
+2. **Wheel scroll across pages** at 100% and 400%: tiles of the next page should fill in during the
+   180 ms wheel animation, and the page counter should follow.
+3. **Window resize** with a document narrower than the window: the column stays centred.
+
+**Gate: stopped here, awaiting approval before Phase 2.**
 
 ### Phase 2 - Navigation and input
 
