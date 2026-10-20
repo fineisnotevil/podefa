@@ -228,6 +228,17 @@ fn run_base(prepared: &Prepared, cookie: Option<&Cookie>) -> Result<Bitmap, Mupd
 /// The pixmap origin is `(0, 0)`, so `fz_new_draw_device`'s identity transform makes device space
 /// and buffer space the same thing, the CTM carries the raster origin, and the scissor is simply
 /// the target rect (Plan 0001, §3.3). `cookie` is the abort channel; `None` is "not cancellable".
+/// Whether a cancel may stop a tile that is already inside the rasterizer (MuPDF's cookie).
+///
+/// **Off, as a stop-gap** (Plan 0003 Phase 3 review, `docs/backlog.md` item 7). An aborted run
+/// leaves the clips and groups it had pushed on the draw device's stack; closing that device then
+/// throws, and mupdf-rs 0.8 closes devices in `Drop` without a `fz_try`, so MuPDF calls `exit(1)`
+/// (`tests/abort_safety_test.rs` reproduces it). With the cookie off, a cancel still drops every
+/// queued tile of the epoch and still keeps a finished raster of a cancelled epoch from being
+/// published (both decided in the registry); only a tile already rasterizing runs to its end. Turn
+/// this back on once mupdf-rs closes devices inside a `fz_try`.
+const MID_RASTER_ABORT: bool = false;
+
 fn run_into(
     target: &Pixmap,
     list: &DisplayList,
@@ -243,7 +254,7 @@ fn run_into(
         -(origin.1 as f32),
     ));
     let area = mupdf::Rect::new(0.0, 0.0, size.0 as f32, size.1 as f32);
-    match cookie {
+    match cookie.filter(|_| MID_RASTER_ABORT) {
         Some(cookie) => list.run_with_cookie(&device, &ctm, area, cookie),
         None => list.run(&device, &ctm, area),
     }
@@ -484,7 +495,9 @@ fn worker(shared: Arc<Shared>) {
             // A cancel that reached this raster owns the report either way: MuPDF's display list
             // runner stops on the cookie by *breaking out of its loop* rather than by raising, so
             // the only evidence an abort produced is the stamp `cancel` left. The `_` also covers
-            // the `Err` case, where an inner operation did raise `FZ_ERROR_ABORT` instead.
+            // the `Err` case, where an inner operation did raise `FZ_ERROR_ABORT` instead. While
+            // `MID_RASTER_ABORT` is off the raster runs to its end and `ms` is the time from the
+            // cancel to that end; the pixels are still never published.
             (_, Retired::Aborted(at)) => {
                 let ms = at.elapsed().as_millis() as u64;
                 let _ = shared
