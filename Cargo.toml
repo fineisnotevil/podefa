@@ -22,6 +22,7 @@ pdf-core = { path = "crates/core" }
 engine-mupdf = { path = "crates/engine-mupdf" }
 mupdf = "0.8.0"
 slint = "1.18.1"
+rfd = "0.17"
 thiserror = "2.0"
 
 # Upstream mupdf 0.8.0 on crates.io misses a `max_align_t` binding on Windows MSVC

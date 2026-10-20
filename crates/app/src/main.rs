@@ -19,6 +19,7 @@ use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
 };
+use pdf_core::settings::{Settings, Theme};
 use pdf_core::{
     Bitmap, CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, EngineCmd, EngineEvent,
     PAGE_GAP_LOGICAL_PX, PageSize, REANCHOR_MARGIN_LOGICAL_PX, TILE_SIZE_PX, TileAction, TileKey,
@@ -32,7 +33,7 @@ use slint::{
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -45,7 +46,7 @@ use std::time::Instant;
 mod bench;
 
 slint::slint! {
-    import { Button, LineEdit } from "std-widgets.slint";
+    import { Button, LineEdit, Palette } from "std-widgets.slint";
 
     // One model row: an image plus where it goes, in canvas logical pixels.
     //
@@ -71,8 +72,11 @@ slint::slint! {
     }
 
     export component MainWindow inherits Window {
-        title: "PODEFA - PDF Viewer";
-        init => { viewport-keys.focus(); }
+        title: root.doc-title == "" ? "PODEFA - PDF Viewer" : root.doc-title + " - PODEFA";
+        init => {
+            root.apply-theme();
+            viewport-keys.focus();
+        }
         min-width: 600px;
         min-height: 500px;
         preferred-width: 900px;
@@ -90,6 +94,13 @@ slint::slint! {
         in-out property <length> scroll-y: 0px;
         in-out property <length> view-w: 0px;
         in-out property <length> view-h: 0px;
+
+        // The open document's file name, for the title bar; empty when nothing is open.
+        in-out property <string> doc-title: "";
+        // 0 = follow the system, 1 = light, 2 = dark (Plan 0003, §4.6).
+        in-out property <int> theme: 0;
+        // Recent files, newest first, as the File menu shows them.
+        in-out property <[string]> recent-files;
 
         in-out property <string> status_text: "No document loaded";
         in-out property <string> error_text: "";
@@ -127,6 +138,69 @@ slint::slint! {
         callback go_to_page(string);
         // The scrollbar thumb was dragged to `offset` within a track of `track`.
         callback scrollbar_moved(length, length);
+        callback open_file();
+        callback open_recent(int);
+        callback choose_theme(int);
+        callback quit();
+        // A drag over the window: whether it carries a document we can open.
+        callback can_open_drop(data-transfer) -> bool;
+        // A drop: open the document it carries.
+        callback open_drop(data-transfer);
+
+        function apply-theme() {
+            Palette.color-scheme = root.theme == 1 ? ColorScheme.light
+                : root.theme == 2 ? ColorScheme.dark : ColorScheme.unknown;
+        }
+        changed theme => { root.apply-theme(); }
+
+        MenuBar {
+            Menu {
+                title: "File";
+                MenuItem {
+                    title: "Open...";
+                    shortcut: @keys(Control + O);
+                    activated => { root.open_file(); }
+                }
+                Menu {
+                    title: "Open Recent";
+                    enabled: root.recent-files.length > 0;
+                    for path[index] in root.recent-files : MenuItem {
+                        title: path;
+                        activated => { root.open_recent(index); }
+                    }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Quit";
+                    shortcut: @keys(Control + Q);
+                    activated => { root.quit(); }
+                }
+            }
+            Menu {
+                title: "View";
+                Menu {
+                    title: "Theme";
+                    MenuItem {
+                        title: "System";
+                        checkable: true;
+                        checked: root.theme == 0;
+                        activated => { root.choose_theme(0); }
+                    }
+                    MenuItem {
+                        title: "Light";
+                        checkable: true;
+                        checked: root.theme == 1;
+                        activated => { root.choose_theme(1); }
+                    }
+                    MenuItem {
+                        title: "Dark";
+                        checkable: true;
+                        checked: root.theme == 2;
+                        activated => { root.choose_theme(2); }
+                    }
+                }
+            }
+        }
 
         VerticalLayout {
             padding: 8px;
@@ -232,13 +306,25 @@ slint::slint! {
                   }
                   return reject;
               }
+              // Files dropped from other applications (Plan 0003, §3.2): Slint 1.18.1's winit backend
+              // never delivers them, so this is inert until the Slint release carrying
+              // slint-ui/slint#13527, and needs no change then.
+              DropArea {
+                can-drop(event) => {
+                    return root.can_open_drop(event.data) ? DragAction.copy : DragAction.none;
+                }
+                dropped(event) => {
+                    root.open_drop(event.data);
+                    return DragAction.copy;
+                }
               Rectangle {
-                background: #e5e7eb;
+                background: Palette.alternate-background;
                 border-width: 1px;
-                border-color: #d1d5db;
+                border-color: Palette.border;
 
                 viewport := Flickable {
-                    visible: !root.has_error && root.total_pages > 0;
+                    // A failed open keeps the document that was already showing.
+                    visible: root.total_pages > 0;
                     content-width: root.canvas-w;
                     content-height: root.canvas-h;
                     content-x <=> root.scroll-x;
@@ -326,11 +412,13 @@ slint::slint! {
                 }
 
                 if (root.total_pages == 0 && !root.has_error) : Text {
-                    text: "Open a PDF by running: cargo run -p app -- <file.pdf>";
-                    color: #6b7280;
+                    text: "Open a PDF with File > Open (Ctrl+O)";
+                    color: Palette.foreground;
+                    opacity: 0.6;
                     vertical-alignment: center;
                     horizontal-alignment: center;
                 }
+              }
               }
             }
 
@@ -339,14 +427,16 @@ slint::slint! {
                 height: 20px;
                 Text {
                     text: root.status_text;
-                    color: #4b5563;
+                    color: Palette.foreground;
+                    opacity: 0.8;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Text {
                     text: root.tiles_rendered + " tiles rendered / " + root.tiles_requested + " requested";
-                    color: #9ca3af;
+                    color: Palette.foreground;
+                    opacity: 0.5;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
@@ -433,6 +523,12 @@ struct AppState {
     base_pending: HashSet<u32>,
     scale_factor: f32,
     rendered: i32,
+    /// Theme and recent files, and where they are kept (Plan 0003, §4.7).
+    settings: Settings,
+    settings_path: Option<PathBuf>,
+    /// The document an `Open` was sent for and has not been answered yet.
+    opening: Option<PathBuf>,
+    recent_model: Rc<VecModel<SharedString>>,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -940,6 +1036,88 @@ impl AppState {
         self.grow(tile_capacity(view_w as f32, view_h as f32));
     }
 
+    /// Asks the engine to open `path`, replacing the document on screen (Plan 0003, §4.2).
+    ///
+    /// The current document stops requesting work at once - a new epoch, no rows, an empty layout -
+    /// because the engine answers commands in order: a tile asked for the old document after the
+    /// `Open` would be prepared against the new one. The page table is kept until the answer, so a
+    /// failed open can put the old document back.
+    fn open_path(&mut self, ui: &MainWindow, path: PathBuf) {
+        // A command-line path is relative to wherever the app was started; the recent list has to
+        // work from anywhere. `absolute` neither touches the file system nor adds Windows' `\\?\`.
+        let path = std::path::absolute(&path).unwrap_or(path);
+        self.begin_epoch();
+        self.release_all(ui);
+        self.layout = DocLayout::default();
+        self.pages_model.set_vec(Vec::new());
+        ui.set_has_error(false);
+        ui.set_is_loading(true);
+        ui.set_status_text(SharedString::from(format!(
+            "Opening '{}'...",
+            path.display()
+        )));
+        let _ = self.cmd_tx.send(EngineCmd::Open {
+            path: path.clone(),
+            password: None,
+        });
+        self.opening = Some(path);
+    }
+
+    /// The engine opened the document `open_path` asked for: remember it.
+    fn document_opened(&mut self, ui: &MainWindow) {
+        let Some(path) = self.opening.take() else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        ui.set_doc_title(SharedString::from(name));
+        self.settings.opened(&path);
+        self.save_settings();
+        self.update_recent();
+    }
+
+    /// The engine could not open the document: the one that was showing is still open there, so
+    /// it comes back with its page table and scroll position.
+    fn open_failed(&mut self, ui: &MainWindow) {
+        if self.opening.take().is_none() || self.page_sizes.is_empty() {
+            return;
+        }
+        self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
+        self.clamp_pos(ui);
+        self.reanchor(ui);
+        self.refresh(ui);
+    }
+
+    /// The File menu's recent list, from the settings.
+    fn update_recent(&self) {
+        let entries: Vec<SharedString> = self
+            .settings
+            .recent
+            .iter()
+            .map(|path| SharedString::from(path.display().to_string()))
+            .collect();
+        self.recent_model.set_vec(entries);
+    }
+
+    /// The theme chosen in the View menu: applied at once and remembered.
+    fn choose_theme(&mut self, ui: &MainWindow, index: i32) {
+        self.settings.theme = match index {
+            1 => Theme::Light,
+            2 => Theme::Dark,
+            _ => Theme::System,
+        };
+        ui.set_theme(theme_index(self.settings.theme));
+        self.save_settings();
+    }
+
+    fn save_settings(&self) {
+        if let Some(path) = &self.settings_path {
+            save_settings(path, &self.settings);
+        }
+    }
+
     /// A document was opened: forget everything and show the top of page 1 at 100%.
     fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>) {
         self.page_sizes = page_sizes;
@@ -1079,6 +1257,81 @@ fn viewport_moved(ui: &MainWindow) {
     });
 }
 
+/// Where the settings file lives: the platform's per-user configuration directory, from the
+/// environment alone (Plan 0003, §3.8). `None` when the environment names none, in which case the
+/// app runs with defaults and remembers nothing.
+fn settings_path() -> Option<PathBuf> {
+    let dir = if cfg!(windows) {
+        PathBuf::from(env::var_os("APPDATA")?).join("PODEFA")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from(env::var_os("HOME")?).join("Library/Application Support/PODEFA")
+    } else {
+        match env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()) {
+            Some(dir) => PathBuf::from(dir).join("podefa"),
+            None => PathBuf::from(env::var_os("HOME")?).join(".config/podefa"),
+        }
+    };
+    Some(dir.join("settings.txt"))
+}
+
+/// The settings in `path`, or the defaults when it is missing or unreadable.
+fn load_settings(path: &Path) -> Settings {
+    std::fs::read_to_string(path)
+        .map(|text| Settings::parse(&text))
+        .unwrap_or_default()
+}
+
+/// Writes the settings through a temporary file and a rename, so a crash mid-write never leaves a
+/// half-written file. A failure is reported on stderr and otherwise ignored: losing a recent-files
+/// entry must not interrupt reading.
+fn save_settings(path: &Path, settings: &Settings) {
+    let write = || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("txt.tmp");
+        std::fs::write(&tmp, settings.serialize())?;
+        std::fs::rename(&tmp, path)
+    };
+    if let Err(err) = write() {
+        eprintln!(
+            "podefa: could not save settings to {}: {err}",
+            path.display()
+        );
+    }
+}
+
+fn theme_index(theme: Theme) -> i32 {
+    match theme {
+        Theme::System => 0,
+        Theme::Light => 1,
+        Theme::Dark => 2,
+    }
+}
+
+/// The document a drag carries: its first file whose extension is `.pdf`, any case. `None` for a
+/// drag without file paths, which the `DropArea` then refuses.
+fn dropped_document(data: &slint::DataTransfer) -> Option<PathBuf> {
+    let paths = data.file_paths().ok()?;
+    paths
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        })
+        .map(Path::to_path_buf)
+        .next()
+}
+
+/// Asks for a document with the platform's file dialog (Plan 0003, §3.1). Modal: it blocks the
+/// UI thread until the user answers, as a modal dialog does.
+fn pick_document() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Open")
+        .add_filter("PDF documents", &["pdf", "PDF"])
+        .add_filter("All files", &["*"])
+        .pick_file()
+}
+
 /// What a key on the viewport does: a scroll action, a zoom, or nothing (the event is rejected and
 /// goes on to the parent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1087,6 +1340,7 @@ enum KeyCommand {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    Open,
 }
 
 /// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
@@ -1101,6 +1355,7 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             '+' | '=' => Some(KeyCommand::ZoomIn),
             '-' => Some(KeyCommand::ZoomOut),
             '0' => Some(KeyCommand::ZoomReset),
+            'o' | 'O' => Some(KeyCommand::Open),
             _ => None,
         };
     }
@@ -1160,6 +1415,14 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.set_tiles(ModelRc::from(model.clone()));
     let pages_model = Rc::new(VecModel::<PageView>::default());
     main_window.set_pages(ModelRc::from(pages_model.clone()));
+    let recent_model = Rc::new(VecModel::<SharedString>::default());
+    main_window.set_recent_files(ModelRc::from(recent_model.clone()));
+    let settings_path = settings_path();
+    let settings = settings_path
+        .as_deref()
+        .map(load_settings)
+        .unwrap_or_default();
+    main_window.set_theme(theme_index(settings.theme));
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -1179,6 +1442,10 @@ fn main() -> Result<(), slint::PlatformError> {
             page_rows: Vec::new(),
             bases: HashMap::new(),
             base_pending: HashSet::new(),
+            settings,
+            settings_path,
+            opening: None,
+            recent_model,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -1224,7 +1491,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         )
                     };
                     ui.set_status_text(SharedString::from(status));
-                    with_state(|state| state.set_document(&ui, page_sizes));
+                    with_state(|state| {
+                        state.set_document(&ui, page_sizes);
+                        state.document_opened(&ui);
+                    });
                     // A scripted run starts on the open, so its first step is a real zoom or pan
                     // rather than a no-op against an empty document.
                     if let Some(cfg) = bench_cfg.lock().unwrap().take() {
@@ -1254,6 +1524,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_error_text(SharedString::from(message.clone()));
                     ui.set_status_text(SharedString::from(format!("Error: {message}")));
                     ui.set_is_loading(false);
+                    with_state(|state| state.open_failed(&ui));
                 }
             });
         }
@@ -1351,6 +1622,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     state.zoom(&ui, next, ax, ay);
                 }
                 KeyCommand::ZoomReset => state.zoom(&ui, ZOOM_DEFAULT_MILLI, ax, ay),
+                KeyCommand::Open => {
+                    if let Some(path) = pick_document() {
+                        state.open_path(&ui, path);
+                    }
+                }
             });
             true
         });
@@ -1413,19 +1689,68 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // CLI argument handling: open the file passed as the first argument.
-    if let Some(path_arg) = path {
-        let pdf_path = PathBuf::from(path_arg);
-        main_window.set_status_text(SharedString::from(format!(
-            "Opening '{}'...",
-            pdf_path.display()
-        )));
-        main_window.set_is_loading(true);
-
-        let _ = cmd_tx.send(EngineCmd::Open {
-            path: pdf_path,
-            password: None,
+    {
+        let weak = main_window.as_weak();
+        main_window.on_open_file(move || {
+            if let Some(ui) = weak.upgrade()
+                && let Some(path) = pick_document()
+            {
+                with_state(|state| state.open_path(&ui, path));
+            }
         });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_open_recent(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| {
+                    let path = usize::try_from(index)
+                        .ok()
+                        .and_then(|i| state.settings.recent.get(i).cloned());
+                    if let Some(path) = path {
+                        state.open_path(&ui, path);
+                    }
+                });
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_choose_theme(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.choose_theme(&ui, index));
+            }
+        });
+    }
+
+    main_window.on_quit(|| {
+        let _ = slint::quit_event_loop();
+    });
+
+    main_window.on_can_open_drop(|data| dropped_document(&data).is_some());
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_open_drop(move |data| {
+            if let Some(ui) = weak.upgrade()
+                && let Some(path) = dropped_document(&data)
+            {
+                with_state(|state| state.open_path(&ui, path));
+            }
+        });
+    }
+
+    with_state(|state| state.update_recent());
+
+    // CLI argument handling: open the file passed as the first argument, through the same path as
+    // the menu, so it lands in the recent list too.
+    if let Some(path_arg) = path {
+        let weak = main_window.as_weak();
+        if let Some(ui) = weak.upgrade() {
+            with_state(|state| state.open_path(&ui, PathBuf::from(path_arg)));
+        }
     }
 
     main_window.run()
@@ -1458,6 +1783,31 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_drop_opens_its_first_pdf() {
+        let mut data = slint::DataTransfer::default();
+        data.set_file_paths(["/home/u/notes.txt", "/home/u/Report.PDF", "/home/u/b.pdf"]);
+        assert_eq!(
+            dropped_document(&data),
+            Some(PathBuf::from("/home/u/Report.PDF"))
+        );
+
+        let mut none = slint::DataTransfer::default();
+        none.set_file_paths(["/home/u/image.png"]);
+        assert_eq!(dropped_document(&none), None);
+
+        let mut text = slint::DataTransfer::default();
+        text.set_plain_text("/home/u/b.pdf".into());
+        assert_eq!(dropped_document(&text), None, "text is not a file");
+        assert_eq!(dropped_document(&slint::DataTransfer::default()), None);
+    }
+
+    #[test]
+    fn ctrl_o_opens() {
+        assert_eq!(key_command("o", true, false), Some(KeyCommand::Open));
+        assert_eq!(key_command("o", false, false), None);
     }
 
     #[test]

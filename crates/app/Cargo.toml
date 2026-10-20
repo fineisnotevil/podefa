@@ -18,3 +18,4 @@ workspace = true
 pdf-core = { workspace = true }
 engine-mupdf = { workspace = true }
 slint = { workspace = true }
+rfd = { workspace = true }
