@@ -426,11 +426,16 @@ fn a_superseded_epoch_delivers_no_pixels_and_aborts_what_was_running() {
         "the superseded epoch delivered all {CELLS} tiles: the cancel lost its race with the pool, \
          so a zoom rasterizes work it has already replaced"
     );
-    assert!(
-        !superseded.aborts.is_empty(),
-        "no tile was inside the rasterizer when its epoch was superseded, so the abort path went \
-         untested"
-    );
+    // With the mid-raster abort switched off (`engine_mupdf::MID_RASTER_ABORT`, benchmarks §9.7) a
+    // tile counts as aborted only if the cancel lands during its 1-4 ms raster, which is timing; the
+    // abort path is then not guaranteed to be exercised, and this check comes back with the abort.
+    if engine_mupdf::MID_RASTER_ABORT {
+        assert!(
+            !superseded.aborts.is_empty(),
+            "no tile was inside the rasterizer when its epoch was superseded, so the abort path \
+             went untested"
+        );
+    }
     // Tiles finished before the cancel landed are delivered; the ones still rasterizing when it did
     // are aborted. Only one raster per worker can be in the second group, so a larger count means a
     // raster was reported twice or the registry handed `retire` a stale entry.

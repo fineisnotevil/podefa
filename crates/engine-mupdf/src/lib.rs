@@ -26,8 +26,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use thiserror::Error;
 
-pub use pool::worker_count;
 use pool::{Job, Pool, Prepared, run_tile};
+pub use pool::{MID_RASTER_ABORT, worker_count};
 use search::SearchThread;
 
 /// Typed error enum for MuPDF engine operations.

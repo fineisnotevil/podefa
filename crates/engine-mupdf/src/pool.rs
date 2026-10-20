@@ -237,7 +237,7 @@ fn run_base(prepared: &Prepared, cookie: Option<&Cookie>) -> Result<Bitmap, Mupd
 /// queued tile of the epoch and still keeps a finished raster of a cancelled epoch from being
 /// published (both decided in the registry); only a tile already rasterizing runs to its end. Turn
 /// this back on once mupdf-rs closes devices inside a `fz_try`.
-const MID_RASTER_ABORT: bool = false;
+pub const MID_RASTER_ABORT: bool = false;
 
 fn run_into(
     target: &Pixmap,
