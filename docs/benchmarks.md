@@ -961,4 +961,5 @@ becomes "cancel to end of that raster". Measured after the fix:
 `dense_vector.pdf` is the worst case by design (one expensive node a tile). With the cookie it stayed
 at 21-26 ms (`benchmarks.md` §7.5); without it, about one burst in five waits for heavy tiles already
 rasterizing and its first new tile takes 190-230 ms. That is the measured cost of the stop-gap,
-recorded in `backlog.md` item 7 together with the condition for undoing it.
+recorded in `backlog.md` item 7 together with the condition for undoing it: a mupdf-rs release that
+carries `ffaf28f5` (messense/mupdf-rs#249, already on upstream `main`).

@@ -266,10 +266,17 @@ sometimes waits for tiles already rasterizing: `dense_vector.pdf` shows one burs
 
 ### Proposed Solution
 
-A pull request to mupdf-rs adds a guarded `mupdf_close_device` wrapper to `mupdf-sys` and uses it in
-`Drop for Device` (and as a fallible `Device::close`). Once a release carries it: update the `mupdf`
-dependency (dropping or rebasing `patches/mupdf`), set `MID_RASTER_ABORT = true`, and check that
-`abort_safety_test.rs` passes with it on and that `dense_vector.pdf` is back at §7.5's numbers.
+**Already fixed upstream, not released yet.** mupdf-rs `main` has a `fz_try`-guarded
+`mupdf_close_device` wrapper in `mupdf-sys` and uses it in `Drop for Device` - commit `ffaf28f5`,
+"Audit and fix correctness and soundness" (messense/mupdf-rs#249, 2026-07-08). The latest release,
+`v0.8.0` (2026-06-22), predates it. Checked 2026-10-20; no pull request was sent, since it would
+duplicate #249.
+
+Once a release after `v0.8.0` carries it: update the `mupdf` dependency (dropping or rebasing
+`patches/mupdf`), set `MID_RASTER_ABORT = true`, and check that `abort_safety_test.rs` passes with it
+on and that `dense_vector.pdf` is back at §7.5's numbers. Depending on upstream `main` by git revision
+before that release is possible, but needs `deny.toml` to allow the git source and `patches/mupdf`'s
+MSVC change to be rebased.
 
 ### Alternatives Considered
 
