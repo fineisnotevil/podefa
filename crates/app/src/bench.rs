@@ -83,6 +83,9 @@ pub struct Cfg {
     /// `--bench-nav`: drive every navigation action through the window's own input path and check
     /// where each one lands (Plan 0002, §6 row F).
     pub nav: bool,
+    /// `--bench-reopen N`: open the same document N times in one process (the first open
+    /// included) and sample the working set one step after each (Plan 0003, §6 row H).
+    pub reopen: u32,
 }
 
 impl Default for Cfg {
@@ -101,6 +104,7 @@ impl Default for Cfg {
             scroll_s: 30.0,
             jump_page: None,
             nav: false,
+            reopen: 0,
         }
     }
 }
@@ -113,6 +117,7 @@ impl Cfg {
             && self.scroll_pxs <= 0.0
             && self.jump_page.is_none()
             && !self.nav
+            && self.reopen == 0
     }
 }
 
@@ -166,6 +171,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             "--bench-scroll-s" => {
                 cfg.scroll_s = number.unwrap_or(30.0).max(0.0);
+                consumed = 2;
+            }
+            "--bench-reopen" => {
+                cfg.reopen = number.unwrap_or(10.0).max(0.0) as u32;
                 consumed = 2;
             }
             "--bench-nav" => {
@@ -479,6 +488,8 @@ pub struct Trace {
     scroll_mem_from: Option<usize>,
     /// `--bench-nav` checks: `(step, passed)`.
     nav_checks: Vec<(String, bool)>,
+    /// `--bench-reopen` samples: `(open number, working set bytes)`.
+    reopen_ws: Vec<(u32, usize)>,
 }
 
 impl Trace {
@@ -501,6 +512,7 @@ impl Trace {
             max_resident: 0,
             scroll_mem_from: None,
             nav_checks: Vec::new(),
+            reopen_ws: Vec::new(),
         }
     }
 
@@ -661,6 +673,13 @@ impl Trace {
         self.stats.grows += 1;
         let t = self.t_ms();
         self.print(format_args!("grow t={t}ms capacity={capacity}"));
+    }
+
+    /// The working set one step after the `n`-th open of the same document (`ws_after_open_n`).
+    pub fn reopen_sample(&mut self, n: u32) {
+        let ws = process_memory().map_or(0, |mem| mem.ws);
+        self.reopen_ws.push((n, ws));
+        println!("[bench] reopen n={n} ws={}", mem_str(Some(ws)));
     }
 
     /// One `--bench-nav` step checked: what the core predicted and what the window shows.
@@ -903,16 +922,36 @@ impl Trace {
                 self.nav_checks.len()
             );
         }
+        // Row H: the working set after the last open against after the first, 10 MiB allowed.
+        let mut reopen_failed = false;
+        if let (Some(first), Some(last)) = (self.reopen_ws.first(), self.reopen_ws.last()) {
+            let delta = last.1 as f64 - first.1 as f64;
+            reopen_failed = delta > 10.0 * 1024.0 * 1024.0;
+            println!(
+                "[bench] ws_after_open first(n={})={:.1}MiB last(n={})={:.1}MiB delta={:+.1}MiB \
+                 (limit +10 MiB) {}",
+                first.0,
+                mib(first.1 as u128),
+                last.0,
+                mib(last.1 as u128),
+                delta / (1024.0 * 1024.0),
+                if reopen_failed { "FAIL" } else { "PASS" }
+            );
+        }
         let worst_blank = runs.iter().filter_map(|run| run.blank_max).max();
         let Some(worst_blank) = worst_blank else {
             if nav_failed > 0 {
                 println!("[bench] VERDICT     FAIL - {nav_failed} navigation step(s) missed");
                 return false;
             }
+            if reopen_failed {
+                println!("[bench] VERDICT     FAIL - the working set grew across reopening");
+                return false;
+            }
             println!("[bench] VERDICT     n/a - no level change was measured");
             return true;
         };
-        let pass = worst_blank <= cfg.max_blank_ms && nav_failed == 0;
+        let pass = worst_blank <= cfg.max_blank_ms && nav_failed == 0 && !reopen_failed;
         println!(
             "[bench] VERDICT     {} - worst t_blank {worst_blank} ms vs {} ms ceiling",
             if pass { "PASS" } else { "FAIL" },
@@ -935,6 +974,8 @@ enum Phase {
     Scroll,
     /// The navigation steps of [`NAV_STEPS`], one per tick, each checked on the next tick.
     Nav,
+    /// Sample the working set, then open the same document again; one open per tick.
+    Reopen,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -947,6 +988,7 @@ struct Pending {
     pan: bool,
     scroll: bool,
     nav: bool,
+    reopen: bool,
 }
 
 impl Pending {
@@ -958,6 +1000,7 @@ impl Pending {
             pan: cfg.pan_px > 0.0 && cfg.pan_steps > 0,
             scroll: cfg.scroll_pxs > 0.0 && cfg.scroll_s > 0.0,
             nav: cfg.nav,
+            reopen: cfg.reopen > 0,
         }
     }
 
@@ -969,6 +1012,7 @@ impl Pending {
             (&mut self.pan, Phase::Pan),
             (&mut self.scroll, Phase::Scroll),
             (&mut self.nav, Phase::Nav),
+            (&mut self.reopen, Phase::Reopen),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1245,6 +1289,7 @@ impl Driver {
             Phase::Pan => "pan",
             Phase::Scroll => "scroll",
             Phase::Nav => "nav",
+            Phase::Reopen => "reopen",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -1322,6 +1367,24 @@ impl Driver {
                 if done || elapsed_ms >= self.cfg.scroll_s * 1000.0 {
                     self.settle();
                 }
+                false
+            }
+            Phase::Reopen => {
+                // Tick k samples the working set left by open k (the first open is the one the
+                // run started on, already settled), then starts open k+1 - so with a step of a
+                // couple of seconds every sample sees a settled document.
+                let n = self.step + 1;
+                with_state(|state| state.bench.reopen_sample(n));
+                if n >= self.cfg.reopen {
+                    self.settle();
+                    return false;
+                }
+                with_state(|state| {
+                    if let Some(path) = state.settings.recent.first().cloned() {
+                        state.open_path(ui, path);
+                    }
+                });
+                self.step += 1;
                 false
             }
             Phase::Nav => {
@@ -1449,7 +1512,8 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
     // A pan-only scenario opens on its pan phase, as it always did; anything else settles first so
     // its first step does not land inside the document's own first render.
     let mut pending = Pending::all(&cfg);
-    let only_pan = !pending.jump && !pending.zoom && !pending.scroll && !pending.nav;
+    let only_pan =
+        !pending.jump && !pending.zoom && !pending.scroll && !pending.nav && !pending.reopen;
     let phase = if only_pan {
         pending.pan = false;
         Phase::Pan
