@@ -7,9 +7,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 2 implemented and checked, at its gate - awaiting approval.** Phase 1 passed its gate (§0);
-the Phase 2 evidence is the "Phase 2 results" block in §5 and [`../benchmarks.md`](../benchmarks.md)
-§8.4. Phase 3 stays conditional on real-world documents.
+**Phases 0-2 done; Phase 3 conditional, waiting on real-world documents.** Every gate so far has
+passed (§0); the evidence is §5 and [`../benchmarks.md`](../benchmarks.md) §8. Phase 3 (progressive
+page sizes) is scheduled only if row G's measurement on the maintainer's documents exceeds its budget.
 
 Registered at the Plan 0001 Phase 0 gate so that the Plan 0001 tile key and geometry types do not
 have to be reshaped later. The original prerequisite - Plan 0001 reaching its Phase 3 gate - was
@@ -19,7 +19,7 @@ below depends on it.
 
 - Phase 0 (research, measurement, this document): **done**, gate passed (§0).
 - Phase 1 (layout, windowed scroll, virtualization): **done**, gate passed (§0).
-- Phase 2 (navigation and input): **implemented, at its gate** (§5).
+- Phase 2 (navigation and input): **done**, gate passed (§0).
 - Phase 3 (progressive page sizes): conditional - only if §3.5's real-world measurement asks for it.
 
 ## 0. Gate record
@@ -37,6 +37,9 @@ Phase 0 gate passed 2026-10-20. The maintainer approved every proposal in §9:
 Phase 1 gate passed 2026-10-20: the maintainer ran the three manual checks (fling across a re-anchor,
 wheel scroll across pages, centring on resize) with no problem found, and accepted row B's
 `ws_growth` FAIL as documented in `benchmarks.md` §8.3. Phase 2 started.
+
+Phase 2 gate passed 2026-10-20: the maintainer ran the three manual checks (ctrl+wheel with a mouse
+and a touchpad, scrollbar drag on 20,000 pages, focus after the page field) with no problem found.
 
 ## 1. Problem
 
@@ -406,7 +409,7 @@ Not scriptable, left to the maintainer:
 3. **Focus:** after typing a page number and pressing Enter, the arrow keys scroll again without a
    click.
 
-**Gate: stopped here, awaiting approval.**
+**Gate: passed 2026-10-20 (§0).**
 
 ### Phase 3 - Progressive page sizes (conditional)
 
