@@ -93,6 +93,13 @@ pub struct Cfg {
     pub thumbs_pxs: f64,
     /// `--bench-outline`: go to every outline entry and check where each lands (row K).
     pub outline: bool,
+    /// `--bench-search QUERY`: search the document, zooming in once a second meanwhile, and
+    /// report `t_first_hit`, `t_search` and the working set around it (Plan 0003, §6 rows L, O).
+    pub search: Option<String>,
+    /// `--bench-search-replace QUERY`: three ticks into the search, replace it with this one (row M).
+    pub search_replace: Option<String>,
+    /// `--bench-search-expect N`: the final search must end with exactly N hits.
+    pub search_expect: Option<usize>,
 }
 
 impl Default for Cfg {
@@ -114,6 +121,9 @@ impl Default for Cfg {
             reopen: 0,
             thumbs_pxs: 0.0,
             outline: false,
+            search: None,
+            search_replace: None,
+            search_expect: None,
         }
     }
 }
@@ -129,6 +139,7 @@ impl Cfg {
             && self.reopen == 0
             && self.thumbs_pxs <= 0.0
             && !self.outline
+            && self.search.is_none()
     }
 }
 
@@ -191,6 +202,18 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-outline" => {
                 cfg.outline = number.is_none_or(|on| on != 0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-search" => {
+                cfg.search = args.get(i + 1).cloned();
+                consumed = 2;
+            }
+            "--bench-search-replace" => {
+                cfg.search_replace = args.get(i + 1).cloned();
+                consumed = 2;
+            }
+            "--bench-search-expect" => {
+                cfg.search_expect = number.map(|n| n.max(0.0) as usize);
+                consumed = 2;
             }
             "--bench-reopen" => {
                 cfg.reopen = number.unwrap_or(10.0).max(0.0) as u32;
@@ -508,6 +531,9 @@ pub struct Trace {
     max_thumbs: usize,
     /// Index into `memory` where the scroll phase started, for `ws_growth`.
     scroll_mem_from: Option<usize>,
+    /// `t_first_hit` samples, and searches finished.
+    first_hit_ms: Vec<u128>,
+    searches_done: u32,
     /// `--bench-nav` checks: `(step, passed)`.
     nav_checks: Vec<(String, bool)>,
     /// `--bench-reopen` samples: `(open number, working set bytes)`.
@@ -535,6 +561,8 @@ impl Trace {
             thumbs: 0,
             max_thumbs: 0,
             scroll_mem_from: None,
+            first_hit_ms: Vec::new(),
+            searches_done: 0,
             nav_checks: Vec::new(),
             reopen_ws: Vec::new(),
         }
@@ -722,6 +750,59 @@ impl Trace {
         self.max_thumbs
     }
 
+    /// A search was sent (Plan 0003, §9.3).
+    pub fn search_started(&mut self, generation: u64, query: &str) {
+        if !self.on {
+            return;
+        }
+        let t = self.t_ms();
+        let ws = process_memory().map(|mem| mem.ws);
+        self.print(format_args!(
+            "search t={t}ms generation={generation} query={query:?} ws={}",
+            mem_str(ws)
+        ));
+    }
+
+    /// The first hit of a search reached the results: `t_first_hit`.
+    pub fn first_hit(&mut self, ms: u128) {
+        if !self.on {
+            return;
+        }
+        self.first_hit_ms.push(ms);
+        let t = self.t_ms();
+        self.print(format_args!("first_hit t={t}ms {ms}"));
+    }
+
+    /// A search covered the document: `t_search` as the search thread measured it (`ms`) and as the
+    /// app saw it (`wall`, from the send), with the hit count and the stale hits refused so far.
+    pub fn search_done(
+        &mut self,
+        pages: u32,
+        ms: u64,
+        wall: Option<u128>,
+        hits: usize,
+        stale: u64,
+    ) {
+        if !self.on {
+            return;
+        }
+        let t = self.t_ms();
+        let ws = process_memory().map(|mem| mem.ws);
+        let per_page = ms as f64 / pages.max(1) as f64;
+        self.print(format_args!(
+            "search_done t={t}ms pages={pages} ms={ms} ({per_page:.2} ms/page) wall={} hits={hits} \
+             stale_refused={stale} ws={}",
+            wall.map_or_else(|| "-".to_owned(), |w| w.to_string()),
+            mem_str(ws)
+        ));
+        self.searches_done += 1;
+    }
+
+    /// Searches that reported done.
+    pub fn searches_done(&self) -> u32 {
+        self.searches_done
+    }
+
     /// The sidebar holds `n` thumbnails now.
     pub fn thumbs_held(&mut self, n: usize) {
         self.thumbs = n;
@@ -863,6 +944,17 @@ impl Trace {
             "[bench] tiles       rendered={rendered} requested={requested} grows={}",
             runs.iter().map(|run| run.grows).sum::<u32>()
         );
+        if !self.first_hit_ms.is_empty() {
+            let (h_min, h_med, h_max) = spread(&self.first_hit_ms);
+            println!(
+                "[bench] t_first_hit min={h_min} med={h_med} max={h_max} n={} (ms from send)",
+                self.first_hit_ms.len()
+            );
+            println!(
+                "[bench] ws_at_report {}",
+                mem_str(process_memory().map(|mem| mem.ws))
+            );
+        }
         let (r_min, r_med, r_max) = spread(&self.reanchor_us);
         println!(
             "[bench] pages       visited={} resident_max={} reanchors={} reanchor_us \
@@ -1031,6 +1123,8 @@ enum Phase {
     Thumbs,
     /// Go to every outline entry, each checked on the next tick.
     Outline,
+    /// Search, with a zoom step a second, until the (last) search reports done.
+    Search,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1046,6 +1140,7 @@ struct Pending {
     reopen: bool,
     thumbs: bool,
     outline: bool,
+    search: bool,
 }
 
 impl Pending {
@@ -1060,6 +1155,7 @@ impl Pending {
             reopen: cfg.reopen > 0,
             thumbs: cfg.thumbs_pxs > 0.0,
             outline: cfg.outline,
+            search: cfg.search.is_some(),
         }
     }
 
@@ -1074,6 +1170,7 @@ impl Pending {
             (&mut self.reopen, Phase::Reopen),
             (&mut self.thumbs, Phase::Thumbs),
             (&mut self.outline, Phase::Outline),
+            (&mut self.search, Phase::Search),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1106,6 +1203,8 @@ struct Driver {
     resetting: bool,
     /// The `--bench-nav` step performed on the last tick and the state it should have produced.
     nav_expect: Option<(&'static str, String)>,
+    /// Searches finished before the search phase started.
+    searches_before: u32,
 }
 
 /// The most thumbnails held so far in this run.
@@ -1360,6 +1459,7 @@ impl Driver {
             Phase::Reopen => "reopen",
             Phase::Thumbs => "thumbs",
             Phase::Outline => "outline",
+            Phase::Search => "search",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -1469,6 +1569,67 @@ impl Driver {
                         "[bench] thumbs scrolled to row {:.0} of {rows:.0}, max held {held}",
                         -next / crate::THUMB_ROW_LOGICAL_PX
                     );
+                    self.settle();
+                }
+                false
+            }
+            Phase::Search => {
+                if self.step == 0 {
+                    let query = self.cfg.search.clone().unwrap_or_default();
+                    with_state(|state| {
+                        self.searches_before = state.bench.searches_done();
+                        ui.set_find_visible(true);
+                        ui.set_find_text(query.as_str().into());
+                        state.start_search(ui, &query);
+                    });
+                }
+                if self.step == 3
+                    && let Some(replace) = self.cfg.search_replace.clone()
+                {
+                    with_state(|state| {
+                        ui.set_find_text(replace.as_str().into());
+                        state.start_search(ui, &replace);
+                    });
+                }
+                let per_second = (1000 / self.cfg.step_ms.max(1)).max(1) as u32;
+                if self.step % per_second == per_second - 1 {
+                    let (anchor_x, anchor_y) = viewport_center(ui);
+                    with_state(|state| {
+                        let next = zoom_in_milli(state.scale_milli);
+                        state.zoom(ui, next, anchor_x, anchor_y);
+                    });
+                }
+                self.step += 1;
+                let mut done = false;
+                with_state(|state| {
+                    // With a replacement, the first search is cancelled and never finishes.
+                    let replaced = self.cfg.search_replace.is_some() && self.step > 3;
+                    let alone = self.cfg.search_replace.is_none();
+                    done =
+                        (replaced || alone) && state.bench.searches_done() > self.searches_before;
+                });
+                let timed_out = self.step as u64 * self.cfg.step_ms > 300_000;
+                if done || timed_out {
+                    with_state(|state| {
+                        let hits = state.search.hits().len();
+                        let pages: std::collections::BTreeSet<u32> =
+                            state.search.hits().iter().map(|h| h.page).collect();
+                        println!(
+                            "[bench] search_result hits={hits} pages_with_hits={} stale_refused={} \
+                             counter={:?}{}",
+                            pages.len(),
+                            state.search.stale(),
+                            ui.get_find_counter().as_str(),
+                            if timed_out { " TIMED OUT" } else { "" }
+                        );
+                        if let Some(expected) = self.cfg.search_expect {
+                            state.bench.nav_check(
+                                "search hits",
+                                &format!("hits={expected}"),
+                                &format!("hits={hits}"),
+                            );
+                        }
+                    });
                     self.settle();
                 }
                 false
@@ -1677,7 +1838,8 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
         && !pending.nav
         && !pending.reopen
         && !pending.thumbs
-        && !pending.outline;
+        && !pending.outline
+        && !pending.search;
     let phase = if only_pan {
         pending.pan = false;
         Phase::Pan
@@ -1695,6 +1857,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             home: None,
             resetting: false,
             nav_expect: None,
+            searches_before: 0,
         });
     });
 

@@ -20,6 +20,7 @@ use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
 };
+use pdf_core::search::{SearchHit, SearchResults};
 use pdf_core::settings::{Settings, Theme};
 use pdf_core::{
     Bitmap, CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, EngineCmd, EngineEvent,
@@ -90,6 +91,15 @@ slint::slint! {
         enabled: bool,
     }
 
+    // One highlighted search hit rectangle, in canvas logical pixels (Plan 0003, §4.4).
+    export struct HitView {
+        x: length,
+        y: length,
+        w: length,
+        h: length,
+        current: bool,
+    }
+
     export component MainWindow inherits Window {
         title: root.doc-title == "" ? "PODEFA - PDF Viewer" : root.doc-title + " - PODEFA";
         init => {
@@ -129,6 +139,12 @@ slint::slint! {
         // The thumbnail list's scroll position, bound both ways like the viewport's.
         in-out property <length> thumb-scroll-y: 0px;
 
+        // The find bar (Plan 0003, §4.4).
+        in-out property <bool> find-visible: false;
+        in-out property <string> find-text: "";
+        in-out property <string> find-counter: "";
+        in-out property <[HitView]> hit-rects;
+
         in-out property <string> status_text: "No document loaded";
         in-out property <string> error_text: "";
         in-out property <bool> has_error: false;
@@ -165,6 +181,14 @@ slint::slint! {
         callback go_to_page(string);
         // The scrollbar thumb was dragged to `offset` within a track of `track`.
         callback scrollbar_moved(length, length);
+        callback find_open();
+        callback find_changed(string);
+        callback find_next();
+        callback find_previous();
+        callback find_close();
+        // Gives the keyboard back to the viewport (after the find bar closes).
+        callback focus_viewport();
+        focus_viewport => { viewport-keys.focus(); }
         callback toggle_sidebar();
         callback sidebar_tab_changed();
         callback thumbs_moved();
@@ -207,6 +231,14 @@ slint::slint! {
                     title: "Quit";
                     shortcut: @keys(Control + Q);
                     activated => { root.quit(); }
+                }
+            }
+            Menu {
+                title: "Edit";
+                MenuItem {
+                    title: "Find...";
+                    shortcut: @keys(Control + F);
+                    activated => { root.find_open(); }
                 }
             }
             Menu {
@@ -324,6 +356,45 @@ slint::slint! {
                     text: Math.round(root.zoom_percent) + "%";
                     vertical-alignment: center;
                     min-width: 70px;
+                }
+            }
+
+            // The find bar: Enter / F3 next, Shift+Enter / Shift+F3 previous, Esc closes.
+            if root.find-visible : FocusScope {
+                height: 32px;
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.find_close();
+                        return accept;
+                    }
+                    if (event.text == Key.Return && event.modifiers.shift) {
+                        root.find_previous();
+                        return accept;
+                    }
+                    if (event.text == Key.F3) {
+                        if (event.modifiers.shift) { root.find_previous(); } else { root.find_next(); }
+                        return accept;
+                    }
+                    return reject;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        placeholder-text: "Find in document";
+                        text <=> root.find-text;
+                        init => { self.focus(); }
+                        edited(text) => { root.find_changed(text); }
+                        accepted => { root.find_next(); }
+                    }
+                    Text {
+                        text: root.find-counter;
+                        vertical-alignment: center;
+                        min-width: 90px;
+                        color: Palette.foreground;
+                    }
+                    Button { text: "Previous"; clicked => { root.find_previous(); } }
+                    Button { text: "Next"; clicked => { root.find_next(); } }
+                    Button { text: "Close"; clicked => { root.find_close(); } }
                 }
             }
 
@@ -505,6 +576,14 @@ slint::slint! {
                         x: tile.x; y: tile.y; width: tile.w; height: tile.h;
                     }
 
+                    // Search hits over the tiles: page-relative rectangles placed like tiles.
+                    for hit in root.hit-rects : Rectangle {
+                        x: hit.x; y: hit.y; width: hit.w; height: hit.h;
+                        background: hit.current ? #ff8c0080 : #ffd60066;
+                        border-width: hit.current ? 1px : 0px;
+                        border-color: #e65100;
+                    }
+
                     // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
                     // children first, so this area - kept over the viewport, not the canvas -
                     // sees them; without ctrl it rejects them and the Flickable scrolls.
@@ -610,6 +689,9 @@ const THUMB_INFLIGHT: usize = 4;
 /// Rows above and below the visible ones that are requested ahead.
 const THUMB_MARGIN_ROWS: usize = 2;
 
+/// Delay between the last keystroke in the find field and the search it starts.
+const FIND_DEBOUNCE_MS: u64 = 200;
+
 /// Spare model rows above the strictly visible tile count: the one-tile ring the prefetch
 /// requests, so a one-tile pan finds its next column already rendered instead of blank.
 const TILE_MARGIN_RING: usize = 2;
@@ -709,6 +791,14 @@ struct AppState {
     /// Outline row -> index into `outline_items`.
     outline_visible: Vec<usize>,
     outline_model: Rc<VecModel<OutlineRow>>,
+    /// The current search's hits (Plan 0003, §4.4) and its generation counter.
+    search: SearchResults,
+    search_generation: u64,
+    search_query: String,
+    hits_model: Rc<VecModel<HitView>>,
+    hit_rows: Vec<(f32, f32, f32, f32, bool)>,
+    /// When the current search was sent, for `t_first_hit` (benchmarks §9.3).
+    search_sent: Option<Instant>,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -869,6 +959,7 @@ impl AppState {
         self.bench.frame(&self.scheduler, &visible, &ring);
         self.apply(ui, actions);
         self.update_pages(ui);
+        self.update_hits(ui);
 
         let (_, view_h) = self.view_size(ui);
         if let Some(page) = self.layout.page_near(self.pos.1 + view_h / 2.0) {
@@ -881,6 +972,182 @@ impl AppState {
             self.set_current_thumb(ui, page);
         }
         self.update_scrollbar(ui);
+    }
+
+    /// Starts a search for `query` from the reader's page; an empty query just clears the results.
+    fn start_search(&mut self, ui: &MainWindow, query: &str) {
+        self.search_generation += 1;
+        self.search.begin(self.search_generation);
+        self.search_query = query.to_owned();
+        self.hit_rows.clear();
+        if query.trim().is_empty() || self.layout.is_empty() {
+            let _ = self.cmd_tx.send(EngineCmd::CancelSearch);
+            self.search_sent = None;
+        } else {
+            let from_page = self.current_page(ui) as u32;
+            let _ = self.cmd_tx.send(EngineCmd::Search {
+                query: query.to_owned(),
+                from_page,
+                generation: self.search_generation,
+            });
+            self.search_sent = Some(Instant::now());
+            self.bench.search_started(self.search_generation, query);
+        }
+        ui.set_find_counter(SharedString::from(self.search.counter()));
+        self.update_hits(ui);
+    }
+
+    /// Stops any search and forgets its results (a new document, or the find bar closed).
+    fn cancel_search(&mut self) {
+        self.search_generation += 1;
+        self.search.begin(self.search_generation);
+        self.search_sent = None;
+        self.hit_rows.clear();
+        self.hits_model.set_vec(Vec::new());
+        let _ = self.cmd_tx.send(EngineCmd::CancelSearch);
+    }
+
+    /// A page of hits arrived. The first hit of a search is shown at once; later ones only update
+    /// the counter and the highlights, so the view does not jump while the reader looks around.
+    fn apply_hits(
+        &mut self,
+        ui: &MainWindow,
+        generation: u64,
+        page: u32,
+        hits: Vec<Vec<pdf_core::Rect>>,
+    ) {
+        let had_current = self.search.current().is_some();
+        if !self.search.add(generation, page, hits) {
+            return;
+        }
+        if !had_current {
+            if let Some(sent) = self.search_sent {
+                self.bench.first_hit(sent.elapsed().as_millis());
+            }
+            if let Some(hit) = self.search.current_hit().cloned() {
+                self.show_hit(ui, &hit);
+            }
+        }
+        ui.set_find_counter(SharedString::from(self.search.counter()));
+        self.hit_rows.clear();
+        self.update_hits(ui);
+    }
+
+    /// The search of `generation` covered the document.
+    fn search_done(&mut self, ui: &MainWindow, generation: u64, pages: u32, ms: u64) {
+        if generation != self.search.generation() {
+            return;
+        }
+        self.search.finish(generation);
+        ui.set_find_counter(SharedString::from(self.search.counter()));
+        let wall = self.search_sent.map(|sent| sent.elapsed().as_millis());
+        self.bench.search_done(
+            pages,
+            ms,
+            wall,
+            self.search.hits().len(),
+            self.search.stale(),
+        );
+    }
+
+    /// Next or previous hit, wrapping.
+    fn step_hit(&mut self, ui: &MainWindow, forward: bool) {
+        let hit = if forward {
+            self.search.next_hit().cloned()
+        } else {
+            self.search.previous_hit().cloned()
+        };
+        if let Some(hit) = hit {
+            ui.set_find_counter(SharedString::from(self.search.counter()));
+            self.show_hit(ui, &hit);
+        }
+    }
+
+    /// Scrolls so a hit is in view: left alone if it already is, otherwise placed a third of the
+    /// way down the viewport (and centred horizontally when it is off to a side).
+    fn show_hit(&mut self, ui: &MainWindow, hit: &SearchHit) {
+        let Some(slot) = self.layout.slot(hit.page as usize).copied() else {
+            return;
+        };
+        let Some(rect) = hit.rects.first() else {
+            return;
+        };
+        let s = self.scale_milli as f64 / 1000.0;
+        let (x, y) = (
+            slot.x as f64 + rect.x as f64 * s,
+            slot.y as f64 + rect.y as f64 * s,
+        );
+        let (w, h) = (rect.width as f64 * s, rect.height as f64 * s);
+        let (view_w, view_h) = self.view_size(ui);
+        let mut target = self.pos;
+        if y < self.pos.1 || y + h > self.pos.1 + view_h {
+            target.1 = y - view_h / 3.0;
+        }
+        if x < self.pos.0 || x + w > self.pos.0 + view_w {
+            target.0 = x + w / 2.0 - view_w / 2.0;
+        }
+        if target != self.pos {
+            if (target.1 - self.pos.1).abs() > 2.0 * view_h {
+                self.begin_epoch();
+            }
+            self.scroll_to(ui, target);
+        }
+        self.hit_rows.clear();
+        self.update_hits(ui);
+    }
+
+    /// The highlight rectangles of the hits on the pages near the view. Hits are in page order, so
+    /// the ones to draw are found by binary search, however many the document has.
+    fn update_hits(&mut self, ui: &MainWindow) {
+        let near = self.near_pages(ui);
+        let hits = self.search.hits();
+        let start = hits.partition_point(|h| (h.page as usize) < near.start);
+        let end = hits.partition_point(|h| (h.page as usize) < near.end);
+        let current = self.search.current();
+        let s = self.scale_milli as f64 / 1000.0;
+        let sf = self.sf() as f32;
+        let mut rows = Vec::new();
+        for (i, hit) in hits.iter().enumerate().take(end).skip(start) {
+            let Some(slot) = self.layout.slot(hit.page as usize) else {
+                continue;
+            };
+            for rect in &hit.rects {
+                rows.push((
+                    self.canvas_x(slot.x as f64 + rect.x as f64 * s),
+                    self.canvas_y(slot.y as f64 + rect.y as f64 * s),
+                    (rect.width as f64 * s) as f32 / sf,
+                    (rect.height as f64 * s) as f32 / sf,
+                    Some(i) == current,
+                ));
+            }
+        }
+        if rows == self.hit_rows {
+            return;
+        }
+        let views: Vec<HitView> = rows
+            .iter()
+            .map(|&(x, y, w, h, current)| HitView {
+                x,
+                y,
+                w,
+                h,
+                current,
+            })
+            .collect();
+        self.hits_model.set_vec(views);
+        self.hit_rows = rows;
+    }
+
+    /// Ctrl+F: show the find bar (its field takes the focus); search again if it has text.
+    fn find_open(&mut self, ui: &MainWindow) {
+        ui.set_find_visible(true);
+    }
+
+    /// Esc or Close: hide the find bar, stop the search, drop the highlights.
+    fn find_close(&mut self, ui: &MainWindow) {
+        ui.set_find_visible(false);
+        self.cancel_search();
+        ui.set_find_counter(SharedString::new());
     }
 
     /// One empty thumbnail row per page, and nothing held or in flight.
@@ -1424,6 +1691,7 @@ impl AppState {
         // work from anywhere. `absolute` neither touches the file system nor adds Windows' `\\?\`.
         let path = std::path::absolute(&path).unwrap_or(path);
         self.doc_generation += 1;
+        self.cancel_search();
         self.reset_thumbs(0);
         self.set_outline(Vec::new());
         self.begin_epoch();
@@ -1445,6 +1713,11 @@ impl AppState {
 
     /// The engine opened the document `open_path` asked for: remember it.
     fn document_opened(&mut self, ui: &MainWindow) {
+        // A find bar still open searches the new document for the same text.
+        if ui.get_find_visible() && !self.search_query.trim().is_empty() {
+            let query = self.search_query.clone();
+            self.start_search(ui, &query);
+        }
         let Some(path) = self.opening.take() else {
             return;
         };
@@ -1764,6 +2037,10 @@ enum KeyCommand {
     ZoomReset,
     Open,
     ToggleSidebar,
+    Find,
+    FindNext,
+    FindPrevious,
+    FindClose,
 }
 
 /// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
@@ -1780,11 +2057,22 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             '0' => Some(KeyCommand::ZoomReset),
             'o' | 'O' => Some(KeyCommand::Open),
             'b' | 'B' => Some(KeyCommand::ToggleSidebar),
+            'f' | 'F' => Some(KeyCommand::Find),
             _ => None,
         };
     }
     if c == char::from(Key::F4) {
         return Some(KeyCommand::ToggleSidebar);
+    }
+    if c == char::from(Key::F3) {
+        return Some(if shift {
+            KeyCommand::FindPrevious
+        } else {
+            KeyCommand::FindNext
+        });
+    }
+    if c == char::from(Key::Escape) {
+        return Some(KeyCommand::FindClose);
     }
     let action = match c {
         ' ' if shift => NavAction::PageUp,
@@ -1855,6 +2143,8 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.set_thumbs(ModelRc::from(thumbs_model.clone()));
     let outline_model = Rc::new(VecModel::<OutlineRow>::default());
     main_window.set_outline_rows(ModelRc::from(outline_model.clone()));
+    let hits_model = Rc::new(VecModel::<HitView>::default());
+    main_window.set_hit_rects(ModelRc::from(hits_model.clone()));
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -1888,6 +2178,12 @@ fn main() -> Result<(), slint::PlatformError> {
             outline_expanded: Vec::new(),
             outline_visible: Vec::new(),
             outline_model,
+            search: SearchResults::default(),
+            search_generation: 0,
+            search_query: String::new(),
+            hits_model,
+            hit_rows: Vec::new(),
+            search_sent: None,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -1964,6 +2260,20 @@ fn main() -> Result<(), slint::PlatformError> {
                     bitmap,
                 } => {
                     with_state(|state| state.apply_thumb(&ui, page, request_id, &bitmap));
+                }
+                EngineEvent::SearchHits {
+                    generation,
+                    page,
+                    hits,
+                } => {
+                    with_state(|state| state.apply_hits(&ui, generation, page, hits));
+                }
+                EngineEvent::SearchDone {
+                    generation,
+                    pages,
+                    ms,
+                } => {
+                    with_state(|state| state.search_done(&ui, generation, pages, ms));
                 }
                 EngineEvent::Outline { items } => {
                     with_state(|state| state.set_outline(items));
@@ -2075,6 +2385,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 KeyCommand::ZoomReset => state.zoom(&ui, ZOOM_DEFAULT_MILLI, ax, ay),
                 KeyCommand::ToggleSidebar => state.toggle_sidebar(&ui),
+                KeyCommand::Find => state.find_open(&ui),
+                KeyCommand::FindNext => state.step_hit(&ui, true),
+                KeyCommand::FindPrevious => state.step_hit(&ui, false),
+                KeyCommand::FindClose => state.find_close(&ui),
                 KeyCommand::Open => {
                     if let Some(path) = pick_document() {
                         state.open_path(&ui, path);
@@ -2225,6 +2539,71 @@ fn main() -> Result<(), slint::PlatformError> {
             with_state(|state| state.outline_toggled(row));
         }
     });
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_find_open(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.find_open(&ui));
+            }
+        });
+    }
+
+    {
+        // Typing restarts a single-shot timer; the search starts when the typing pauses.
+        let weak = main_window.as_weak();
+        let debounce = Rc::new(slint::Timer::default());
+        main_window.on_find_changed(move |text| {
+            let weak = weak.clone();
+            let query = text.to_string();
+            debounce.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(FIND_DEBOUNCE_MS),
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        with_state(|state| state.start_search(&ui, &query));
+                    }
+                },
+            );
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_find_next(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| {
+                    // Enter on a query that has not been searched yet (typed faster than the
+                    // debounce) searches it first.
+                    let query = ui.get_find_text().to_string();
+                    if query != state.search_query {
+                        state.start_search(&ui, &query);
+                    } else {
+                        state.step_hit(&ui, true);
+                    }
+                });
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_find_previous(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.step_hit(&ui, false));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_find_close(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.find_close(&ui));
+                ui.invoke_focus_viewport();
+            }
+        });
+    }
 
     main_window.on_quit(|| {
         let _ = slint::quit_event_loop();
@@ -2392,6 +2771,24 @@ mod tests {
             !expand_on_click(&items, &mut expanded, 9),
             "out of range is ignored"
         );
+    }
+
+    #[test]
+    fn find_keys() {
+        assert_eq!(key_command("f", true, false), Some(KeyCommand::Find));
+        assert_eq!(
+            key_command(&key(Key::F3), false, false),
+            Some(KeyCommand::FindNext)
+        );
+        assert_eq!(
+            key_command(&key(Key::F3), false, true),
+            Some(KeyCommand::FindPrevious)
+        );
+        assert_eq!(
+            key_command(&key(Key::Escape), false, false),
+            Some(KeyCommand::FindClose)
+        );
+        assert_eq!(key_command("f", false, false), None);
     }
 
     #[test]
