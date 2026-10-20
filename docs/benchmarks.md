@@ -825,3 +825,4 @@ the unlicensed probe crate). Linux and macOS sizes were not measured.
 | `stale_hits` | Hits of a superseded search generation that reached the model. Must be 0. |
 | `thumbs_resident` | Thumbnail images held by the app at the sample instant; logged on the `rss` line like `pages_resident`. |
 | `ws_after_open_n` | Working set sampled 2 s after the n-th open of the same document in one process (row H). |
+| `ws_after_search` | Working set just before a search starts, right after `SearchDone`, and 10 s later, with the search thread's document still open (row O). |
