@@ -103,6 +103,10 @@ pub struct Cfg {
     /// `--bench-search-keys`: once the search is done, press Enter, Shift+Enter, F3 and Shift+F3 in
     /// the find field through the window's input path and check the counter after each.
     pub search_keys: bool,
+    /// `--bench-select`: select text with pointer events sent through the window - a drag, a
+    /// Shift+click, a double- and a triple-click - on a `select_*p.pdf` document written by
+    /// `engine-mupdf/tests/selection_test.rs`, and check the selected text after each.
+    pub select: bool,
     /// `--bench-search-zoom`: zoom in once a second while the search runs (row L's `t_blank`);
     /// off by default, so a memory run (row O) measures the search alone.
     pub search_zoom: bool,
@@ -132,6 +136,7 @@ impl Default for Cfg {
             search_expect: None,
             search_zoom: false,
             search_keys: false,
+            select: false,
         }
     }
 }
@@ -148,6 +153,7 @@ impl Cfg {
             && self.thumbs_pxs <= 0.0
             && !self.outline
             && self.search.is_none()
+            && !self.select
     }
 }
 
@@ -218,6 +224,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-search-replace" => {
                 cfg.search_replace = args.get(i + 1).cloned();
                 consumed = 2;
+            }
+            "--bench-select" => {
+                cfg.select = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-search-keys" => {
                 cfg.search_keys = number.is_none_or(|on| on != 0.0);
@@ -1141,6 +1151,8 @@ enum Phase {
     Outline,
     /// Search, with a zoom step a second, until the (last) search reports done.
     Search,
+    /// Pointer selections, one per tick, each checked on the next tick.
+    Select,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1157,6 +1169,7 @@ struct Pending {
     thumbs: bool,
     outline: bool,
     search: bool,
+    select: bool,
 }
 
 impl Pending {
@@ -1172,6 +1185,7 @@ impl Pending {
             thumbs: cfg.thumbs_pxs > 0.0,
             outline: cfg.outline,
             search: cfg.search.is_some(),
+            select: cfg.select,
         }
     }
 
@@ -1187,6 +1201,7 @@ impl Pending {
             (&mut self.thumbs, Phase::Thumbs),
             (&mut self.outline, Phase::Outline),
             (&mut self.search, Phase::Search),
+            (&mut self.select, Phase::Select),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1221,6 +1236,64 @@ struct Driver {
     nav_expect: Option<(&'static str, String)>,
     /// Searches finished before the search phase started.
     searches_before: u32,
+}
+
+/// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
+fn window_point(ui: &MainWindow, (x, line): (f32, usize)) -> LogicalPosition {
+    let mut at = LogicalPosition::new(0.0, 0.0);
+    with_state(|state| {
+        let Some(slot) = state.layout.slot(0) else {
+            return;
+        };
+        let s = state.scale_milli as f64 / 1000.0;
+        let sf = state.sf();
+        let page_y = 42.0 + 12.0 * line as f64 - 3.0;
+        let doc_x = slot.x as f64 + x as f64 * s;
+        let doc_y = slot.y as f64 + page_y * s;
+        at = LogicalPosition::new(
+            ui.get_viewport_abs_x() + ((doc_x - state.pos.0) / sf) as f32,
+            ui.get_viewport_abs_y() + ((doc_y - state.pos.1) / sf) as f32,
+        );
+    });
+    at
+}
+
+/// A left-button drag from one point to another, through the window's input path.
+fn select_drag(ui: &MainWindow, from: (f32, usize), to: (f32, usize)) {
+    let window = ui.window();
+    let (a, b) = (window_point(ui, from), window_point(ui, to));
+    window.dispatch_event(WindowEvent::PointerMoved { position: a });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: a,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerMoved { position: b });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: b,
+        button: slint::platform::PointerEventButton::Left,
+    });
+}
+
+/// One left click, with Shift held when asked.
+fn select_click(ui: &MainWindow, at: (f32, usize), shift: bool) {
+    let window = ui.window();
+    let position = window_point(ui, at);
+    let click = || {
+        window.dispatch_event(WindowEvent::PointerMoved { position });
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        window.dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+    };
+    if shift {
+        with_modifier(ui, Key::Shift, click);
+    } else {
+        click();
+    }
 }
 
 /// The most thumbnails held so far in this run.
@@ -1476,6 +1549,7 @@ impl Driver {
             Phase::Thumbs => "thumbs",
             Phase::Outline => "outline",
             Phase::Search => "search",
+            Phase::Select => "select",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -1675,6 +1749,47 @@ impl Driver {
                     }
                     self.settle();
                 }
+                false
+            }
+            Phase::Select => {
+                if let Some((step, expected)) = self.nav_expect.take() {
+                    let mut got = String::new();
+                    with_state(|state| got = state.sel_text.clone());
+                    with_state(|state| state.bench.nav_check(step, &expected, &got));
+                }
+                // `select_*p.pdf`: page p, line l reads "p{p}l{l} alpha beta", baselines 12 pt
+                // apart from 42 pt below the page top (selection_test.rs).
+                let line = |l: usize| format!("p0l{l} alpha beta");
+                let lines = |a: usize, b: usize| (a..=b).map(line).collect::<Vec<_>>().join("\n");
+                let step = self.step;
+                let (name, expected): (&'static str, String) = match step {
+                    0 => {
+                        select_drag(ui, (20.0, 2), (600.0, 4));
+                        ("drag lines 2-4", lines(2, 4))
+                    }
+                    1 => {
+                        select_click(ui, (600.0, 6), true);
+                        ("shift+click to 6", lines(2, 6))
+                    }
+                    2 => {
+                        // Inside "alpha" (after "p0l9 ", ~25 pt of 10 pt Helvetica).
+                        select_click(ui, (94.0, 9), false);
+                        select_click(ui, (94.0, 9), false);
+                        ("double-click word", "alpha".to_owned())
+                    }
+                    3 => {
+                        select_click(ui, (94.0, 11), false);
+                        select_click(ui, (94.0, 11), false);
+                        select_click(ui, (94.0, 11), false);
+                        ("triple-click line", line(11))
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                };
+                self.nav_expect = Some((name, expected));
+                self.step += 1;
                 false
             }
             Phase::Outline => {
@@ -1882,7 +1997,8 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
         && !pending.reopen
         && !pending.thumbs
         && !pending.outline
-        && !pending.search;
+        && !pending.search
+        && !pending.select;
     let phase = if only_pan {
         pending.pan = false;
         Phase::Pan

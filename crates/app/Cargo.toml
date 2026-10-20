@@ -19,3 +19,11 @@ pdf-core = { workspace = true }
 engine-mupdf = { workspace = true }
 slint = { workspace = true }
 rfd = { workspace = true }
+
+# The clipboard (Plan 0003, §3.3; ADR 0006): the same arboard Slint's winit backend already links,
+# with the same features, so no second copy is built.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = { version = "3.6", default-features = false }

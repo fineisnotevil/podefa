@@ -21,6 +21,7 @@ use pdf_core::nav::{
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
 };
 use pdf_core::search::{SearchHit, SearchResults};
+use pdf_core::select::{PagePoint, PageSelection, SelectMode};
 use pdf_core::settings::{Settings, Theme};
 use pdf_core::{
     Bitmap, CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, EngineCmd, EngineEvent,
@@ -145,6 +146,14 @@ slint::slint! {
         in-out property <string> find-counter: "";
         in-out property <[HitView]> hit-rects;
 
+        // The text selection (Plan 0003, §4.5): highlight rectangles, and whether a touch long
+        // press is selecting (the Flickable stops panning until the finger lifts).
+        in-out property <[HitView]> sel-rects;
+        in-out property <bool> touch-selecting: false;
+        // Where the viewport sits in the window, for scripted pointer input (bench only).
+        out property <length> viewport-abs-x: viewport.absolute-position.x;
+        out property <length> viewport-abs-y: viewport.absolute-position.y;
+
         in-out property <string> status_text: "No document loaded";
         in-out property <string> error_text: "";
         in-out property <bool> has_error: false;
@@ -181,6 +190,10 @@ slint::slint! {
         callback go_to_page(string);
         // The scrollbar thumb was dragged to `offset` within a track of `track`.
         callback scrollbar_moved(length, length);
+        // Pointer input on the page, viewport-relative: 0 down, 1 up, 2 move (pressed),
+        // 3 double-click, 4 cancel; with shift and whether it is a touch.
+        callback select_pointer(int, length, length, bool, bool);
+        callback copy_selection();
         callback find_open();
         callback find_changed(string);
         callback find_next();
@@ -235,6 +248,11 @@ slint::slint! {
             }
             Menu {
                 title: "Edit";
+                MenuItem {
+                    title: "Copy";
+                    shortcut: @keys(Control + C);
+                    activated => { root.copy_selection(); }
+                }
                 MenuItem {
                     title: "Find...";
                     shortcut: @keys(Control + F);
@@ -551,6 +569,10 @@ slint::slint! {
                     content-height: root.canvas-h;
                     content-x <=> root.scroll-x;
                     content-y <=> root.scroll-y;
+                    // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
+                    // except while a long press is selecting.
+                    mouse-drag-pan-enabled: false;
+                    interactive: !root.touch-selecting;
 
                     // These fire on every change, user or programmatic, including each tick of
                     // the 180 ms wheel animation, which makes them the viewport source of truth.
@@ -584,6 +606,12 @@ slint::slint! {
                         border-color: #e65100;
                     }
 
+                    // The text selection, over the tiles and the search hits.
+                    for sel in root.sel-rects : Rectangle {
+                        x: sel.x; y: sel.y; width: sel.w; height: sel.h;
+                        background: rgba(37, 99, 235, 0.35);
+                    }
+
                     // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
                     // children first, so this area - kept over the viewport, not the canvas -
                     // sees them; without ctrl it rejects them and the Flickable scrolls.
@@ -597,10 +625,28 @@ slint::slint! {
                             }
                             return reject;
                         }
+                        mouse-cursor: MouseCursor.text;
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.down) {
                                 viewport-keys.focus();
                             }
+                            if (event.button == PointerEventButton.left || event.touch-finger-id != 0) {
+                                if (event.kind == PointerEventKind.down) {
+                                    root.select_pointer(0, self.mouse-x, self.mouse-y, event.modifiers.shift, event.touch-finger-id != 0);
+                                } else if (event.kind == PointerEventKind.up) {
+                                    root.select_pointer(1, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                } else if (event.kind == PointerEventKind.cancel) {
+                                    root.select_pointer(4, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                }
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.select_pointer(2, self.mouse-x, self.mouse-y, false, false);
+                            }
+                        }
+                        double-clicked => {
+                            root.select_pointer(3, self.mouse-x, self.mouse-y, false, false);
                         }
                     }
                 }
@@ -688,6 +734,15 @@ const THUMB_CACHE: usize = 64;
 const THUMB_INFLIGHT: usize = 4;
 /// Rows above and below the visible ones that are requested ahead.
 const THUMB_MARGIN_ROWS: usize = 2;
+
+/// How long a finger must rest before a touch starts a selection instead of a pan.
+const LONG_PRESS_MS: u64 = 500;
+/// A click this soon after a double-click, near it, is a triple-click (a line).
+const TRIPLE_CLICK_MS: u128 = 500;
+/// How far a finger may move before a pending long press becomes a pan, logical pixels.
+const TOUCH_SLOP_LOGICAL_PX: f32 = 8.0;
+/// How far a selection drag beyond the viewport's edge scrolls per move, logical pixels.
+const SELECT_AUTOSCROLL_LOGICAL_PX: f64 = 24.0;
 
 /// Delay between the last keystroke in the find field and the search it starts.
 const FIND_DEBOUNCE_MS: u64 = 200;
@@ -799,6 +854,23 @@ struct AppState {
     hit_rows: Vec<(f32, f32, f32, f32, bool)>,
     /// When the current search was sent, for `t_first_hit` (benchmarks §9.3).
     search_sent: Option<Instant>,
+    /// The text selection (Plan 0003, §4.5): its two ends, its mode, and what the engine answered.
+    sel_generation: u64,
+    sel_anchor: Option<PagePoint>,
+    sel_focus: Option<PagePoint>,
+    sel_mode: SelectMode,
+    sel_pages: Vec<PageSelection>,
+    sel_text: String,
+    sel_model: Rc<VecModel<HitView>>,
+    sel_rows: Vec<(f32, f32, f32, f32, bool)>,
+    /// A mouse drag is extending the selection.
+    sel_pressed: bool,
+    /// When the last double-click happened, to tell a triple-click.
+    last_double: Option<Instant>,
+    /// A touch that may become a long press: where it went down.
+    touch_down: Option<(f32, f32)>,
+    long_press: slint::Timer,
+    touch_selecting: bool,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -960,6 +1032,7 @@ impl AppState {
         self.apply(ui, actions);
         self.update_pages(ui);
         self.update_hits(ui);
+        self.update_selection(ui);
 
         let (_, view_h) = self.view_size(ui);
         if let Some(page) = self.layout.page_near(self.pos.1 + view_h / 2.0) {
@@ -1136,6 +1209,245 @@ impl AppState {
             .collect();
         self.hits_model.set_vec(views);
         self.hit_rows = rows;
+    }
+
+    /// A viewport point (logical pixels) as a point on the page under it, in page space. Between
+    /// pages it belongs to the nearest page, outside its box; selection snaps it to the text.
+    fn page_point(&self, ui: &MainWindow, x: f32, y: f32) -> Option<PagePoint> {
+        let sf = self.sf();
+        let doc_x = self.pos.0 + x as f64 * sf;
+        let doc_y = self.pos.1 + y as f64 * sf;
+        let page = self.layout.page_near(doc_y)?;
+        let slot = self.layout.slot(page)?;
+        let s = self.scale_milli as f64 / 1000.0;
+        let _ = ui;
+        Some(PagePoint {
+            page: page as u32,
+            x: ((doc_x - slot.x as f64) / s) as f32,
+            y: ((doc_y - slot.y as f64) / s) as f32,
+        })
+    }
+
+    /// Pointer input on the page (Plan 0003, §4.5): a mouse drag selects characters, a
+    /// double-click a word, a triple-click a line, Shift+click extends; a touch pans unless it
+    /// rests for [`LONG_PRESS_MS`], which starts a word selection that the finger then extends.
+    fn select_pointer(
+        &mut self,
+        ui: &MainWindow,
+        kind: i32,
+        x: f32,
+        y: f32,
+        shift: bool,
+        touch: bool,
+    ) {
+        let point = self.page_point(ui, x, y);
+        match kind {
+            // Down.
+            0 if touch => {
+                self.touch_down = Some((x, y));
+                let weak = ui.as_weak();
+                self.long_press.start(
+                    slint::TimerMode::SingleShot,
+                    std::time::Duration::from_millis(LONG_PRESS_MS),
+                    move || {
+                        if let Some(ui) = weak.upgrade() {
+                            with_state(|state| state.long_press(&ui, x, y));
+                        }
+                    },
+                );
+            }
+            0 => {
+                let Some(point) = point else { return };
+                self.sel_pressed = true;
+                if shift && self.sel_anchor.is_some() {
+                    self.sel_focus = Some(point);
+                    self.request_selection();
+                    return;
+                }
+                let triple = self
+                    .last_double
+                    .is_some_and(|at| at.elapsed().as_millis() < TRIPLE_CLICK_MS);
+                self.sel_anchor = Some(point);
+                self.sel_focus = Some(point);
+                if triple {
+                    self.last_double = None;
+                    self.sel_mode = SelectMode::Lines;
+                    self.request_selection();
+                } else {
+                    // A plain click starts a new selection and, until the drag moves, clears it.
+                    self.sel_mode = SelectMode::Chars;
+                    self.show_selection(ui, Vec::new(), String::new());
+                }
+            }
+            // Move with the button (or a selecting finger) down.
+            2 => {
+                if let Some((dx, dy)) = self.touch_down
+                    && !self.touch_selecting
+                    && ((x - dx).abs() > TOUCH_SLOP_LOGICAL_PX
+                        || (y - dy).abs() > TOUCH_SLOP_LOGICAL_PX)
+                {
+                    // The finger is panning: no long press.
+                    self.long_press.stop();
+                    self.touch_down = None;
+                    return;
+                }
+                if !(self.sel_pressed || self.touch_selecting) {
+                    return;
+                }
+                if let Some(point) = point {
+                    self.sel_focus = Some(point);
+                    self.request_selection();
+                }
+                // Dragging past the top or bottom edge scrolls, so a selection can run on.
+                let view_h = ui.get_view_h();
+                let step = SELECT_AUTOSCROLL_LOGICAL_PX * self.sf();
+                if y < 0.0 {
+                    self.scroll_to(ui, (self.pos.0, self.pos.1 - step));
+                } else if y > view_h {
+                    self.scroll_to(ui, (self.pos.0, self.pos.1 + step));
+                }
+            }
+            // Double-click: a word.
+            3 => {
+                let Some(point) = point else { return };
+                self.last_double = Some(Instant::now());
+                self.sel_mode = SelectMode::Words;
+                self.sel_anchor = Some(point);
+                self.sel_focus = Some(point);
+                self.request_selection();
+            }
+            // Up or cancel.
+            _ => {
+                self.sel_pressed = false;
+                self.long_press.stop();
+                self.touch_down = None;
+                if self.touch_selecting {
+                    self.touch_selecting = false;
+                    ui.set_touch_selecting(false);
+                }
+            }
+        }
+    }
+
+    /// A finger rested long enough: select the word under it and let the finger extend it.
+    fn long_press(&mut self, ui: &MainWindow, x: f32, y: f32) {
+        if self.touch_down.is_none() {
+            return;
+        }
+        let Some(point) = self.page_point(ui, x, y) else {
+            return;
+        };
+        self.touch_selecting = true;
+        ui.set_touch_selecting(true);
+        self.sel_mode = SelectMode::Words;
+        self.sel_anchor = Some(point);
+        self.sel_focus = Some(point);
+        self.request_selection();
+    }
+
+    /// Asks the engine for the selection between the two ends.
+    fn request_selection(&mut self) {
+        let (Some(from), Some(to)) = (self.sel_anchor, self.sel_focus) else {
+            return;
+        };
+        self.sel_generation += 1;
+        let _ = self.cmd_tx.send(EngineCmd::Select {
+            from,
+            to,
+            mode: self.sel_mode,
+            generation: self.sel_generation,
+        });
+    }
+
+    /// The engine answered a selection; an older answer than the last request is dropped.
+    fn apply_selection(
+        &mut self,
+        ui: &MainWindow,
+        generation: u64,
+        pages: Vec<PageSelection>,
+        text: String,
+    ) {
+        if generation == self.sel_generation {
+            self.show_selection(ui, pages, text);
+        }
+    }
+
+    fn show_selection(&mut self, ui: &MainWindow, pages: Vec<PageSelection>, text: String) {
+        self.sel_pages = pages;
+        self.sel_text = text;
+        self.sel_rows.clear();
+        self.update_selection(ui);
+    }
+
+    /// No selection (a new document, Esc).
+    fn clear_selection(&mut self, ui: &MainWindow) {
+        self.sel_generation += 1;
+        self.sel_anchor = None;
+        self.sel_focus = None;
+        self.sel_pressed = false;
+        self.show_selection(ui, Vec::new(), String::new());
+    }
+
+    /// The selection's rectangles on the pages near the view, like the search highlights.
+    fn update_selection(&mut self, ui: &MainWindow) {
+        let near = self.near_pages(ui);
+        let s = self.scale_milli as f64 / 1000.0;
+        let sf = self.sf() as f32;
+        let mut rows = Vec::new();
+        for page in &self.sel_pages {
+            if !near.contains(&(page.page as usize)) {
+                continue;
+            }
+            let Some(slot) = self.layout.slot(page.page as usize) else {
+                continue;
+            };
+            for rect in &page.rects {
+                rows.push((
+                    self.canvas_x(slot.x as f64 + rect.x as f64 * s),
+                    self.canvas_y(slot.y as f64 + rect.y as f64 * s),
+                    (rect.width as f64 * s) as f32 / sf,
+                    (rect.height as f64 * s) as f32 / sf,
+                    false,
+                ));
+            }
+        }
+        if rows == self.sel_rows {
+            return;
+        }
+        let views: Vec<HitView> = rows
+            .iter()
+            .map(|&(x, y, w, h, current)| HitView {
+                x,
+                y,
+                w,
+                h,
+                current,
+            })
+            .collect();
+        self.sel_model.set_vec(views);
+        self.sel_rows = rows;
+    }
+
+    /// Ctrl+C: the selected text to the clipboard (Plan 0003, §3.3).
+    fn copy_selection(&mut self, ui: &MainWindow) {
+        if self.sel_text.is_empty() {
+            return;
+        }
+        let copied = CLIPBOARD.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = arboard::Clipboard::new().ok();
+            }
+            slot.as_mut()
+                .map(|clipboard| clipboard.set_text(self.sel_text.clone()).is_ok())
+                .unwrap_or(false)
+        });
+        let chars = self.sel_text.chars().count();
+        ui.set_status_text(SharedString::from(if copied {
+            format!("Copied {chars} characters")
+        } else {
+            "Could not copy to the clipboard".to_owned()
+        }));
     }
 
     /// Ctrl+F: show the find bar (its field takes the focus); search again if it has text.
@@ -1692,6 +2004,7 @@ impl AppState {
         let path = std::path::absolute(&path).unwrap_or(path);
         self.doc_generation += 1;
         self.cancel_search();
+        self.clear_selection(ui);
         ui.set_find_visible(false);
         ui.set_find_text(SharedString::new());
         ui.set_find_counter(SharedString::new());
@@ -1870,6 +2183,10 @@ thread_local! {
     /// Set while Rust writes the scroll position itself, so `viewport_moved` does not run against
     /// a half-updated viewport.
     static PROGRAMMATIC: Cell<bool> = const { Cell::new(false) };
+    /// The one clipboard handle, created on the first copy. Kept outside [`APP`] so `main` can drop
+    /// it explicitly after the event loop: on X11 that drop hands the copied text to the clipboard
+    /// manager, and Rust does not promise to run the main thread's thread-local destructors.
+    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
 /// Runs `f` with the programmatic-update guard raised.
@@ -2041,6 +2358,7 @@ enum KeyCommand {
     FindNext,
     FindPrevious,
     FindClose,
+    Copy,
 }
 
 /// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
@@ -2058,6 +2376,7 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             'o' | 'O' => Some(KeyCommand::Open),
             'b' | 'B' => Some(KeyCommand::ToggleSidebar),
             'f' | 'F' => Some(KeyCommand::Find),
+            'c' | 'C' => Some(KeyCommand::Copy),
             _ => None,
         };
     }
@@ -2145,6 +2464,8 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.set_outline_rows(ModelRc::from(outline_model.clone()));
     let hits_model = Rc::new(VecModel::<HitView>::default());
     main_window.set_hit_rects(ModelRc::from(hits_model.clone()));
+    let sel_model = Rc::new(VecModel::<HitView>::default());
+    main_window.set_sel_rects(ModelRc::from(sel_model.clone()));
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -2184,6 +2505,19 @@ fn main() -> Result<(), slint::PlatformError> {
             hits_model,
             hit_rows: Vec::new(),
             search_sent: None,
+            sel_generation: 0,
+            sel_anchor: None,
+            sel_focus: None,
+            sel_mode: SelectMode::Chars,
+            sel_pages: Vec::new(),
+            sel_text: String::new(),
+            sel_model,
+            sel_rows: Vec::new(),
+            sel_pressed: false,
+            last_double: None,
+            touch_down: None,
+            long_press: slint::Timer::default(),
+            touch_selecting: false,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -2275,8 +2609,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 } => {
                     with_state(|state| state.search_done(&ui, generation, pages, ms));
                 }
-                // Selection arrives with the selection UI (Plan 0003 Phase 4).
-                EngineEvent::Selection { .. } => {}
+                EngineEvent::Selection {
+                    generation,
+                    pages,
+                    text,
+                } => {
+                    with_state(|state| state.apply_selection(&ui, generation, pages, text));
+                }
                 EngineEvent::Outline { items } => {
                     with_state(|state| state.set_outline(items));
                 }
@@ -2390,7 +2729,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 KeyCommand::Find => state.find_open(&ui),
                 KeyCommand::FindNext => state.step_hit(&ui, true),
                 KeyCommand::FindPrevious => state.step_hit(&ui, false),
-                KeyCommand::FindClose => state.find_close(&ui),
+                KeyCommand::FindClose => {
+                    state.find_close(&ui);
+                    state.clear_selection(&ui);
+                }
+                KeyCommand::Copy => state.copy_selection(&ui),
                 KeyCommand::Open => {
                     if let Some(path) = pick_document() {
                         state.open_path(&ui, path);
@@ -2607,6 +2950,24 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let weak = main_window.as_weak();
+        main_window.on_select_pointer(move |kind, x, y, shift, touch| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.select_pointer(&ui, kind, x, y, shift, touch));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_copy_selection(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.copy_selection(&ui));
+            }
+        });
+    }
+
     main_window.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
@@ -2635,7 +2996,12 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
-    main_window.run()
+    let result = main_window.run();
+    // Dropped here, not left to thread-local destruction: on X11 this hands the clipboard to the
+    // clipboard manager, so text copied just before quitting can still be pasted.
+    let clipboard = CLIPBOARD.with(|cell| cell.borrow_mut().take());
+    drop(clipboard);
+    result
 }
 
 #[cfg(test)]
@@ -2791,6 +3157,12 @@ mod tests {
             Some(KeyCommand::FindClose)
         );
         assert_eq!(key_command("f", false, false), None);
+    }
+
+    #[test]
+    fn ctrl_c_copies() {
+        assert_eq!(key_command("c", true, false), Some(KeyCommand::Copy));
+        assert_eq!(key_command("c", false, false), None);
     }
 
     #[test]
