@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 pub mod layout;
 pub mod nav;
 pub mod scheduler;
+pub mod settings;
 pub mod tiling;
 
 pub use layout::{
