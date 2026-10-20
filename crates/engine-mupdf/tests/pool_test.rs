@@ -69,9 +69,14 @@ fn open(handle: &EngineHandle, rx: &Receiver<EngineEvent>, name: &str) -> Vec<Pa
             password: None,
         })
         .expect("actor is alive");
-    match next(rx) {
+    let sizes = match next(rx) {
         EngineEvent::Opened { page_sizes, .. } => page_sizes,
         other => panic!("expected Opened, got {other:?}"),
+    };
+    // The actor follows every `Opened` with the document's outline (Plan 0003, §4.1).
+    match next(rx) {
+        EngineEvent::Outline { .. } => sizes,
+        other => panic!("expected Outline after Opened, got {other:?}"),
     }
 }
 
