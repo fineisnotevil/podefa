@@ -963,3 +963,31 @@ at 21-26 ms (`benchmarks.md` §7.5); without it, about one burst in five waits f
 rasterizing and its first new tile takes 190-230 ms. That is the measured cost of the stop-gap,
 recorded in `backlog.md` item 7 together with the condition for undoing it: a mupdf-rs release that
 carries `ffaf28f5` (messense/mupdf-rs#249, already on upstream `main`).
+
+### 9.8 Phase 4: selection (row N)
+
+Row N is a test, not a timing: `crates/engine-mupdf/tests/selection_test.rs` generates three Letter
+pages whose line `l` of page `p` reads `p{p}l{l} alpha beta`, selects from the start of page 1's
+line 48 to the end of page 3's line 1 through the engine, and compares the copied text with the 54
+expected lines joined by `\n`, byte for byte: **equal**. The same file checks word and line snapping
+and that a selection sent during a 400-page search is answered before the search finishes.
+
+The pointer path in a real window, release build of `0a55e70`, 2026-10-20, the §1 machine, viewport
+884x612 logical px at scale factor 1:
+
+```powershell
+$env:FA_PDF_TRACE = 1
+target\release\app.exe target\tmp\select_3p.pdf --bench-select --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+`--bench-select` sends `PointerPressed` / `PointerMoved` / `PointerReleased` through
+`Window::dispatch_event` at window positions computed from the page layout:
+
+| Step | Selected text | Result |
+| :--- | :--- | :--- |
+| drag from line 2 start to line 4 end | lines 2-4 | PASS |
+| Shift+click at line 6 end | lines 2-6 | PASS |
+| double-click inside `alpha` of line 9 | `alpha` | PASS |
+| triple-click on line 11 | line 11 | PASS |
+
+Ctrl+C is not scripted, so that a run never overwrites the user's clipboard; it is a manual check.

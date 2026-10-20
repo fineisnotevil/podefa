@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/backlog.md`: three issue drafts for work that is measured but deliberately not done - the ~70 MiB fixed overhead between an empty process and a loaded one (MuPDF's store, the display list, the base layer), an allocator experiment, and the `private`-vs-working-set gap - each written in the shape of `.github/ISSUE_TEMPLATE/` so it can be filed as it stands.
 
 
+### Added
+- **Text selection and copy** (Plan 0003 Phase 4): a mouse drag selects text (double-click a word, triple-click a line, Shift+click extends, dragging past an edge scrolls), touch pans and a long press selects; Ctrl+C or Edit > Copy copies through `arboard` (the copy Slint already links). Selection is computed in `pdf_core::select` from MuPDF's structured text on the search thread, so the highlight and the copied text always match (ADR 0006). `--bench-select` checks the pointer path; a pull request to mupdf-rs adds a safe `copy_selection` (messense/mupdf-rs#272).
+
 ### Fixed
 - **A crash when some PDFs were zoomed quickly** (exit code 1, no message): a cancelled tile aborted inside MuPDF left the draw device unbalanced, and mupdf-rs 0.8 closes devices without catching MuPDF's error, so MuPDF ended the process. The mid-raster abort is switched off until mupdf-rs closes devices safely (`MID_RASTER_ABORT` in `crates/engine-mupdf/src/pool.rs`); queued tiles of a cancelled zoom are still dropped and their pixels never shown. `crates/engine-mupdf/tests/abort_safety_test.rs` reproduces the crash; `docs/benchmarks.md` §9.7 measures the cost on the worst-case fixture.
 - The find bar closes when another document is opened, and its placeholder names Enter / Shift+Enter.
