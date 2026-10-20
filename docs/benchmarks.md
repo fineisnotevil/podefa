@@ -852,3 +852,32 @@ thirtieth it rises 3.5 MiB (about 0.13 MiB an open), with the last four samples 
 run; two runs cannot tell that drift from noise, so a slow per-open leak is **not ruled out**
 (`backlog.md` item 5). Every sample stays under the 250 MiB ceiling; the run's `peak_ws` was 165.4
 MiB.
+
+### 9.5 Phase 2: thumbnails and outline (rows J and K)
+
+Release build of `fd921fd` with the inward-only zoom in `--bench-thumbs`, 2026-10-20, the §1
+machine, viewport 884x612 logical px at scale factor 1, `--bench-step-ms 16 --bench-settle-ms 3000`
+for row J and `--bench-step-ms 300` for row K.
+
+```powershell
+$env:FA_PDF_TRACE = 1
+target\release\app.exe target\tmp\synthetic_1000p_annots_true.pdf --bench-thumbs 20000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000
+target\release\app.exe target\tmp\synthetic_20000p_annots_true.pdf --bench-thumbs 200000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000
+target\release\app.exe target\tmp\outline.pdf --bench-outline --bench-step-ms 300 --bench-settle-ms 1000
+```
+
+`--bench-thumbs` opens the sidebar, scrolls the thumbnail list down at the given speed (logical px/s)
+until its end or `--bench-scroll-s`, and zooms the viewport in one step every second, so `t_blank` is
+measured while the pool also renders thumbnails. (A first version alternated zoom in and out; the
+levels it went back to came from the tile cache and logged a single `t_blank` sample, so it was
+replaced before these runs.) `outline.pdf` is written by `crates/engine-mupdf/tests/sidebar_test.rs`.
+
+| Row | Document | Result |
+| :--- | :--- | :--- |
+| J | 1,000 pages, 20,000 px/s | list scrolled to row 997 of 1000; `thumbs_resident` max **64** (cap 64); `t_blank` 0/1/2 ms (min/med/max, n=11), `t_full` 2/3/11 ms; `peak_ws` 180.6 MiB; **PASS** |
+| J | 20,000 pages, 200,000 px/s | list scrolled to row 19997 of 20000; `thumbs_resident` max **64**; `t_blank` 0/1/2 ms (n=19), `t_full` 1/4/5 ms; `peak_ws` 209.2 MiB; **PASS** |
+| K | outline.pdf, 4 entries | `Chapter 1` y=108, `Section 1.1` y=1100, `Chapter 2` y=1600 (page top), `Website` (no page) does not move: **4 of 4** land where expected |
+
+Row K's expected positions are computed in the harness from the layout and the outline entry, not by
+the app's `go_to_dest`; the entries' `top` values themselves (100 and 292 pt below the page top, from
+`/XYZ 0 692` and `/FitH 500` on a 792 pt page) are asserted in `sidebar_test.rs`.
