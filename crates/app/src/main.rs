@@ -2275,6 +2275,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 } => {
                     with_state(|state| state.search_done(&ui, generation, pages, ms));
                 }
+                // Selection arrives with the selection UI (Plan 0003 Phase 4).
+                EngineEvent::Selection { .. } => {}
                 EngineEvent::Outline { items } => {
                     with_state(|state| state.set_outline(items));
                 }

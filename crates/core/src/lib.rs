@@ -158,6 +158,14 @@ pub enum EngineCmd {
     },
     /// Stop the running search without starting another.
     CancelSearch,
+    /// Select the text from `from` to `to` in a mode (Plan 0003, §4.5). Answered on the search
+    /// thread, ahead of any search it is running; only the latest of a burst is computed.
+    Select {
+        from: select::PagePoint,
+        to: select::PagePoint,
+        mode: select::SelectMode,
+        generation: u64,
+    },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -240,6 +248,12 @@ pub enum EngineEvent {
         generation: u64,
         page: u32,
         hits: Vec<Vec<Rect>>,
+    },
+    /// A selection: each page's highlight rectangles and text, and the whole text to copy.
+    Selection {
+        generation: u64,
+        pages: Vec<select::PageSelection>,
+        text: String,
     },
     /// A search covered all `pages` in `ms` milliseconds. Not sent for a superseded search.
     SearchDone {

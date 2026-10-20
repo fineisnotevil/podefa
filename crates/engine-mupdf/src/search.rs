@@ -17,10 +17,16 @@
 //! soon as they are found. Cancelling is a shared generation counter: the actor stores the new
 //! generation *before* it forwards a search, and the loop compares it before every page, so a
 //! superseded search stops within one page's text extraction and never sends another hit.
+//!
+//! Selection (Plan 0003, §4.5) is answered here too, because it needs the same text pages: a
+//! selection request is served between two pages of a running search rather than after it, only the
+//! latest of a burst (a drag) is computed, and the character lists of the last pages used are kept.
 
 use mupdf::text_page::SearchHitResponse;
 use mupdf::{Document, Quad, TextPageFlags};
+use pdf_core::select::{self, PagePoint, SelChar, SelectMode};
 use pdf_core::{EngineEvent, Rect};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,7 +46,16 @@ enum SearchCmd {
         from_page: u32,
         generation: u64,
     },
+    Select {
+        from: PagePoint,
+        to: PagePoint,
+        mode: SelectMode,
+        generation: u64,
+    },
 }
+
+/// Pages whose character lists are kept for selection: a drag recomputes on every move.
+const CHAR_CACHE_PAGES: usize = 16;
 
 /// The handle the actor keeps. Dropping it stops and joins the thread.
 pub(crate) struct SearchThread {
@@ -86,6 +101,18 @@ impl SearchThread {
         }
     }
 
+    /// Asks for a selection; answered ahead of a running search.
+    pub(crate) fn select(&self, from: PagePoint, to: PagePoint, mode: SelectMode, generation: u64) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(SearchCmd::Select {
+                from,
+                to,
+                mode,
+                generation,
+            });
+        }
+    }
+
     /// Stops the running search without starting another.
     pub(crate) fn cancel(&self) {
         self.current.store(0, Ordering::SeqCst);
@@ -103,15 +130,51 @@ impl Drop for SearchThread {
     }
 }
 
+/// The thread's state between commands.
+struct Searcher {
+    rx: Receiver<SearchCmd>,
+    /// Commands taken off the channel while a search was running, to run after it.
+    pending: VecDeque<SearchCmd>,
+    current: Arc<AtomicU64>,
+    events: Sender<EngineEvent>,
+    source: Option<(PathBuf, Option<String>)>,
+    doc: Option<Document>,
+    /// Character lists of recently selected pages, with the tick they were last used.
+    chars: HashMap<u32, (Vec<SelChar>, u64)>,
+    tick: u64,
+}
+
 fn serve(rx: Receiver<SearchCmd>, current: Arc<AtomicU64>, events: Sender<EngineEvent>) {
-    let mut source: Option<(PathBuf, Option<String>)> = None;
-    let mut doc: Option<Document> = None;
-    while let Ok(cmd) = rx.recv() {
+    let mut searcher = Searcher {
+        rx,
+        pending: VecDeque::new(),
+        current,
+        events,
+        source: None,
+        doc: None,
+        chars: HashMap::new(),
+        tick: 0,
+    };
+    loop {
+        let cmd = match searcher.pending.pop_front() {
+            Some(cmd) => cmd,
+            None => match searcher.rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => return,
+            },
+        };
+        searcher.handle(cmd);
+    }
+}
+
+impl Searcher {
+    fn handle(&mut self, cmd: SearchCmd) {
         match cmd {
             SearchCmd::Document { path, password } => {
-                doc = open(&path, &password);
-                source = Some((path, password));
-                if let Some(doc) = &doc {
+                self.doc = open(&path, &password);
+                self.source = Some((path, password));
+                self.chars.clear();
+                if let Some(doc) = &self.doc {
                     warm_up(doc);
                 }
             }
@@ -120,28 +183,147 @@ fn serve(rx: Receiver<SearchCmd>, current: Arc<AtomicU64>, events: Sender<Engine
                 from_page,
                 generation,
             } => {
-                if current.load(Ordering::SeqCst) != generation {
-                    continue;
+                if self.current.load(Ordering::SeqCst) != generation {
+                    return;
                 }
-                if doc.is_none() {
-                    doc = source
+                if self.doc.is_none() {
+                    self.doc = self
+                        .source
                         .as_ref()
                         .and_then(|(path, password)| open(path, password));
                 }
-                match &doc {
-                    Some(doc) => run(doc, &query, from_page, generation, &current, &events),
+                if self.doc.is_some() {
+                    self.run(&query, from_page, generation);
+                } else {
                     // Nothing to search: report an empty, finished search rather than nothing.
-                    None => {
-                        let _ = events.send(EngineEvent::SearchDone {
-                            generation,
-                            pages: 0,
-                            ms: 0,
-                        });
-                    }
+                    let _ = self.events.send(EngineEvent::SearchDone {
+                        generation,
+                        pages: 0,
+                        ms: 0,
+                    });
                 }
             }
+            select @ SearchCmd::Select { .. } => self.select_latest(select),
         }
     }
+
+    /// Serves a selection, skipping to the newest one already waiting: during a drag only the
+    /// last position matters. Other commands met on the way are kept for later, in order.
+    fn select_latest(&mut self, mut latest: SearchCmd) {
+        while let Ok(cmd) = self.rx.try_recv() {
+            match cmd {
+                newer @ SearchCmd::Select { .. } => latest = newer,
+                other => self.pending.push_back(other),
+            }
+        }
+        let SearchCmd::Select {
+            from,
+            to,
+            mode,
+            generation,
+        } = latest
+        else {
+            return;
+        };
+        let (pages, text) = select::select(from, to, mode, |page| self.page_chars(page));
+        let _ = self.events.send(EngineEvent::Selection {
+            generation,
+            pages,
+            text,
+        });
+    }
+
+    /// A page's characters, from the cache or extracted now.
+    fn page_chars(&mut self, page: u32) -> Vec<SelChar> {
+        self.tick += 1;
+        let tick = self.tick;
+        if let Some((chars, used)) = self.chars.get_mut(&page) {
+            *used = tick;
+            return chars.clone();
+        }
+        let chars = self
+            .doc
+            .as_ref()
+            .map(|doc| extract_chars(doc, page))
+            .unwrap_or_default();
+        if self.chars.len() >= CHAR_CACHE_PAGES
+            && let Some((&oldest, _)) = self.chars.iter().min_by_key(|(p, (_, used))| (*used, **p))
+        {
+            self.chars.remove(&oldest);
+        }
+        self.chars.insert(page, (chars.clone(), tick));
+        chars
+    }
+
+    /// One search: every page from `from_page`, wrapping, until done or superseded. Between pages
+    /// it answers waiting selections, so a drag never waits for a long search.
+    fn run(&mut self, query: &str, from_page: u32, generation: u64) {
+        let started = Instant::now();
+        let count = self
+            .doc
+            .as_ref()
+            .and_then(|doc| doc.page_count().ok())
+            .unwrap_or(0)
+            .max(0) as u32;
+        for k in 0..count {
+            if self.current.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            while let Ok(cmd) = self.rx.try_recv() {
+                match cmd {
+                    select @ SearchCmd::Select { .. } => self.select_latest(select),
+                    other => self.pending.push_back(other),
+                }
+            }
+            let page_index = (from_page.min(count.saturating_sub(1)) + k) % count;
+            let hits = match &self.doc {
+                Some(doc) => page_hits(doc, page_index, query),
+                None => return,
+            };
+            if !hits.is_empty() {
+                let _ = self.events.send(EngineEvent::SearchHits {
+                    generation,
+                    page: page_index,
+                    hits,
+                });
+            }
+        }
+        if self.current.load(Ordering::SeqCst) == generation {
+            let _ = self.events.send(EngineEvent::SearchDone {
+                generation,
+                pages: count,
+                ms: started.elapsed().as_millis() as u64,
+            });
+        }
+    }
+}
+
+/// A page's characters in reading order, each with its box in page space and its line, for
+/// selection. A page that fails to load or extract has none.
+fn extract_chars(doc: &Document, page_index: u32) -> Vec<SelChar> {
+    let Ok(page) = doc.load_page(page_index as i32) else {
+        return Vec::new();
+    };
+    let Ok(text) = page.to_text_page(TextPageFlags::empty()) else {
+        return Vec::new();
+    };
+    let mut chars = Vec::new();
+    let mut line_no = 0u32;
+    for block in text.blocks() {
+        for line in block.lines() {
+            for c in line.chars() {
+                if let Some(ch) = c.char() {
+                    chars.push(SelChar {
+                        ch,
+                        rect: quad_rect(&c.quad()),
+                        line: line_no,
+                    });
+                }
+            }
+            line_no += 1;
+        }
+    }
+    chars
 }
 
 /// Extracts the first page's text and drops it: the document's one-off first-touch cost, paid
@@ -163,40 +345,6 @@ fn open(path: &std::path::Path, password: &Option<String>) -> Option<Document> {
         }
     }
     Some(doc)
-}
-
-/// One search: every page from `from_page`, wrapping, until done or superseded.
-fn run(
-    doc: &Document,
-    query: &str,
-    from_page: u32,
-    generation: u64,
-    current: &AtomicU64,
-    events: &Sender<EngineEvent>,
-) {
-    let started = Instant::now();
-    let count = doc.page_count().unwrap_or(0).max(0) as u32;
-    for k in 0..count {
-        if current.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        let page_index = (from_page.min(count.saturating_sub(1)) + k) % count;
-        let hits = page_hits(doc, page_index, query);
-        if !hits.is_empty() {
-            let _ = events.send(EngineEvent::SearchHits {
-                generation,
-                page: page_index,
-                hits,
-            });
-        }
-    }
-    if current.load(Ordering::SeqCst) == generation {
-        let _ = events.send(EngineEvent::SearchDone {
-            generation,
-            pages: count,
-            ms: started.elapsed().as_millis() as u64,
-        });
-    }
 }
 
 /// One page's hits, each the rectangles of its quads. A page that fails to load or to extract

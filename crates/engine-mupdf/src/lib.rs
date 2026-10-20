@@ -669,6 +669,12 @@ impl EngineHandle {
                             generation,
                         } => search.search(query, from_page, generation),
                         EngineCmd::CancelSearch => search.cancel(),
+                        EngineCmd::Select {
+                            from,
+                            to,
+                            mode,
+                            generation,
+                        } => search.select(from, to, mode, generation),
                         EngineCmd::Cancel { request_id } => pool.cancel(request_id),
                         EngineCmd::Shutdown => break,
                     }
