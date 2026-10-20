@@ -7,9 +7,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 1 implemented and measured, at its gate - awaiting approval before Phase 2.** The evidence
-is the "Phase 1 results" block in §5 and [`../benchmarks.md`](../benchmarks.md) §8.3; one acceptance
-row is reported as a FAIL there, and one needs a manual check that cannot be scripted.
+**Phase 2 implemented and checked, at its gate - awaiting approval.** Phase 1 passed its gate (§0);
+the Phase 2 evidence is the "Phase 2 results" block in §5 and [`../benchmarks.md`](../benchmarks.md)
+§8.4. Phase 3 stays conditional on real-world documents.
 
 Registered at the Plan 0001 Phase 0 gate so that the Plan 0001 tile key and geometry types do not
 have to be reshaped later. The original prerequisite - Plan 0001 reaching its Phase 3 gate - was
@@ -18,8 +18,8 @@ is closed through Phase 2, its Phase 3 (zoom gestures, stretched tile level) is 
 below depends on it.
 
 - Phase 0 (research, measurement, this document): **done**, gate passed (§0).
-- Phase 1 (layout, windowed scroll, virtualization): **implemented, at its gate** (§5).
-- Phase 2 (navigation and input): proposed.
+- Phase 1 (layout, windowed scroll, virtualization): **done**, gate passed (§0).
+- Phase 2 (navigation and input): **implemented, at its gate** (§5).
 - Phase 3 (progressive page sizes): conditional - only if §3.5's real-world measurement asks for it.
 
 ## 0. Gate record
@@ -364,13 +364,49 @@ Left to the maintainer, because they need hand input in a real window:
    180 ms wheel animation, and the page counter should follow.
 3. **Window resize** with a document narrower than the window: the column stays centred.
 
-**Gate: stopped here, awaiting approval before Phase 2.**
+**Gate: passed 2026-10-20 (§0).**
 
 ### Phase 2 - Navigation and input
 
 - §4.6 in full, the custom scrollbar (§4.2), fit-width / fit-page buttons (§4.5).
 - **Acceptance:** each action has an app-level test through `AppState` where it is pure state, and a
   scripted harness step where it needs a window; §6 row F.
+
+**Phase 2 results (at the gate)**
+
+Implemented in `5986836` (`core::nav`) and `a641933` (app and harness). fmt, clippy `-D warnings`,
+`cargo test --workspace` (8 new `core::nav` tests, 2 new key-mapping tests in the app), `cargo deny`
+and `reuse lint` are clean.
+
+- **Keyboard:** a `FocusScope` around the viewport, focused at startup and on a click into the page,
+  maps arrows (40 logical px), PgUp/PgDn and Space/Shift+Space (a viewport minus 10%), Home/End and
+  Ctrl `+`/`=`/`-`/`0` (`key_command` in `crates/app/src/main.rs`, using `slint::platform::Key`).
+- **Ctrl+wheel:** a `TouchArea` inside the `Flickable`, kept over the viewport, receives wheel events
+  first because the `Flickable` forwards them to its children (`i-slint-core-1.18.1/items/
+  flickable.rs:757-781`); it accepts only with ctrl. One notch is 60 logical px
+  (`i-slint-backend-winit-1.18.1/winitwindowadapter.rs:1472`) and maps to one zoom step, a touchpad's
+  fractional delta to the same fraction of a step, anchored at the cursor.
+- **Go-to-page field** (1-based, follows the current page unless it is being edited), **Fit width**
+  and **Fit page** for the page under the viewport centre, anchored at its top.
+- **Document scrollbar:** a custom thumb over the viewport's right edge, placed from the `f64`
+  document position with a 24 px minimum length, draggable and clickable in the track.
+- **Jumps** further than two viewports (Home/End, the field, the scrollbar) start an epoch (§4.4).
+
+Row F (`benchmarks.md` §8.4): 20 of 20 scripted steps land where `core::nav` says, including exact
+positions for the scroll steps; a deliberate mis-mapping of PgDn makes the run fail with exit code 1.
+
+Not scriptable, left to the maintainer:
+
+1. **Ctrl+wheel with a real mouse and a touchpad pinch:** zoom follows the cursor, a pinch is smooth.
+   Shortly after a plain wheel scroll the `Flickable` keeps wheel events for itself
+   (`should_capture_scroll`, `flickable.rs:767`), so an immediate ctrl+wheel may scroll once before it
+   zooms - worth noticing whether it does.
+2. **Scrollbar drag** on the 20,000-page document: the thumb follows the cursor and the page counter
+   follows the thumb.
+3. **Focus:** after typing a page number and pressing Enter, the arrow keys scroll again without a
+   click.
+
+**Gate: stopped here, awaiting approval.**
 
 ### Phase 3 - Progressive page sizes (conditional)
 

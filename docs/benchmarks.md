@@ -740,3 +740,35 @@ Reading, row by row against Plan 0002 §6:
   animation - cannot be scripted by this harness, which writes positions; it needs a manual check
   (Plan 0002 Phase 1 results).
 - **Every row stays under the Plan 0001 ceiling** (`peak_ws` <= 250 MiB): worst 204.3 MiB (B4).
+
+### 8.4 Phase 2: navigation (row F)
+
+Release build of `a641933`, 2026-10-20, the §1 machine; the run header reports the viewport as
+884x612 logical px at scale factor 1, which also confirms §8.3's window.
+
+```powershell
+$env:FA_PDF_TRACE = 1
+target\release\app.exe target\tmp\synthetic_1000p_annots_true.pdf --bench-nav --bench-step-ms 200 --bench-settle-ms 2000
+```
+
+`--bench-nav` performs 20 steps, one every 200 ms, starting from the top at 100%. Keys and ctrl+wheel
+are sent with `Window::dispatch_event` (the same `FocusScope` and `TouchArea` path as real input,
+modifiers included); the page field, the fit buttons and the scrollbar through the callbacks their
+widgets invoke. Before each step the harness computes the expected zoom and page from `core::nav` on
+the state the step will act on, and for scroll steps the exact document position too; on the next
+tick it compares with what the window shows.
+
+| Step | Expected = observed |
+| :--- | :--- |
+| End / Home | page 1000, y=754982 / page 1, y=0 |
+| Go to page 900 (field) | page 900 |
+| PgDn, Down, Up, PgUp | page 901 y=680025, 901 y=680065, 901 y=680025, 900 y=679474 |
+| Space, Shift+Space | page 901 y=680025, page 900 y=679474 |
+| Ctrl+=, Ctrl+-, Ctrl+-, Ctrl+0 | zoom 1250, 1000, 800, 1000; page 900 throughout |
+| Ctrl+wheel +60 / -30 px | zoom 1250 (one notch = one step) / 1118 (half a step back) |
+| Fit width / Fit page | zoom 1029 / 1000 (page 900 is A4 landscape: 868 px of room over 842 pt wide, 596 over 595 tall) |
+| Scrollbar to end / to top | page 1000 / page 1 |
+
+**20 of 20 steps pass, `VERDICT PASS`.** The check can fail: with `PageDown` mapped to a line step
+in `key_command`, the same run reports `nav PgDn expected ... page=901 y=680025 got ... page=900
+y=679514 FAIL`, `19 of 20`, `VERDICT FAIL`, exit code 1 (mutation reverted before commit).
