@@ -100,6 +100,9 @@ pub struct Cfg {
     pub search_replace: Option<String>,
     /// `--bench-search-expect N`: the final search must end with exactly N hits.
     pub search_expect: Option<usize>,
+    /// `--bench-search-keys`: once the search is done, press Enter, Shift+Enter, F3 and Shift+F3 in
+    /// the find field through the window's input path and check the counter after each.
+    pub search_keys: bool,
     /// `--bench-search-zoom`: zoom in once a second while the search runs (row L's `t_blank`);
     /// off by default, so a memory run (row O) measures the search alone.
     pub search_zoom: bool,
@@ -128,6 +131,7 @@ impl Default for Cfg {
             search_replace: None,
             search_expect: None,
             search_zoom: false,
+            search_keys: false,
         }
     }
 }
@@ -214,6 +218,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-search-replace" => {
                 cfg.search_replace = args.get(i + 1).cloned();
                 consumed = 2;
+            }
+            "--bench-search-keys" => {
+                cfg.search_keys = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-search-zoom" => {
                 cfg.search_zoom = number.is_none_or(|on| on != 0.0);
@@ -1638,6 +1646,33 @@ impl Driver {
                             );
                         }
                     });
+                    // Keys go through `dispatch_event`, which runs the callbacks at once: they borrow
+                    // the app state themselves, so this must happen outside `with_state`.
+                    let mut hits = 0;
+                    with_state(|state| hits = state.search.hits().len());
+                    if self.cfg.search_keys && hits >= 3 {
+                        let steps: [(&'static str, bool, Key, usize); 4] = [
+                            ("Enter", false, Key::Return, 2),
+                            ("Shift+Enter", true, Key::Return, 1),
+                            ("F3", false, Key::F3, 2),
+                            ("Shift+F3", true, Key::F3, 1),
+                        ];
+                        for (name, shift, key, expected) in steps {
+                            let text: SharedString = char::from(key).into();
+                            let send = || press(ui, text.clone());
+                            if shift {
+                                with_modifier(ui, Key::Shift, send);
+                            } else {
+                                send();
+                            }
+                            let got = ui.get_find_counter().to_string();
+                            with_state(|state| {
+                                state
+                                    .bench
+                                    .nav_check(name, &format!("{expected} of {hits}"), &got)
+                            });
+                        }
+                    }
                     self.settle();
                 }
                 false

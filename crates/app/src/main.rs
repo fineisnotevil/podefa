@@ -380,7 +380,7 @@ slint::slint! {
                 HorizontalLayout {
                     spacing: 8px;
                     LineEdit {
-                        placeholder-text: "Find in document";
+                        placeholder-text: "Find  (Enter: next, Shift+Enter: previous)";
                         text <=> root.find-text;
                         init => { self.focus(); }
                         edited(text) => { root.find_changed(text); }
@@ -1692,6 +1692,10 @@ impl AppState {
         let path = std::path::absolute(&path).unwrap_or(path);
         self.doc_generation += 1;
         self.cancel_search();
+        ui.set_find_visible(false);
+        ui.set_find_text(SharedString::new());
+        ui.set_find_counter(SharedString::new());
+        self.search_query.clear();
         self.reset_thumbs(0);
         self.set_outline(Vec::new());
         self.begin_epoch();
@@ -1713,11 +1717,7 @@ impl AppState {
 
     /// The engine opened the document `open_path` asked for: remember it.
     fn document_opened(&mut self, ui: &MainWindow) {
-        // A find bar still open searches the new document for the same text.
-        if ui.get_find_visible() && !self.search_query.trim().is_empty() {
-            let query = self.search_query.clone();
-            self.start_search(ui, &query);
-        }
+        // The find bar belongs to the document it searched: a new document starts without it.
         let Some(path) = self.opening.take() else {
             return;
         };
