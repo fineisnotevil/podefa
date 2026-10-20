@@ -200,3 +200,28 @@ are read.
 ### Additional Context
 
 At 20,000 pages the cost is 27 MiB, inside the 250 MiB ceiling; at 100,000 pages it would be ~135 MiB.
+
+---
+
+## 5. A possible slow working-set drift when one document is reopened many times
+
+**Labels:** `performance`, `memory`, `investigation`
+
+### Problem Statement
+
+Reopening the 20,000-page synthetic document 30 times in one process (`benchmarks.md` §9.4) raises
+the working set by 8.8-10.4 MiB over the first three opens - the step that makes row H (10 MiB) fail -
+and then by about 0.13 MiB an open (160.4 MiB after the fourth, 163.9 MiB after the thirtieth). The
+step looks like allocator warm-up; the drift is either noise or a small per-open retention.
+
+### Proposed Solution
+
+Run 200 reopens and fit a slope; if it is not flat, attribute it: the app (rows, base layers, the
+recent-files model), the engine (the old `Document` and its display lists, the pool's per-thread
+contexts), or MuPDF's global store (fonts and resources that outlive a document). Item 1's phase
+labelling applies here as well.
+
+### Alternatives Considered
+
+- *Accept it*: at 0.13 MiB an open it would take hundreds of reopens to matter; but it must be
+  measured before it is accepted.

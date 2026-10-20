@@ -11,7 +11,7 @@ PODEFA is developed and maintained by FINE Association (FINE, FA).
 
 ## Status
 
-**Early development**: The workspace, the tiled viewport rendering pipeline, and a Slint desktop UI are in place. PODEFA currently opens documents and scrolls through them continuously, page after page, with zooming up to 6400%; tiles and other render memory are held only for the pages near the viewport. It navigates with the keyboard, ctrl+wheel, a page field, fit-width/fit-page and a document scrollbar. Text selection, search, and document editing are under active development.
+**Early development**: The workspace, the tiled viewport rendering pipeline, and a Slint desktop UI are in place. PODEFA currently opens documents and scrolls through them continuously, page after page, with zooming up to 6400%; tiles and other render memory are held only for the pages near the viewport. It opens documents from a File menu with the platform's file dialog or a recent-files list, follows a light or dark theme, and navigates with the keyboard, ctrl+wheel, a page field, fit-width/fit-page and a document scrollbar. Text selection, search, and document editing are under active development.
 
 ## Goals and Non-Goals
 

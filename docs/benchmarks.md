@@ -826,3 +826,29 @@ the unlicensed probe crate). Linux and macOS sizes were not measured.
 | `thumbs_resident` | Thumbnail images held by the app at the sample instant; logged on the `rss` line like `pages_resident`. |
 | `ws_after_open_n` | Working set sampled 2 s after the n-th open of the same document in one process (row H). |
 | `ws_after_search` | Working set just before a search starts, right after `SearchDone`, and 10 s later, with the search thread's document still open (row O). |
+
+### 9.4 Phase 1: reopening a document (row H)
+
+Release build of `e289558` plus the `--bench-reopen` harness, 2026-10-20, the §1 machine, viewport
+884x612 logical px at scale factor 1. The 20,000-page annotated synthetic document of §8.1 is opened
+at startup, then reopened through the same `open_path` the File menu uses; each sample is the working
+set 3 s after the open before it.
+
+```powershell
+$env:FA_PDF_TRACE = 1
+target\release\app.exe target\tmp\synthetic_20000p_annots_true.pdf --bench-reopen 10 --bench-step-ms 3000 --bench-settle-ms 3000
+target\release\app.exe target\tmp\synthetic_20000p_annots_true.pdf --bench-reopen 30 --bench-step-ms 3000 --bench-settle-ms 3000
+```
+
+| Run | `ws_after_open_n` (MiB) |
+| :--- | :--- |
+| 10 opens | 150.5, 157.8, 160.9, 161.8, 160.7, 161.9, 162.6, 161.9, 161.6, 162.2 |
+| 30 opens | 150.7, 157.1, 159.5, 160.4, 160.3, 160.6, 161.5, 162.0, 162.9, 161.1, 160.8, 161.7, 161.2, 161.8, 161.2, 161.5, 161.2, 161.3, 161.2, 161.5, 162.7, 162.8, 162.1, 161.0, 161.4, 161.5, 163.6, 164.5, 163.6, 163.9 |
+
+**Row H fails its line:** the tenth open sits **+11.7 MiB** above the first (limit +10 MiB), the
+thirtieth +13.2 MiB. The series shows where it comes from: the second and third opens add +10.4 MiB (10-open run) and +8.8 MiB (30-open run),
+then a band - opens 3-26 stay within 159.5-162.9 MiB. Across the 27 opens from the fourth to the
+thirtieth it rises 3.5 MiB (about 0.13 MiB an open), with the last four samples the highest of the
+run; two runs cannot tell that drift from noise, so a slow per-open leak is **not ruled out**
+(`backlog.md` item 5). Every sample stays under the 250 MiB ceiling; the run's `peak_ws` was 165.4
+MiB.

@@ -20,4 +20,5 @@ Each ADR follows a standardized format:
 
 - [0001: Technology Stack - Rust, Slint, and MuPDF](0001-stack-rust-slint-mupdf.md)
 - [0002: Licensing - AGPL-3.0-or-later and DCO Contributions](0002-license-agpl.md)
-- [0003: Dedicated Engine Actor Threading Model & Render Cancellation](0003-engine-actor-threading.md)
+- [0003: Dedicated Engine Actor Threading Model & Render Cancellation](0003-engine-actor-threading.md) (amended 2026-10-20)
+- [0004: Opening Documents - File Dialog, Drag-and-Drop and Settings](0004-opening-documents.md)
