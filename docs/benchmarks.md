@@ -876,7 +876,7 @@ replaced before these runs.) `outline.pdf` is written by `crates/engine-mupdf/te
 | :--- | :--- | :--- |
 | J | 1,000 pages, 20,000 px/s | list scrolled to row 997 of 1000; `thumbs_resident` max **64** (cap 64); `t_blank` 0/1/2 ms (min/med/max, n=11), `t_full` 2/3/11 ms; `peak_ws` 180.6 MiB; **PASS** |
 | J | 20,000 pages, 200,000 px/s | list scrolled to row 19997 of 20000; `thumbs_resident` max **64**; `t_blank` 0/1/2 ms (n=19), `t_full` 1/4/5 ms; `peak_ws` 209.2 MiB; **PASS** |
-| K | outline.pdf, 4 entries | `Chapter 1` y=108, `Section 1.1` y=1100, `Chapter 2` y=1600 (page top), `Website` (no page) does not move: **4 of 4** land where expected |
+| K | outline.pdf, 4 entries | `Chapter 1` y=108, `Section 1.1` y=1100, `Chapter 2` y=1600 (page top), `Website` (no page) does not move: **4 of 4** land where expected. Re-run after `7ef83cf` with the tree opened only by title clicks: 4 of 4, the row count going from 3 to 4 when `Chapter 1` is clicked; with that expansion removed the run fails (`rows=3`, exit code 1). |
 
 Row K's expected positions are computed in the harness from the layout and the outline entry, not by
 the app's `go_to_dest`; the entries' `top` values themselves (100 and 292 pt below the page top, from
