@@ -15,6 +15,7 @@
 //! to that window's start.
 
 use engine_mupdf::EngineHandle;
+use pdf_core::OutlineItem;
 use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
@@ -46,7 +47,7 @@ use std::time::Instant;
 mod bench;
 
 slint::slint! {
-    import { Button, LineEdit, Palette } from "std-widgets.slint";
+    import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
 
     // One model row: an image plus where it goes, in canvas logical pixels.
     //
@@ -69,6 +70,24 @@ slint::slint! {
         y: length,
         w: length,
         h: length,
+    }
+
+    // One thumbnail row of the sidebar (Plan 0003, §4.3). Rows exist for every page, but the
+    // ListView instantiates only the ones in view, and only those near the view hold an image.
+    export struct ThumbRow {
+        image: image,
+        has-image: bool,
+        label: string,
+        current: bool,
+    }
+
+    // One visible row of the outline tree: collapsed children are not in the model at all.
+    export struct OutlineRow {
+        title: string,
+        depth: int,
+        expandable: bool,
+        expanded: bool,
+        enabled: bool,
     }
 
     export component MainWindow inherits Window {
@@ -101,6 +120,14 @@ slint::slint! {
         in-out property <int> theme: 0;
         // Recent files, newest first, as the File menu shows them.
         in-out property <[string]> recent-files;
+
+        // The sidebar (Plan 0003, §4.3): 0 = page thumbnails, 1 = outline.
+        in-out property <bool> sidebar-visible: false;
+        in-out property <int> sidebar-tab: 0;
+        in-out property <[ThumbRow]> thumbs;
+        in-out property <[OutlineRow]> outline-rows;
+        // The thumbnail list's scroll position, bound both ways like the viewport's.
+        in-out property <length> thumb-scroll-y: 0px;
 
         in-out property <string> status_text: "No document loaded";
         in-out property <string> error_text: "";
@@ -138,6 +165,12 @@ slint::slint! {
         callback go_to_page(string);
         // The scrollbar thumb was dragged to `offset` within a track of `track`.
         callback scrollbar_moved(length, length);
+        callback toggle_sidebar();
+        callback sidebar_tab_changed();
+        callback thumbs_moved();
+        callback thumb_clicked(int);
+        callback outline_clicked(int);
+        callback outline_toggled(int);
         callback open_file();
         callback open_recent(int);
         callback choose_theme(int);
@@ -178,6 +211,13 @@ slint::slint! {
             }
             Menu {
                 title: "View";
+                MenuItem {
+                    title: "Sidebar";
+                    checkable: true;
+                    checked: root.sidebar-visible;
+                    shortcut: @keys(F4);
+                    activated => { root.toggle_sidebar(); }
+                }
                 Menu {
                     title: "Theme";
                     MenuItem {
@@ -210,6 +250,14 @@ slint::slint! {
             HorizontalLayout {
                 spacing: 8px;
                 height: 36px;
+
+                Button {
+                    text: "Sidebar";
+                    checkable: true;
+                    checked: root.sidebar-visible;
+                    enabled: root.total_pages > 0;
+                    clicked => { root.toggle_sidebar(); }
+                }
 
                 Button {
                     text: "Previous";
@@ -296,10 +344,113 @@ slint::slint! {
                 }
             }
 
+            HorizontalLayout {
+              spacing: 8px;
+              vertical-stretch: 1;
+
+              if root.sidebar-visible && root.total_pages > 0 : Rectangle {
+                width: 196px;
+                border-width: 1px;
+                border-color: Palette.border;
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        height: 30px;
+                        Button {
+                            text: "Pages";
+                            checkable: true;
+                            checked: root.sidebar-tab == 0;
+                            clicked => { root.sidebar-tab = 0; root.sidebar_tab_changed(); }
+                        }
+                        Button {
+                            text: "Outline";
+                            checkable: true;
+                            checked: root.sidebar-tab == 1;
+                            clicked => { root.sidebar-tab = 1; root.sidebar_tab_changed(); }
+                        }
+                    }
+                    if root.sidebar-tab == 0 : ListView {
+                        vertical-stretch: 1;
+                        content-y <=> root.thumb-scroll-y;
+                        changed content-y => { root.thumbs_moved(); }
+                        for row[index] in root.thumbs : Rectangle {
+                            // Fixed height: Rust derives the rows in view from the scroll
+                            // position alone (THUMB_ROW_LOGICAL_PX).
+                            height: 232px;
+                            background: row.current ? Palette.selection-background : transparent;
+                            TouchArea {
+                                clicked => { root.thumb_clicked(index); }
+                            }
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 4px;
+                                Rectangle {
+                                    height: 200px;
+                                    border-width: row.has-image ? 0px : 1px;
+                                    border-color: Palette.border;
+                                    Image {
+                                        source: row.image;
+                                        image-fit: contain;
+                                        width: parent.width;
+                                        height: parent.height;
+                                    }
+                                }
+                                Text {
+                                    text: row.label;
+                                    horizontal-alignment: center;
+                                    color: row.current ? Palette.selection-foreground : Palette.foreground;
+                                }
+                            }
+                        }
+                    }
+                    if root.sidebar-tab == 1 : ListView {
+                        vertical-stretch: 1;
+                        for row[index] in root.outline-rows : Rectangle {
+                            height: 26px;
+                            TouchArea {
+                                clicked => { root.outline_clicked(index); }
+                            }
+                            HorizontalLayout {
+                                padding-left: 4px + row.depth * 14px;
+                                spacing: 4px;
+                                Rectangle {
+                                    width: 14px;
+                                    Text {
+                                        text: row.expandable ? (row.expanded ? "v" : ">") : "";
+                                        color: Palette.foreground;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea {
+                                        enabled: row.expandable;
+                                        clicked => { root.outline_toggled(index); }
+                                    }
+                                }
+                                Text {
+                                    text: row.title;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    color: Palette.foreground;
+                                    opacity: row.enabled ? 1.0 : 0.5;
+                                }
+                            }
+                        }
+                    }
+                    if root.sidebar-tab == 1 && root.outline-rows.length == 0 : Text {
+                        text: "This document has no outline";
+                        color: Palette.foreground;
+                        opacity: 0.6;
+                        horizontal-alignment: center;
+                        vertical-stretch: 1;
+                    }
+                }
+              }
+
             // Document viewport. The FocusScope takes the navigation keys (Plan 0002, §4.6); it has
             // focus from startup and takes it back on a click into the page.
             viewport-keys := FocusScope {
-              vertical-stretch: 1;
+              horizontal-stretch: 1;
               key-pressed(event) => {
                   if (root.nav_key(event.text, event.modifiers.control, event.modifiers.shift)) {
                       return accept;
@@ -421,6 +572,7 @@ slint::slint! {
               }
               }
             }
+            }
 
             // Status bar
             HorizontalLayout {
@@ -444,6 +596,19 @@ slint::slint! {
         }
     }
 }
+
+/// Height of one thumbnail row in logical pixels; must match the `height` of the row in the
+/// markup, because the rows in view are computed from the scroll position alone.
+const THUMB_ROW_LOGICAL_PX: f32 = 232.0;
+/// Width a thumbnail is rendered at, in logical pixels (the row's image box is a little wider).
+const THUMB_WIDTH_LOGICAL_PX: f32 = 160.0;
+/// Thumbnails kept as images; the rest of the rows are empty (Plan 0003, §4.3, row J).
+const THUMB_CACHE: usize = 64;
+/// Thumbnail requests in flight at once: a fast scroll through the list then wastes at most this
+/// many rasters on rows the user has already passed.
+const THUMB_INFLIGHT: usize = 4;
+/// Rows above and below the visible ones that are requested ahead.
+const THUMB_MARGIN_ROWS: usize = 2;
 
 /// Spare model rows above the strictly visible tile count: the one-tile ring the prefetch
 /// requests, so a one-tile pan finds its next column already rendered instead of blank.
@@ -529,6 +694,21 @@ struct AppState {
     /// The document an `Open` was sent for and has not been answered yet.
     opening: Option<PathBuf>,
     recent_model: Rc<VecModel<SharedString>>,
+    /// Counts document opens; thumbnails carry it as their request id, so one of a previous
+    /// document is recognised and dropped.
+    doc_generation: u64,
+    thumbs_model: Rc<VecModel<ThumbRow>>,
+    /// Pages whose thumbnail is held, with the tick they were last in view (LRU, [`THUMB_CACHE`]).
+    thumb_cache: HashMap<u32, u64>,
+    thumb_tick: u64,
+    thumb_inflight: HashSet<u32>,
+    /// The thumbnail row marked as the current page.
+    current_thumb: Option<usize>,
+    outline_items: Vec<OutlineItem>,
+    outline_expanded: Vec<bool>,
+    /// Outline row -> index into `outline_items`.
+    outline_visible: Vec<usize>,
+    outline_model: Rc<VecModel<OutlineRow>>,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -698,8 +878,213 @@ impl AppState {
             if !ui.get_page_field_focused() && ui.get_page_input() != label {
                 ui.set_page_input(label);
             }
+            self.set_current_thumb(ui, page);
         }
         self.update_scrollbar(ui);
+    }
+
+    /// One empty thumbnail row per page, and nothing held or in flight.
+    fn reset_thumbs(&mut self, pages: usize) {
+        let rows: Vec<ThumbRow> = (0..pages)
+            .map(|page| ThumbRow {
+                image: Image::default(),
+                has_image: false,
+                label: SharedString::from((page + 1).to_string()),
+                current: false,
+            })
+            .collect();
+        self.thumbs_model.set_vec(rows);
+        self.thumb_cache.clear();
+        self.thumb_inflight.clear();
+        self.current_thumb = None;
+    }
+
+    /// Thumbnail rows in view plus the margin, in order from the top; empty while the thumbnail
+    /// list is not shown.
+    fn thumb_range(&self, ui: &MainWindow) -> std::ops::Range<usize> {
+        let rows = self.thumbs_model.row_count();
+        if !ui.get_sidebar_visible() || ui.get_sidebar_tab() != 0 || rows == 0 {
+            return 0..0;
+        }
+        let top = (-ui.get_thumb_scroll_y()).max(0.0) / THUMB_ROW_LOGICAL_PX;
+        let shown = (ui.get_view_h() / THUMB_ROW_LOGICAL_PX).ceil() as usize + 1;
+        let first = (top.floor() as usize).saturating_sub(THUMB_MARGIN_ROWS);
+        let last = (top.floor() as usize + shown + THUMB_MARGIN_ROWS).min(rows);
+        first.min(last)..last
+    }
+
+    /// Requests the missing thumbnails of the rows in view, nearest the top first, keeping at most
+    /// [`THUMB_INFLIGHT`] in flight.
+    fn pump_thumbs(&mut self, ui: &MainWindow) {
+        self.thumb_tick += 1;
+        let tick = self.thumb_tick;
+        let width_px = (THUMB_WIDTH_LOGICAL_PX * self.scale_factor).round() as u32;
+        for row in self.thumb_range(ui) {
+            let page = row as u32;
+            if let Some(seen) = self.thumb_cache.get_mut(&page) {
+                *seen = tick;
+                continue;
+            }
+            if self.thumb_inflight.len() >= THUMB_INFLIGHT {
+                break;
+            }
+            if self.thumb_inflight.insert(page) {
+                let _ = self.cmd_tx.send(EngineCmd::RenderThumb {
+                    page,
+                    width_px,
+                    request_id: self.doc_generation,
+                });
+            }
+        }
+    }
+
+    /// A thumbnail arrived: show it, keep at most [`THUMB_CACHE`], and ask for the next one.
+    fn apply_thumb(&mut self, ui: &MainWindow, page: u32, generation: u64, bitmap: &Bitmap) {
+        if generation != self.doc_generation {
+            return;
+        }
+        self.thumb_inflight.remove(&page);
+        let row = page as usize;
+        if let Some(mut data) = self.thumbs_model.row_data(row) {
+            data.image = to_image(bitmap);
+            data.has_image = true;
+            self.thumbs_model.set_row_data(row, data);
+            self.thumb_tick += 1;
+            self.thumb_cache.insert(page, self.thumb_tick);
+        }
+        while self.thumb_cache.len() > THUMB_CACHE {
+            let Some((&oldest, _)) = self
+                .thumb_cache
+                .iter()
+                .min_by_key(|(page, tick)| (**tick, **page))
+            else {
+                break;
+            };
+            self.thumb_cache.remove(&oldest);
+            if let Some(mut data) = self.thumbs_model.row_data(oldest as usize) {
+                data.image = Image::default();
+                data.has_image = false;
+                self.thumbs_model.set_row_data(oldest as usize, data);
+            }
+        }
+        self.bench.thumbs_held(self.thumb_cache.len());
+        self.pump_thumbs(ui);
+    }
+
+    /// Marks the current page's thumbnail and, when the list is shown, scrolls it into view.
+    fn set_current_thumb(&mut self, ui: &MainWindow, page: usize) {
+        if self.current_thumb == Some(page) {
+            return;
+        }
+        for (row, current) in [(self.current_thumb, false), (Some(page), true)] {
+            if let Some(row) = row
+                && let Some(mut data) = self.thumbs_model.row_data(row)
+            {
+                data.current = current;
+                self.thumbs_model.set_row_data(row, data);
+            }
+        }
+        self.current_thumb = Some(page);
+        if !ui.get_sidebar_visible() || ui.get_sidebar_tab() != 0 {
+            return;
+        }
+        let top = page as f32 * THUMB_ROW_LOGICAL_PX;
+        let view = ui.get_view_h();
+        let scrolled = -ui.get_thumb_scroll_y();
+        if top < scrolled || top + THUMB_ROW_LOGICAL_PX > scrolled + view {
+            ui.set_thumb_scroll_y(-(top - (view - THUMB_ROW_LOGICAL_PX) / 2.0).max(0.0));
+            self.pump_thumbs(ui);
+        }
+    }
+
+    /// The document's outline arrived: every node starts collapsed, so the top level shows.
+    fn set_outline(&mut self, items: Vec<OutlineItem>) {
+        self.outline_expanded = vec![false; items.len()];
+        self.outline_items = items;
+        self.rebuild_outline();
+    }
+
+    /// The rows the tree shows: an entry is hidden while any ancestor is collapsed.
+    fn rebuild_outline(&mut self) {
+        let mut rows = Vec::new();
+        self.outline_visible.clear();
+        let mut collapsed_at: Option<u32> = None;
+        for (i, item) in self.outline_items.iter().enumerate() {
+            if let Some(depth) = collapsed_at {
+                if item.depth > depth {
+                    continue;
+                }
+                collapsed_at = None;
+            }
+            let expandable = self
+                .outline_items
+                .get(i + 1)
+                .is_some_and(|next| next.depth > item.depth);
+            let expanded = self.outline_expanded.get(i).copied().unwrap_or(false);
+            if expandable && !expanded {
+                collapsed_at = Some(item.depth);
+            }
+            self.outline_visible.push(i);
+            rows.push(OutlineRow {
+                title: SharedString::from(item.title.as_str()),
+                depth: item.depth as i32,
+                expandable,
+                expanded,
+                enabled: item.page.is_some(),
+            });
+        }
+        self.outline_model.set_vec(rows);
+    }
+
+    /// Expands or collapses an outline row.
+    fn outline_toggled(&mut self, row: usize) {
+        if let Some(&item) = self.outline_visible.get(row)
+            && let Some(expanded) = self.outline_expanded.get_mut(item)
+        {
+            *expanded = !*expanded;
+            self.rebuild_outline();
+        }
+    }
+
+    /// Goes to an outline row's destination: its page, at the position it names.
+    fn outline_clicked(&mut self, ui: &MainWindow, row: usize) {
+        let Some(item) = self
+            .outline_visible
+            .get(row)
+            .and_then(|&i| self.outline_items.get(i))
+        else {
+            return;
+        };
+        if let Some(page) = item.page {
+            let top = item.top;
+            self.go_to_dest(ui, page as usize, top);
+        }
+    }
+
+    /// Jumps to `top` points below the top of `page` (MuPDF's page space), or to the page's top.
+    fn go_to_dest(&mut self, ui: &MainWindow, page: usize, top: Option<f32>) {
+        let Some(slot) = self.layout.slot(page).copied() else {
+            return;
+        };
+        let y = match top {
+            Some(top) => slot.y as f64 + top as f64 * self.scale_milli as f64 / 1000.0,
+            None => page_top(&self.layout, page).unwrap_or(0.0),
+        };
+        self.begin_epoch();
+        self.pos.1 = y;
+        self.clamp_pos(ui);
+        self.reanchor(ui);
+        self.refresh(ui);
+    }
+
+    /// Shows or hides the sidebar, and remembers the choice.
+    fn toggle_sidebar(&mut self, ui: &MainWindow) {
+        self.settings.sidebar = !self.settings.sidebar;
+        ui.set_sidebar_visible(self.settings.sidebar);
+        self.save_settings();
+        self.current_thumb = None;
+        self.refresh(ui);
+        self.pump_thumbs(ui);
     }
 
     /// Places the scrollbar thumb for the whole document (Plan 0002, §4.2).
@@ -1046,6 +1431,9 @@ impl AppState {
         // A command-line path is relative to wherever the app was started; the recent list has to
         // work from anywhere. `absolute` neither touches the file system nor adds Windows' `\\?\`.
         let path = std::path::absolute(&path).unwrap_or(path);
+        self.doc_generation += 1;
+        self.reset_thumbs(0);
+        self.set_outline(Vec::new());
         self.begin_epoch();
         self.release_all(ui);
         self.layout = DocLayout::default();
@@ -1085,6 +1473,9 @@ impl AppState {
             return;
         }
         self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
+        // The old document is still the engine's; its outline went with the open and is not
+        // resent, so the sidebar keeps only the thumbnails, which are re-rendered.
+        self.reset_thumbs(self.page_sizes.len());
         self.clamp_pos(ui);
         self.reanchor(ui);
         self.refresh(ui);
@@ -1123,6 +1514,8 @@ impl AppState {
         self.page_sizes = page_sizes;
         self.scale_milli = ZOOM_DEFAULT_MILLI;
         self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
+        self.reset_thumbs(self.page_sizes.len());
+        ui.set_thumb_scroll_y(0.0);
         self.rendered = 0;
         ui.set_tiles_rendered(0);
         ui.set_tiles_requested(0);
@@ -1253,6 +1646,7 @@ fn viewport_moved(ui: &MainWindow) {
                 state.reanchor(ui);
             }
             state.refresh(ui);
+            state.pump_thumbs(ui);
         }
     });
 }
@@ -1341,6 +1735,7 @@ enum KeyCommand {
     ZoomOut,
     ZoomReset,
     Open,
+    ToggleSidebar,
 }
 
 /// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
@@ -1356,8 +1751,12 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             '-' => Some(KeyCommand::ZoomOut),
             '0' => Some(KeyCommand::ZoomReset),
             'o' | 'O' => Some(KeyCommand::Open),
+            'b' | 'B' => Some(KeyCommand::ToggleSidebar),
             _ => None,
         };
+    }
+    if c == char::from(Key::F4) {
+        return Some(KeyCommand::ToggleSidebar);
     }
     let action = match c {
         ' ' if shift => NavAction::PageUp,
@@ -1423,6 +1822,11 @@ fn main() -> Result<(), slint::PlatformError> {
         .map(load_settings)
         .unwrap_or_default();
     main_window.set_theme(theme_index(settings.theme));
+    main_window.set_sidebar_visible(settings.sidebar);
+    let thumbs_model = Rc::new(VecModel::<ThumbRow>::default());
+    main_window.set_thumbs(ModelRc::from(thumbs_model.clone()));
+    let outline_model = Rc::new(VecModel::<OutlineRow>::default());
+    main_window.set_outline_rows(ModelRc::from(outline_model.clone()));
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -1446,6 +1850,16 @@ fn main() -> Result<(), slint::PlatformError> {
             settings_path,
             opening: None,
             recent_model,
+            doc_generation: 0,
+            thumbs_model,
+            thumb_cache: HashMap::new(),
+            thumb_tick: 0,
+            thumb_inflight: HashSet::new(),
+            current_thumb: None,
+            outline_items: Vec::new(),
+            outline_expanded: Vec::new(),
+            outline_visible: Vec::new(),
+            outline_model,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -1515,6 +1929,16 @@ fn main() -> Result<(), slint::PlatformError> {
                     // No epoch guard: a base layer belongs to a page, not to a zoom level, and it
                     // arrives while the epoch it was requested under is already superseded.
                     with_state(|state| state.apply_base(&ui, page, &bitmap));
+                }
+                EngineEvent::ThumbRendered {
+                    page,
+                    request_id,
+                    bitmap,
+                } => {
+                    with_state(|state| state.apply_thumb(&ui, page, request_id, &bitmap));
+                }
+                EngineEvent::Outline { items } => {
+                    with_state(|state| state.set_outline(items));
                 }
                 EngineEvent::TileAborted { ms, .. } => {
                     with_state(|state| state.bench.aborted(ms));
@@ -1622,6 +2046,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     state.zoom(&ui, next, ax, ay);
                 }
                 KeyCommand::ZoomReset => state.zoom(&ui, ZOOM_DEFAULT_MILLI, ax, ay),
+                KeyCommand::ToggleSidebar => state.toggle_sidebar(&ui),
                 KeyCommand::Open => {
                     if let Some(path) = pick_document() {
                         state.open_path(&ui, path);
@@ -1725,6 +2150,54 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let weak = main_window.as_weak();
+        main_window.on_toggle_sidebar(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.toggle_sidebar(&ui));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        let pump = move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.pump_thumbs(&ui));
+            }
+        };
+        main_window.on_thumbs_moved(pump.clone());
+        main_window.on_sidebar_tab_changed(pump);
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_thumb_clicked(move |row| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(page) = usize::try_from(row)
+            {
+                with_state(|state| state.go_to_page(&ui, page));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_outline_clicked(move |row| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(row) = usize::try_from(row)
+            {
+                with_state(|state| state.outline_clicked(&ui, row));
+            }
+        });
+    }
+
+    main_window.on_outline_toggled(|row| {
+        if let Ok(row) = usize::try_from(row) {
+            with_state(|state| state.outline_toggled(row));
+        }
+    });
+
     main_window.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
@@ -1802,6 +2275,19 @@ mod tests {
         text.set_plain_text("/home/u/b.pdf".into());
         assert_eq!(dropped_document(&text), None, "text is not a file");
         assert_eq!(dropped_document(&slint::DataTransfer::default()), None);
+    }
+
+    #[test]
+    fn f4_and_ctrl_b_toggle_the_sidebar() {
+        assert_eq!(
+            key_command(&key(Key::F4), false, false),
+            Some(KeyCommand::ToggleSidebar)
+        );
+        assert_eq!(
+            key_command("b", true, false),
+            Some(KeyCommand::ToggleSidebar)
+        );
+        assert_eq!(key_command("b", false, false), None);
     }
 
     #[test]

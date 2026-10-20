@@ -31,6 +31,7 @@ use pdf_core::nav::{
     wheel_zoom_milli,
 };
 use pdf_core::{TileKey, TileScheduler, ZOOM_DEFAULT_MILLI, zoom_in_milli, zoom_out_milli};
+use slint::Model;
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Timer, TimerMode};
 use slint::{LogicalPosition, SharedString};
@@ -86,6 +87,12 @@ pub struct Cfg {
     /// `--bench-reopen N`: open the same document N times in one process (the first open
     /// included) and sample the working set one step after each (Plan 0003, §6 row H).
     pub reopen: u32,
+    /// `--bench-thumbs`: scroll the thumbnail list at this many logical px/s for `scroll_s`
+    /// seconds, with a zoom step every second, so the viewport is measured while thumbnails
+    /// render (Plan 0003, §6 row J).
+    pub thumbs_pxs: f64,
+    /// `--bench-outline`: go to every outline entry and check where each lands (row K).
+    pub outline: bool,
 }
 
 impl Default for Cfg {
@@ -105,6 +112,8 @@ impl Default for Cfg {
             jump_page: None,
             nav: false,
             reopen: 0,
+            thumbs_pxs: 0.0,
+            outline: false,
         }
     }
 }
@@ -118,6 +127,8 @@ impl Cfg {
             && self.jump_page.is_none()
             && !self.nav
             && self.reopen == 0
+            && self.thumbs_pxs <= 0.0
+            && !self.outline
     }
 }
 
@@ -172,6 +183,14 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-scroll-s" => {
                 cfg.scroll_s = number.unwrap_or(30.0).max(0.0);
                 consumed = 2;
+            }
+            "--bench-thumbs" => {
+                cfg.thumbs_pxs = number.unwrap_or(20_000.0).max(0.0);
+                consumed = 2;
+            }
+            "--bench-outline" => {
+                cfg.outline = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-reopen" => {
                 cfg.reopen = number.unwrap_or(10.0).max(0.0) as u32;
@@ -484,6 +503,9 @@ pub struct Trace {
     reanchor_us: Vec<u128>,
     /// Worst `pages_resident` sampled.
     max_resident: usize,
+    /// Thumbnails held now, and the most ever held (`thumbs_resident`, benchmarks §9.3).
+    thumbs: usize,
+    max_thumbs: usize,
     /// Index into `memory` where the scroll phase started, for `ws_growth`.
     scroll_mem_from: Option<usize>,
     /// `--bench-nav` checks: `(step, passed)`.
@@ -510,6 +532,8 @@ impl Trace {
             pages_visited: HashSet::new(),
             reanchor_us: Vec::new(),
             max_resident: 0,
+            thumbs: 0,
+            max_thumbs: 0,
             scroll_mem_from: None,
             nav_checks: Vec::new(),
             reopen_ws: Vec::new(),
@@ -656,12 +680,13 @@ impl Trace {
         let cache_mib = mib(sched.cache_bytes() as u128);
         self.print(format_args!(
             "rss t={t}ms ws={} private={} cache={cache_mib:.1}MiB/{} rows dropped={} evicted={} \
-             pages_resident={pages_resident}",
+             pages_resident={pages_resident} thumbs_resident={}",
             mem_str(mem.map(|mem| mem.ws)),
             mem_str(mem.map(|mem| mem.private)),
             sched.cache_len(),
             sched.dropped(),
-            sched.evicted()
+            sched.evicted(),
+            self.thumbs
         ));
     }
 
@@ -690,6 +715,17 @@ impl Trace {
             "[bench] nav {step:<14} expected {expected:<22} got {got:<22} {}",
             if pass { "PASS" } else { "FAIL" }
         );
+    }
+
+    /// Most thumbnails ever held at once.
+    pub fn thumbs_max(&self) -> usize {
+        self.max_thumbs
+    }
+
+    /// The sidebar holds `n` thumbnails now.
+    pub fn thumbs_held(&mut self, n: usize) {
+        self.thumbs = n;
+        self.max_thumbs = self.max_thumbs.max(n);
     }
 
     /// The canvas window moved (Plan 0002, §4.2): `us` is how long rewriting the canvas took,
@@ -922,6 +958,16 @@ impl Trace {
                 self.nav_checks.len()
             );
         }
+        // Row J: the thumbnail cache never holds more than its cap.
+        let thumbs_failed = self.max_thumbs > crate::THUMB_CACHE;
+        if self.max_thumbs > 0 {
+            println!(
+                "[bench] thumbs      resident_max={} (cap {}) {}",
+                self.max_thumbs,
+                crate::THUMB_CACHE,
+                if thumbs_failed { "FAIL" } else { "PASS" }
+            );
+        }
         // Row H: the working set after the last open against after the first, 10 MiB allowed.
         let mut reopen_failed = false;
         if let (Some(first), Some(last)) = (self.reopen_ws.first(), self.reopen_ws.last()) {
@@ -948,10 +994,15 @@ impl Trace {
                 println!("[bench] VERDICT     FAIL - the working set grew across reopening");
                 return false;
             }
+            if thumbs_failed {
+                println!("[bench] VERDICT     FAIL - more thumbnails held than the cap");
+                return false;
+            }
             println!("[bench] VERDICT     n/a - no level change was measured");
             return true;
         };
-        let pass = worst_blank <= cfg.max_blank_ms && nav_failed == 0 && !reopen_failed;
+        let pass =
+            worst_blank <= cfg.max_blank_ms && nav_failed == 0 && !reopen_failed && !thumbs_failed;
         println!(
             "[bench] VERDICT     {} - worst t_blank {worst_blank} ms vs {} ms ceiling",
             if pass { "PASS" } else { "FAIL" },
@@ -976,6 +1027,10 @@ enum Phase {
     Nav,
     /// Sample the working set, then open the same document again; one open per tick.
     Reopen,
+    /// Scroll the thumbnail list, with a zoom step every second.
+    Thumbs,
+    /// Go to every outline entry, each checked on the next tick.
+    Outline,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -989,6 +1044,8 @@ struct Pending {
     scroll: bool,
     nav: bool,
     reopen: bool,
+    thumbs: bool,
+    outline: bool,
 }
 
 impl Pending {
@@ -1001,6 +1058,8 @@ impl Pending {
             scroll: cfg.scroll_pxs > 0.0 && cfg.scroll_s > 0.0,
             nav: cfg.nav,
             reopen: cfg.reopen > 0,
+            thumbs: cfg.thumbs_pxs > 0.0,
+            outline: cfg.outline,
         }
     }
 
@@ -1013,6 +1072,8 @@ impl Pending {
             (&mut self.scroll, Phase::Scroll),
             (&mut self.nav, Phase::Nav),
             (&mut self.reopen, Phase::Reopen),
+            (&mut self.thumbs, Phase::Thumbs),
+            (&mut self.outline, Phase::Outline),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1045,6 +1106,13 @@ struct Driver {
     resetting: bool,
     /// The `--bench-nav` step performed on the last tick and the state it should have produced.
     nav_expect: Option<(&'static str, String)>,
+}
+
+/// The most thumbnails held so far in this run.
+fn with_thumbs_max() -> usize {
+    let mut max = 0;
+    with_state(|state| max = state.bench.thumbs_max());
+    max
 }
 
 /// One `--bench-nav` step (Plan 0002, §6 row F). Keys and the wheel go through
@@ -1290,6 +1358,8 @@ impl Driver {
             Phase::Scroll => "scroll",
             Phase::Nav => "nav",
             Phase::Reopen => "reopen",
+            Phase::Thumbs => "thumbs",
+            Phase::Outline => "outline",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -1367,6 +1437,87 @@ impl Driver {
                 if done || elapsed_ms >= self.cfg.scroll_s * 1000.0 {
                     self.settle();
                 }
+                false
+            }
+            Phase::Thumbs => {
+                if self.step == 0 {
+                    ui.set_sidebar_visible(true);
+                    ui.set_sidebar_tab(0);
+                }
+                let dy = (self.cfg.thumbs_pxs * self.cfg.step_ms as f64 / 1000.0) as f32;
+                let rows = ui.get_thumbs().row_count() as f32;
+                let end = -(rows * crate::THUMB_ROW_LOGICAL_PX - ui.get_view_h()).max(0.0);
+                let next = (ui.get_thumb_scroll_y() - dy).max(end);
+                ui.set_thumb_scroll_y(next);
+                with_state(|state| state.pump_thumbs(ui));
+                // One zoom-in step a second, so `t_blank` is measured while the pool also renders
+                // thumbnails. Always inwards: a level zoomed back to would come from the cache and
+                // log no `t_blank` at all. It stops changing at the zoom ceiling.
+                let per_second = (1000 / self.cfg.step_ms.max(1)).max(1) as u32;
+                if self.step % per_second == per_second - 1 {
+                    let (anchor_x, anchor_y) = viewport_center(ui);
+                    with_state(|state| {
+                        let next = zoom_in_milli(state.scale_milli);
+                        state.zoom(ui, next, anchor_x, anchor_y);
+                    });
+                }
+                self.step += 1;
+                let elapsed_ms = self.step as f64 * self.cfg.step_ms as f64;
+                if next <= end || elapsed_ms >= self.cfg.scroll_s * 1000.0 {
+                    let held = with_thumbs_max();
+                    println!(
+                        "[bench] thumbs scrolled to row {:.0} of {rows:.0}, max held {held}",
+                        -next / crate::THUMB_ROW_LOGICAL_PX
+                    );
+                    self.settle();
+                }
+                false
+            }
+            Phase::Outline => {
+                if self.step == 0 {
+                    // Every node open, so every entry is a row.
+                    with_state(|state| {
+                        state.outline_expanded.iter_mut().for_each(|e| *e = true);
+                        state.rebuild_outline();
+                    });
+                }
+                if let Some((step, expected)) = self.nav_expect.take() {
+                    let got = nav_observed(ui);
+                    with_state(|state| state.bench.nav_check(step, &expected, &got));
+                }
+                let row = self.step as usize;
+                let mut expected = None;
+                with_state(|state| {
+                    let Some(item) = state
+                        .outline_visible
+                        .get(row)
+                        .and_then(|&i| state.outline_items.get(i))
+                    else {
+                        return;
+                    };
+                    let (_, view_h) = state.view_size(ui);
+                    let doc_h = state.layout.height() as f64;
+                    let y = match item.page.and_then(|p| state.layout.slot(p as usize)) {
+                        // An entry without a page does not move the view.
+                        None => state.pos.1,
+                        Some(slot) => match item.top {
+                            Some(top) => {
+                                slot.y as f64 + top as f64 * state.scale_milli as f64 / 1000.0
+                            }
+                            None => slot.y as f64 - state.layout.gap_px() as f64,
+                        },
+                    };
+                    let y = y.clamp(0.0, (doc_h - view_h).max(0.0));
+                    let page = state.layout.page_near(y + view_h / 2.0).unwrap_or(0) + 1;
+                    expected = Some(format!("zoom={} page={page} y={y:.0}", state.scale_milli));
+                });
+                let Some(expected) = expected else {
+                    self.settle();
+                    return false;
+                };
+                ui.invoke_outline_clicked(row as i32);
+                self.nav_expect = Some(("outline entry", expected));
+                self.step += 1;
                 false
             }
             Phase::Reopen => {
@@ -1512,8 +1663,13 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
     // A pan-only scenario opens on its pan phase, as it always did; anything else settles first so
     // its first step does not land inside the document's own first render.
     let mut pending = Pending::all(&cfg);
-    let only_pan =
-        !pending.jump && !pending.zoom && !pending.scroll && !pending.nav && !pending.reopen;
+    let only_pan = !pending.jump
+        && !pending.zoom
+        && !pending.scroll
+        && !pending.nav
+        && !pending.reopen
+        && !pending.thumbs
+        && !pending.outline;
     let phase = if only_pan {
         pending.pan = false;
         Phase::Pan
