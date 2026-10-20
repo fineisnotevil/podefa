@@ -26,8 +26,14 @@
 //! document's own first render rather than anything the zoom did; the summary leaves it out.
 
 use crate::{MainWindow, viewport_center, with_state};
-use pdf_core::{TileKey, TileScheduler, zoom_in_milli};
+use pdf_core::nav::{
+    LINE_STEP_LOGICAL_PX, NavAction, fit_page_milli, fit_width_milli, scroll_target,
+    wheel_zoom_milli,
+};
+use pdf_core::{TileKey, TileScheduler, ZOOM_DEFAULT_MILLI, zoom_in_milli, zoom_out_milli};
+use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Timer, TimerMode};
+use slint::{LogicalPosition, SharedString};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::env;
@@ -74,6 +80,9 @@ pub struct Cfg {
     /// `--bench-jump`: page to jump to (1-based, as the toolbar shows it) before the zoom phase
     /// (Plan 0002, §6 row D).
     pub jump_page: Option<usize>,
+    /// `--bench-nav`: drive every navigation action through the window's own input path and check
+    /// where each one lands (Plan 0002, §6 row F).
+    pub nav: bool,
 }
 
 impl Default for Cfg {
@@ -91,6 +100,7 @@ impl Default for Cfg {
             scroll_pxs: 0.0,
             scroll_s: 30.0,
             jump_page: None,
+            nav: false,
         }
     }
 }
@@ -102,6 +112,7 @@ impl Cfg {
             && self.pan_px <= 0.0
             && self.scroll_pxs <= 0.0
             && self.jump_page.is_none()
+            && !self.nav
     }
 }
 
@@ -156,6 +167,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-scroll-s" => {
                 cfg.scroll_s = number.unwrap_or(30.0).max(0.0);
                 consumed = 2;
+            }
+            "--bench-nav" => {
+                cfg.nav = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-jump" => {
                 cfg.jump_page = number.map(|page| page.max(1.0) as usize);
@@ -462,6 +477,8 @@ pub struct Trace {
     max_resident: usize,
     /// Index into `memory` where the scroll phase started, for `ws_growth`.
     scroll_mem_from: Option<usize>,
+    /// `--bench-nav` checks: `(step, passed)`.
+    nav_checks: Vec<(String, bool)>,
 }
 
 impl Trace {
@@ -483,6 +500,7 @@ impl Trace {
             reanchor_us: Vec::new(),
             max_resident: 0,
             scroll_mem_from: None,
+            nav_checks: Vec::new(),
         }
     }
 
@@ -643,6 +661,16 @@ impl Trace {
         self.stats.grows += 1;
         let t = self.t_ms();
         self.print(format_args!("grow t={t}ms capacity={capacity}"));
+    }
+
+    /// One `--bench-nav` step checked: what the core predicted and what the window shows.
+    pub fn nav_check(&mut self, step: &str, expected: &str, got: &str) {
+        let pass = expected == got;
+        self.nav_checks.push((step.to_owned(), pass));
+        println!(
+            "[bench] nav {step:<14} expected {expected:<22} got {got:<22} {}",
+            if pass { "PASS" } else { "FAIL" }
+        );
     }
 
     /// The canvas window moved (Plan 0002, §4.2): `us` is how long rewriting the canvas took,
@@ -867,12 +895,24 @@ impl Trace {
             );
         }
 
+        let nav_failed = self.nav_checks.iter().filter(|(_, pass)| !pass).count();
+        if !self.nav_checks.is_empty() {
+            println!(
+                "[bench] nav         {} of {} steps passed",
+                self.nav_checks.len() - nav_failed,
+                self.nav_checks.len()
+            );
+        }
         let worst_blank = runs.iter().filter_map(|run| run.blank_max).max();
         let Some(worst_blank) = worst_blank else {
+            if nav_failed > 0 {
+                println!("[bench] VERDICT     FAIL - {nav_failed} navigation step(s) missed");
+                return false;
+            }
             println!("[bench] VERDICT     n/a - no level change was measured");
             return true;
         };
-        let pass = worst_blank <= cfg.max_blank_ms;
+        let pass = worst_blank <= cfg.max_blank_ms && nav_failed == 0;
         println!(
             "[bench] VERDICT     {} - worst t_blank {worst_blank} ms vs {} ms ceiling",
             if pass { "PASS" } else { "FAIL" },
@@ -893,6 +933,8 @@ enum Phase {
     Pan,
     /// Downward scroll at a constant speed, up to the end of the document or of `scroll_s`.
     Scroll,
+    /// The navigation steps of [`NAV_STEPS`], one per tick, each checked on the next tick.
+    Nav,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -904,6 +946,7 @@ struct Pending {
     zoom: bool,
     pan: bool,
     scroll: bool,
+    nav: bool,
 }
 
 impl Pending {
@@ -914,6 +957,7 @@ impl Pending {
             zoom: cfg.zoom_steps > 0,
             pan: cfg.pan_px > 0.0 && cfg.pan_steps > 0,
             scroll: cfg.scroll_pxs > 0.0 && cfg.scroll_s > 0.0,
+            nav: cfg.nav,
         }
     }
 
@@ -924,6 +968,7 @@ impl Pending {
             (&mut self.zoom, Phase::Zoom),
             (&mut self.pan, Phase::Pan),
             (&mut self.scroll, Phase::Scroll),
+            (&mut self.nav, Phase::Nav),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -954,6 +999,196 @@ struct Driver {
     home: Option<(u32, (f64, f64))>,
     /// A repeat boundary is settling after that restore; the run starts when it ends.
     resetting: bool,
+    /// The `--bench-nav` step performed on the last tick and the state it should have produced.
+    nav_expect: Option<(&'static str, String)>,
+}
+
+/// One `--bench-nav` step (Plan 0002, §6 row F). Keys and the wheel go through
+/// `Window::dispatch_event`, i.e. the same `FocusScope` and `TouchArea` the user's input reaches;
+/// the page field, the fit buttons and the scrollbar through the callbacks their widgets invoke.
+#[derive(Debug, Clone, Copy)]
+enum NavStep {
+    Key(Key),
+    Space { shift: bool },
+    Ctrl(char),
+    CtrlWheel(f32),
+    GoTo(usize),
+    FitWidth,
+    FitPage,
+    ScrollbarBottom,
+    ScrollbarTop,
+}
+
+/// The `--bench-nav` script: every §4.6 action, starting from the document's top at 100%.
+const NAV_STEPS: &[NavStep] = &[
+    NavStep::Key(Key::End),
+    NavStep::Key(Key::Home),
+    NavStep::GoTo(900),
+    NavStep::Key(Key::PageDown),
+    NavStep::Key(Key::DownArrow),
+    NavStep::Key(Key::UpArrow),
+    NavStep::Key(Key::PageUp),
+    NavStep::Space { shift: false },
+    NavStep::Space { shift: true },
+    NavStep::Ctrl('='),
+    NavStep::Ctrl('-'),
+    NavStep::Ctrl('-'),
+    NavStep::Ctrl('0'),
+    NavStep::CtrlWheel(60.0),
+    NavStep::CtrlWheel(-30.0),
+    NavStep::FitWidth,
+    NavStep::FitPage,
+    NavStep::Ctrl('0'),
+    NavStep::ScrollbarBottom,
+    NavStep::ScrollbarTop,
+];
+
+fn nav_step_name(step: NavStep) -> &'static str {
+    match step {
+        NavStep::Key(Key::End) => "End",
+        NavStep::Key(Key::Home) => "Home",
+        NavStep::Key(Key::PageDown) => "PgDn",
+        NavStep::Key(Key::PageUp) => "PgUp",
+        NavStep::Key(Key::DownArrow) => "Down",
+        NavStep::Key(Key::UpArrow) => "Up",
+        NavStep::Key(_) => "key",
+        NavStep::Space { shift: false } => "Space",
+        NavStep::Space { shift: true } => "Shift+Space",
+        NavStep::Ctrl('=') => "Ctrl+=",
+        NavStep::Ctrl('-') => "Ctrl+-",
+        NavStep::Ctrl('0') => "Ctrl+0",
+        NavStep::Ctrl(_) => "Ctrl",
+        NavStep::CtrlWheel(d) if d > 0.0 => "Ctrl+wheel up",
+        NavStep::CtrlWheel(_) => "Ctrl+wheel down",
+        NavStep::GoTo(_) => "go to page",
+        NavStep::FitWidth => "Fit width",
+        NavStep::FitPage => "Fit page",
+        NavStep::ScrollbarBottom => "scrollbar end",
+        NavStep::ScrollbarTop => "scrollbar top",
+    }
+}
+
+/// What the window shows now: the zoom and the page under the viewport centre, as the toolbar
+/// shows them, and the scroll position in document pixels.
+fn nav_observed(ui: &MainWindow) -> String {
+    let mut out = String::new();
+    with_state(|state| {
+        out = format!(
+            "zoom={} page={} y={:.0}",
+            state.scale_milli,
+            ui.get_current_page() + 1,
+            state.pos.1
+        );
+    });
+    out
+}
+
+fn press(ui: &MainWindow, text: SharedString) {
+    let window = ui.window();
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    window.dispatch_event(WindowEvent::KeyReleased { text });
+}
+
+fn with_modifier(ui: &MainWindow, modifier: Key, f: impl FnOnce()) {
+    let window = ui.window();
+    let text: SharedString = char::from(modifier).into();
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    f();
+    window.dispatch_event(WindowEvent::KeyReleased { text });
+}
+
+/// Performs one step and returns what the core math says it should produce, in the same format as
+/// [`nav_observed`]. The prediction is computed *before* the input is sent, from the state the
+/// input will act on, so a step that the input path drops or misroutes shows as a mismatch.
+fn nav_perform(ui: &MainWindow, step: NavStep) -> String {
+    let mut expected = String::new();
+    with_state(|state| {
+        let (view_w, view_h) = state.view_size(ui);
+        let doc_h = state.layout.height() as f64;
+        let line = LINE_STEP_LOGICAL_PX * state.sf();
+        // Scroll steps also name the exact position they lead to, so a 40 px arrow step that
+        // stays on the same page is still checked.
+        let page_after = |milli: u32, pos_y: f64| {
+            let layout = pdf_core::DocLayout::new(&state.page_sizes, milli, state.gap_px());
+            let page = layout.page_near(pos_y + view_h / 2.0).unwrap_or(0) + 1;
+            format!("zoom={milli} page={page} y={pos_y:.0}")
+        };
+        let scroll = |action| scroll_target(action, state.pos.1, view_h, doc_h, line);
+        let current = state.current_page(ui);
+        expected = match step {
+            NavStep::Key(key) => {
+                let action = match key {
+                    Key::End => NavAction::End,
+                    Key::Home => NavAction::Home,
+                    Key::PageDown => NavAction::PageDown,
+                    Key::PageUp => NavAction::PageUp,
+                    Key::DownArrow => NavAction::LineDown,
+                    _ => NavAction::LineUp,
+                };
+                page_after(state.scale_milli, scroll(action))
+            }
+            NavStep::Space { shift } => {
+                let action = if shift {
+                    NavAction::PageUp
+                } else {
+                    NavAction::PageDown
+                };
+                page_after(state.scale_milli, scroll(action))
+            }
+            NavStep::Ctrl(c) => {
+                let milli = match c {
+                    '=' | '+' => zoom_in_milli(state.scale_milli),
+                    '-' => zoom_out_milli(state.scale_milli),
+                    _ => ZOOM_DEFAULT_MILLI,
+                };
+                // A centre-anchored zoom keeps the centre page.
+                format!("zoom={milli} page={}", current + 1)
+            }
+            NavStep::CtrlWheel(delta) => {
+                let milli = wheel_zoom_milli(state.scale_milli, delta as f64);
+                format!("zoom={milli} page={}", current + 1)
+            }
+            NavStep::GoTo(page) => format!("zoom={} page={page}", state.scale_milli),
+            NavStep::FitWidth | NavStep::FitPage => {
+                let size = state.page_sizes.get(current).copied();
+                let gap = state.gap_px();
+                let milli = size.map_or(state.scale_milli, |size| match step {
+                    NavStep::FitWidth => fit_width_milli(&size, view_w, gap),
+                    _ => fit_page_milli(&size, view_w, view_h, gap),
+                });
+                // Anchored at the page's top, so the page is still the one in view.
+                format!("zoom={milli} page={}", current + 1)
+            }
+            NavStep::ScrollbarBottom => {
+                format!("zoom={} page={}", state.scale_milli, state.layout.len())
+            }
+            NavStep::ScrollbarTop => format!("zoom={} page=1", state.scale_milli),
+        };
+    });
+    match step {
+        NavStep::Key(key) => press(ui, char::from(key).into()),
+        NavStep::Space { shift: false } => press(ui, " ".into()),
+        NavStep::Space { shift: true } => with_modifier(ui, Key::Shift, || press(ui, " ".into())),
+        NavStep::Ctrl(c) => with_modifier(ui, Key::Control, || press(ui, c.into())),
+        NavStep::CtrlWheel(delta) => {
+            // The middle of the viewport: below the toolbar and above the status bar.
+            let size = ui.window().size().to_logical(ui.window().scale_factor());
+            let position = LogicalPosition::new(size.width / 2.0, size.height / 2.0);
+            with_modifier(ui, Key::Control, || {
+                ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                    position,
+                    delta_x: 0.0,
+                    delta_y: delta,
+                });
+            });
+        }
+        NavStep::GoTo(page) => ui.invoke_go_to_page(page.to_string().into()),
+        NavStep::FitWidth => ui.invoke_fit_width(),
+        NavStep::FitPage => ui.invoke_fit_page(),
+        NavStep::ScrollbarBottom => ui.invoke_scrollbar_moved(ui.get_view_h(), ui.get_view_h()),
+        NavStep::ScrollbarTop => ui.invoke_scrollbar_moved(0.0, ui.get_view_h()),
+    }
+    expected
 }
 
 impl Driver {
@@ -1009,6 +1244,7 @@ impl Driver {
             Phase::Zoom => "zoom",
             Phase::Pan => "pan",
             Phase::Scroll => "scroll",
+            Phase::Nav => "nav",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -1088,6 +1324,27 @@ impl Driver {
                 }
                 false
             }
+            Phase::Nav => {
+                // Check the step before this one, then perform the next: one tick lets the
+                // window process the dispatched events and the state settle.
+                if let Some((step, expected)) = self.nav_expect.take() {
+                    let mut got = nav_observed(ui);
+                    // Zoom, fit and jump steps predict the page, not the position.
+                    if !expected.contains(" y=")
+                        && let Some(at) = got.find(" y=")
+                    {
+                        got.truncate(at);
+                    }
+                    with_state(|state| state.bench.nav_check(step, &expected, &got));
+                }
+                let Some(&step) = NAV_STEPS.get(self.step as usize) else {
+                    self.settle();
+                    return false;
+                };
+                self.nav_expect = Some((nav_step_name(step), nav_perform(ui, step)));
+                self.step += 1;
+                false
+            }
             Phase::Settle => {
                 self.settle_ticks = self.settle_ticks.saturating_sub(1);
                 if self.settle_ticks > 0 {
@@ -1156,7 +1413,7 @@ pub fn start_sampler() {
 pub fn start(ui: &MainWindow, cfg: Cfg) {
     if cfg.is_empty() {
         println!(
-            "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll or --bench-jump"
+            "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll, --bench-jump or --bench-nav"
         );
         return;
     }
@@ -1181,11 +1438,18 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
         cfg.cache_rows
             .map_or_else(|| "auto".to_owned(), |rows| rows.to_string())
     );
+    // The viewport every number of the run depends on: logical size and the device scale factor.
+    println!(
+        "[bench] viewport {:.0}x{:.0} logical, scale factor {}",
+        ui.get_view_w(),
+        ui.get_view_h(),
+        ui.window().scale_factor()
+    );
 
     // A pan-only scenario opens on its pan phase, as it always did; anything else settles first so
     // its first step does not land inside the document's own first render.
     let mut pending = Pending::all(&cfg);
-    let only_pan = !pending.jump && !pending.zoom && !pending.scroll;
+    let only_pan = !pending.jump && !pending.zoom && !pending.scroll && !pending.nav;
     let phase = if only_pan {
         pending.pan = false;
         Phase::Pan
@@ -1202,6 +1466,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             runs_left: cfg.repeats.max(1),
             home: None,
             resetting: false,
+            nav_expect: None,
         });
     });
 

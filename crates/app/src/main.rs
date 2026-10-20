@@ -15,12 +15,17 @@
 //! to that window's start.
 
 use engine_mupdf::EngineHandle;
+use pdf_core::nav::{
+    LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
+    fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
+};
 use pdf_core::{
     Bitmap, CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, EngineCmd, EngineEvent,
     PAGE_GAP_LOGICAL_PX, PageSize, REANCHOR_MARGIN_LOGICAL_PX, TILE_SIZE_PX, TileAction, TileKey,
     TileScheduler, ZOOM_DEFAULT_MILLI, ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli,
     zoom_in_milli, zoom_out_milli,
 };
+use slint::platform::Key;
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel,
 };
@@ -40,7 +45,7 @@ use std::time::Instant;
 mod bench;
 
 slint::slint! {
-    import { Button } from "std-widgets.slint";
+    import { Button, LineEdit } from "std-widgets.slint";
 
     // One model row: an image plus where it goes, in canvas logical pixels.
     //
@@ -67,6 +72,7 @@ slint::slint! {
 
     export component MainWindow inherits Window {
         title: "PODEFA - PDF Viewer";
+        init => { viewport-keys.focus(); }
         min-width: 600px;
         min-height: 500px;
         preferred-width: 900px;
@@ -96,12 +102,31 @@ slint::slint! {
         in-out property <int> tiles_rendered: 0;
         in-out property <int> tiles_requested: 0;
 
+        // The document scrollbar (Plan 0002, §4.2): Rust places the thumb from the document
+        // position, because the Flickable only knows the canvas window.
+        in-out property <bool> sb-visible: false;
+        in-out property <length> sb-thumb-y: 0px;
+        in-out property <length> sb-thumb-h: 0px;
+        // The go-to-page field's text; Rust follows the current page while the field is not
+        // being edited.
+        in-out property <string> page-input: "";
+        out property <bool> page-field-focused: page-field.has-focus;
+
         callback prev_page();
         callback next_page();
         callback zoom_in();
         callback zoom_out();
         callback zoom_reset();
         callback viewport_moved();
+        callback fit_width();
+        callback fit_page();
+        // A key on the viewport: text as Slint reports it, plus ctrl and shift; true when handled.
+        callback nav_key(string, bool, bool) -> bool;
+        // Ctrl+wheel: the wheel delta and the cursor, viewport-relative, in logical pixels.
+        callback wheel_zoom(length, length, length);
+        callback go_to_page(string);
+        // The scrollbar thumb was dragged to `offset` within a track of `track`.
+        callback scrollbar_moved(length, length);
 
         VerticalLayout {
             padding: 8px;
@@ -124,11 +149,21 @@ slint::slint! {
                     clicked => { root.next_page(); }
                 }
 
+                page-field := LineEdit {
+                    width: 64px;
+                    enabled: root.total_pages > 0;
+                    horizontal-alignment: right;
+                    text <=> root.page-input;
+                    accepted(text) => {
+                        root.go_to_page(text);
+                        viewport-keys.focus();
+                    }
+                }
+
                 Text {
-                    text: root.total_pages > 0 ? "Page " + (root.current_page + 1) + " of " + root.total_pages : "No pages";
+                    text: root.total_pages > 0 ? "of " + root.total_pages : "No pages";
                     vertical-alignment: center;
-                    horizontal-alignment: center;
-                    min-width: 120px;
+                    min-width: 60px;
                 }
 
                 Rectangle { horizontal-stretch: 1; }
@@ -149,6 +184,18 @@ slint::slint! {
                     text: "Reset (100%)";
                     enabled: !root.is_loading && root.total_pages > 0;
                     clicked => { root.zoom_reset(); }
+                }
+
+                Button {
+                    text: "Fit width";
+                    enabled: !root.is_loading && root.total_pages > 0;
+                    clicked => { root.fit_width(); }
+                }
+
+                Button {
+                    text: "Fit page";
+                    enabled: !root.is_loading && root.total_pages > 0;
+                    clicked => { root.fit_page(); }
                 }
 
                 Text {
@@ -175,12 +222,20 @@ slint::slint! {
                 }
             }
 
-            // Document viewport
-            Rectangle {
+            // Document viewport. The FocusScope takes the navigation keys (Plan 0002, §4.6); it has
+            // focus from startup and takes it back on a click into the page.
+            viewport-keys := FocusScope {
+              vertical-stretch: 1;
+              key-pressed(event) => {
+                  if (root.nav_key(event.text, event.modifiers.control, event.modifiers.shift)) {
+                      return accept;
+                  }
+                  return reject;
+              }
+              Rectangle {
                 background: #e5e7eb;
                 border-width: 1px;
                 border-color: #d1d5db;
-                vertical-stretch: 1;
 
                 viewport := Flickable {
                     visible: !root.has_error && root.total_pages > 0;
@@ -212,6 +267,62 @@ slint::slint! {
                         visible: tile.visible;
                         x: tile.x; y: tile.y; width: tile.w; height: tile.h;
                     }
+
+                    // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
+                    // children first, so this area - kept over the viewport, not the canvas -
+                    // sees them; without ctrl it rejects them and the Flickable scrolls.
+                    TouchArea {
+                        x: -root.scroll-x; y: -root.scroll-y;
+                        width: viewport.width; height: viewport.height;
+                        scroll-event(event) => {
+                            if (event.modifiers.control) {
+                                root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                viewport-keys.focus();
+                            }
+                        }
+                    }
+                }
+
+                // The document scrollbar, over the right edge of the viewport.
+                Rectangle {
+                    x: parent.width - 12px;
+                    width: 12px;
+                    visible: root.sb-visible;
+                    background: #0000000d;
+                    Rectangle {
+                        y: root.sb-thumb-y;
+                        height: root.sb-thumb-h;
+                        x: 2px;
+                        width: parent.width - 4px;
+                        border-radius: 4px;
+                        background: thumb-area.pressed ? #6b7280 : #9ca3af;
+                    }
+                    thumb-area := TouchArea {
+                        // Where in the thumb it was grabbed, so a drag does not snap its top to
+                        // the cursor.
+                        property <length> grab: 0px;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                if (self.mouse-y >= root.sb-thumb-y && self.mouse-y < root.sb-thumb-y + root.sb-thumb-h) {
+                                    self.grab = self.mouse-y - root.sb-thumb-y;
+                                } else {
+                                    self.grab = root.sb-thumb-h / 2;
+                                    root.scrollbar_moved(self.mouse-y - self.grab, self.height);
+                                }
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.scrollbar_moved(self.mouse-y - self.grab, self.height);
+                            }
+                        }
+                    }
                 }
 
                 if (root.total_pages == 0 && !root.has_error) : Text {
@@ -220,6 +331,7 @@ slint::slint! {
                     vertical-alignment: center;
                     horizontal-alignment: center;
                 }
+              }
             }
 
             // Status bar
@@ -485,7 +597,105 @@ impl AppState {
         let (_, view_h) = self.view_size(ui);
         if let Some(page) = self.layout.page_near(self.pos.1 + view_h / 2.0) {
             ui.set_current_page(page as i32);
+            // The field follows the page, except while the user is typing a page into it.
+            let label = SharedString::from((page + 1).to_string());
+            if !ui.get_page_field_focused() && ui.get_page_input() != label {
+                ui.set_page_input(label);
+            }
         }
+        self.update_scrollbar(ui);
+    }
+
+    /// Places the scrollbar thumb for the whole document (Plan 0002, §4.2).
+    fn update_scrollbar(&self, ui: &MainWindow) {
+        let (_, view_h) = self.view_size(ui);
+        let doc_h = self.layout.height() as f64;
+        let track = ui.get_view_h() as f64;
+        let visible = doc_h > view_h && track > 0.0;
+        ui.set_sb_visible(visible);
+        if !visible {
+            return;
+        }
+        let (offset, len) = scrollbar_thumb(
+            self.pos.1,
+            view_h,
+            doc_h,
+            track,
+            SCROLLBAR_MIN_THUMB_LOGICAL_PX,
+        );
+        ui.set_sb_thumb_y(offset as f32);
+        ui.set_sb_thumb_h(len as f32);
+    }
+
+    /// Moves to `pos_y` for a navigation action: a jump - further than two viewports - starts an
+    /// epoch, because what is pending belongs to a place the user has left (Plan 0002, §4.4); a
+    /// short step scrolls like the wheel.
+    fn navigate_to(&mut self, ui: &MainWindow, pos_y: f64) {
+        let (_, view_h) = self.view_size(ui);
+        if (pos_y - self.pos.1).abs() > 2.0 * view_h {
+            self.begin_epoch();
+        }
+        self.scroll_to(ui, (self.pos.0, pos_y));
+    }
+
+    /// One keyboard navigation action.
+    fn nav(&mut self, ui: &MainWindow, action: NavAction) {
+        let (_, view_h) = self.view_size(ui);
+        let target = scroll_target(
+            action,
+            self.pos.1,
+            view_h,
+            self.layout.height() as f64,
+            LINE_STEP_LOGICAL_PX * self.sf(),
+        );
+        self.navigate_to(ui, target);
+    }
+
+    /// The scrollbar thumb was dragged to `offset` in a track of `track` logical pixels.
+    fn scrollbar_moved(&mut self, ui: &MainWindow, offset: f32, track: f32) {
+        let (_, view_h) = self.view_size(ui);
+        let sf = self.sf();
+        // The thumb math works in the track's logical pixels; the document in device pixels.
+        let pos = scrollbar_pos(
+            offset as f64,
+            view_h / sf,
+            self.layout.height() as f64 / sf,
+            track as f64,
+            SCROLLBAR_MIN_THUMB_LOGICAL_PX,
+        ) * sf;
+        self.navigate_to(ui, pos);
+    }
+
+    /// Fit-width or fit-page for the current page, anchored at that page's top (Plan 0002, §4.5).
+    fn fit(&mut self, ui: &MainWindow, whole_page: bool) {
+        let page = self.current_page(ui);
+        let Some(size) = self.page_sizes.get(page).copied() else {
+            return;
+        };
+        let (view_w, view_h) = self.view_size(ui);
+        let gap = self.gap_px();
+        let milli = if whole_page {
+            fit_page_milli(&size, view_w, view_h, gap)
+        } else {
+            fit_width_milli(&size, view_w, gap)
+        };
+        self.zoom_to_page(ui, milli, page);
+    }
+
+    /// Zooms to `milli` with `page`'s top at the viewport top.
+    fn zoom_to_page(&mut self, ui: &MainWindow, milli: u32, page: usize) {
+        let milli = milli.clamp(ZOOM_MIN_MILLI, ZOOM_MAX_MILLI);
+        if milli != self.scale_milli {
+            self.layout = DocLayout::new(&self.page_sizes, milli, self.gap_px());
+            self.scale_milli = milli;
+            self.bench.level_changed(milli, "fit");
+            ui.set_zoom_percent(milli as f32 / 10.0);
+        }
+        self.begin_epoch();
+        self.pos.1 = page_top(&self.layout, page).unwrap_or(0.0);
+        self.clamp_pos(ui);
+        self.reanchor(ui);
+        self.refresh(ui);
     }
 
     /// Pages that hold a page row and, when tiled, a base layer: the ones in view plus one page
@@ -773,11 +983,11 @@ impl AppState {
     /// Jumps to the top of a page: everything still pending belongs to a place the user has left,
     /// so a jump starts an epoch (Plan 0002, §4.4).
     fn go_to_page(&mut self, ui: &MainWindow, page: usize) {
-        let Some(slot) = self.layout.slot(page).copied() else {
+        let Some(top) = page_top(&self.layout, page) else {
             return;
         };
         self.begin_epoch();
-        self.pos.1 = slot.y as f64 - self.layout.gap_px() as f64;
+        self.pos.1 = top;
         self.clamp_pos(ui);
         self.reanchor(ui);
         self.refresh(ui);
@@ -867,6 +1077,45 @@ fn viewport_moved(ui: &MainWindow) {
             state.refresh(ui);
         }
     });
+}
+
+/// What a key on the viewport does: a scroll action, a zoom, or nothing (the event is rejected and
+/// goes on to the parent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyCommand {
+    Scroll(NavAction),
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+}
+
+/// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
+/// printable character, or one of the private-use code points of [`Key`].
+fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
+    let mut chars = text.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if ctrl {
+        return match c {
+            '+' | '=' => Some(KeyCommand::ZoomIn),
+            '-' => Some(KeyCommand::ZoomOut),
+            '0' => Some(KeyCommand::ZoomReset),
+            _ => None,
+        };
+    }
+    let action = match c {
+        ' ' if shift => NavAction::PageUp,
+        ' ' => NavAction::PageDown,
+        c if c == char::from(Key::UpArrow) => NavAction::LineUp,
+        c if c == char::from(Key::DownArrow) => NavAction::LineDown,
+        c if c == char::from(Key::PageUp) => NavAction::PageUp,
+        c if c == char::from(Key::PageDown) => NavAction::PageDown,
+        c if c == char::from(Key::Home) => NavAction::Home,
+        c if c == char::from(Key::End) => NavAction::End,
+        _ => return None,
+    };
+    Some(KeyCommand::Scroll(action))
 }
 
 /// Where a zoom should keep the page still: the middle of the viewport.
@@ -1081,6 +1330,89 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let weak = main_window.as_weak();
+        main_window.on_nav_key(move |text, ctrl, shift| {
+            let Some(ui) = weak.upgrade() else {
+                return false;
+            };
+            let Some(command) = key_command(&text, ctrl, shift) else {
+                return false;
+            };
+            let (ax, ay) = viewport_center(&ui);
+            with_state(|state| match command {
+                KeyCommand::Scroll(action) => state.nav(&ui, action),
+                KeyCommand::ZoomIn => {
+                    let next = zoom_in_milli(state.scale_milli);
+                    state.zoom(&ui, next, ax, ay);
+                }
+                KeyCommand::ZoomOut => {
+                    let next = zoom_out_milli(state.scale_milli);
+                    state.zoom(&ui, next, ax, ay);
+                }
+                KeyCommand::ZoomReset => state.zoom(&ui, ZOOM_DEFAULT_MILLI, ax, ay),
+            });
+            true
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_wheel_zoom(move |delta, x, y| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| {
+                    let next = wheel_zoom_milli(state.scale_milli, delta as f64);
+                    state.zoom(&ui, next, x, y);
+                });
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_go_to_page(move |text| {
+            if let Some(ui) = weak.upgrade() {
+                // 1-based, as the field shows it; anything that is not a page number is ignored
+                // and the field goes back to the current page on the next refresh.
+                let page = text.trim().parse::<usize>().ok();
+                with_state(|state| {
+                    if let Some(page) = page.filter(|&p| p >= 1 && p <= state.layout.len()) {
+                        state.go_to_page(&ui, page - 1);
+                    }
+                    let current = state.current_page(&ui) + 1;
+                    ui.set_page_input(SharedString::from(current.to_string()));
+                });
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_scrollbar_moved(move |offset, track| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.scrollbar_moved(&ui, offset, track));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_fit_width(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.fit(&ui, false));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_fit_page(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.fit(&ui, true));
+            }
+        });
+    }
+
     // CLI argument handling: open the file passed as the first argument.
     if let Some(path_arg) = path {
         let pdf_path = PathBuf::from(path_arg);
@@ -1097,4 +1429,47 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     main_window.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(k: Key) -> String {
+        char::from(k).to_string()
+    }
+
+    #[test]
+    fn navigation_keys_map_to_scroll_actions() {
+        let cases = [
+            (key(Key::UpArrow), false, NavAction::LineUp),
+            (key(Key::DownArrow), false, NavAction::LineDown),
+            (key(Key::PageUp), false, NavAction::PageUp),
+            (key(Key::PageDown), false, NavAction::PageDown),
+            (key(Key::Home), false, NavAction::Home),
+            (key(Key::End), false, NavAction::End),
+            (" ".to_owned(), false, NavAction::PageDown),
+            (" ".to_owned(), true, NavAction::PageUp),
+        ];
+        for (text, shift, action) in cases {
+            assert_eq!(
+                key_command(&text, false, shift),
+                Some(KeyCommand::Scroll(action)),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_shortcuts_need_ctrl() {
+        assert_eq!(key_command("+", true, false), Some(KeyCommand::ZoomIn));
+        assert_eq!(key_command("=", true, false), Some(KeyCommand::ZoomIn));
+        assert_eq!(key_command("-", true, false), Some(KeyCommand::ZoomOut));
+        assert_eq!(key_command("0", true, false), Some(KeyCommand::ZoomReset));
+        assert_eq!(key_command("+", false, false), None);
+        assert_eq!(key_command("a", false, false), None);
+        assert_eq!(key_command("", false, false), None);
+        // Ctrl with a navigation key is left alone (it is not one of ours).
+        assert_eq!(key_command(&key(Key::Home), true, false), None);
+    }
 }
