@@ -24,9 +24,11 @@ sends commands and receives events** - but the rendering it describes was replac
   never touches the document; `DisplayList` is `Send + Sync`, which is what makes parallel rendering
   possible. The "Single-Page Rendering Throughput" consequence below is resolved by this.
 - **Cancellation is by epoch, not by request.** A zoom, a jump or a new document starts an epoch;
-  `Cancel` drops the old epoch's queued tiles and aborts the one inside the rasterizer through
-  MuPDF's cookie, and whether a finished raster may be published is decided under the registry lock
-  `cancel` takes, so a cancelled epoch never publishes pixels.
+  `Cancel` drops the old epoch's queued tiles, and whether a finished raster may be published is
+  decided under the registry lock `cancel` takes, so a cancelled epoch never publishes pixels.
+  Aborting the tile *inside* the rasterizer through MuPDF's cookie is implemented but **switched off**
+  since 2026-10-20 (`MID_RASTER_ABORT`): with mupdf-rs 0.8 an aborted run can end the process
+  (`docs/benchmarks.md` §9.7, `docs/backlog.md` item 7).
 
 ADR 0004 and Plan 0003 add further work to this model (opening on a running app; a search thread
 with its own document is planned for Plan 0003 Phase 3 and will get its own ADR).

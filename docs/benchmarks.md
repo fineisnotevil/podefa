@@ -928,3 +928,37 @@ from 2845% to 6400% they took 128-190 ms. The control run - the same zoom steps 
 with **no search** - took 96-155 ms at those levels and 0-10 ms below them. So the slow levels are the
 cost of rendering this text at very high zoom, not of searching (search adds ~20-35 ms there); this
 is a new finding, since §7's fixtures have little text, and it is `backlog.md` item 6.
+
+### 9.7 Mid-raster abort switched off (crash fix)
+
+During the Phase 3 review the maintainer found that some PDFs end the process (exit code 1, no panic
+message) when zoomed quickly. Cause, from the sources: a cancel aborts a tile through MuPDF's cookie;
+`fz_run_display_list` then breaks out of its loop and leaves the clips and groups it had pushed on the
+draw device's stack (`mupdf-sys-0.8.0/mupdf/source/fitz/list-device.c:2109-2114`); closing that device
+throws "items left on stack in draw device" (`draw-device.c:3091-3092`), `fz_close_device` rethrows
+it (`device.c:82-83`), and mupdf-rs 0.8 closes devices in `Drop for Device` with no `fz_try` around the
+call (`patches/mupdf/src/device.rs:641-647`), so MuPDF reaches its uncaught-error path and calls
+`exit(EXIT_FAILURE)` (`error.c:208-224`).
+
+Evidence, release build, the §1 machine, `--bench-zoom 19 --bench-step-ms 16 --bench-settle-ms 3000`
+on the maintainer's PDF: exit code 1 in 3 of 3 runs with the cookie, 0 in 3 of 3 with it off.
+`crates/engine-mupdf/tests/abort_safety_test.rs` reproduces it with a generated page (2000 fills
+inside two nested clips): the test binary exits with code 1 when the cookie is used and passes when it
+is not.
+
+Fix (maintainer's choice, a stop-gap): `MID_RASTER_ABORT = false` in `crates/engine-mupdf/src/pool.rs`.
+A cancel still drops every queued tile of the epoch and still keeps a finished raster of a cancelled
+epoch from being published; a tile already inside the rasterizer now runs to its end, and `t_abort`
+becomes "cancel to end of that raster". Measured after the fix:
+
+| Run | Per-run worst `t_blank` (ms) | `t_abort` (ms) | Result |
+| :--- | :--- | :--- | :--- |
+| maintainer's PDF, 19 steps, 3 runs | 19, 38, 14 | max 21, 73, 18 | no crash; PASS x3 |
+| `large_format_a0.pdf`, 6 steps x5 | 4/4/14 (min/med/max of the runs' worst) | 0 | PASS |
+| `dense_vector.pdf`, 6 steps x5, run 1 | across runs 26/36/193 | 20/23/28 | **FAIL** (one run over 50) |
+| `dense_vector.pdf`, 6 steps x5, run 2 | 26, 229, 35, 30, 21 | 20, 30, 23, 21, 18 | **FAIL** (one run over 50) |
+
+`dense_vector.pdf` is the worst case by design (one expensive node a tile). With the cookie it stayed
+at 21-26 ms (`benchmarks.md` §7.5); without it, about one burst in five waits for heavy tiles already
+rasterizing and its first new tile takes 190-230 ms. That is the measured cost of the stop-gap,
+recorded in `backlog.md` item 7 together with the condition for undoing it.

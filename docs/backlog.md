@@ -249,3 +249,30 @@ setting) or accepting it - text at those zooms is far larger than a screen.
 ### Alternatives Considered
 
 - *Cap the zoom for text documents* - rejected by CLAUDE.md §4 rule 1.
+
+---
+
+## 7. Turn the mid-raster abort back on once mupdf-rs closes devices safely
+
+**Labels:** `bug`, `performance`, `upstream`
+
+### Problem Statement
+
+`MID_RASTER_ABORT` (`crates/engine-mupdf/src/pool.rs`) is off because an aborted run leaves the draw
+device's stack unbalanced and mupdf-rs 0.8 closes the device in `Drop` without a `fz_try`, which makes
+MuPDF call `exit(1)` (`benchmarks.md` §9.7). With it off, a zoom burst on a page of expensive nodes
+sometimes waits for tiles already rasterizing: `dense_vector.pdf` shows one burst in five at 190-230 ms
+`t_blank` (21-26 ms with the abort).
+
+### Proposed Solution
+
+A pull request to mupdf-rs adds a guarded `mupdf_close_device` wrapper to `mupdf-sys` and uses it in
+`Drop for Device` (and as a fallible `Device::close`). Once a release carries it: update the `mupdf`
+dependency (dropping or rebasing `patches/mupdf`), set `MID_RASTER_ABORT = true`, and check that
+`abort_safety_test.rs` passes with it on and that `dense_vector.pdf` is back at §7.5's numbers.
+
+### Alternatives Considered
+
+- *A C shim in `patches/mupdf`*: keeps the abort now, but needs MuPDF's headers, which `mupdf-sys`
+  does not expose to dependents, and compile flags matching its build; rejected by the maintainer.
+- *Vendoring `mupdf-sys`*: 65 MB of MuPDF sources in this repository; rejected.
