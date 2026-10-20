@@ -1474,15 +1474,15 @@ impl Driver {
                 false
             }
             Phase::Outline => {
-                if self.step == 0 {
-                    // Every node open, so every entry is a row.
-                    with_state(|state| {
-                        state.outline_expanded.iter_mut().for_each(|e| *e = true);
-                        state.rebuild_outline();
-                    });
-                }
+                // The tree starts collapsed and is opened only by the title clicks themselves, so
+                // reaching a child entry at all checks that a click opens its parent; the row count
+                // after each click is checked too.
                 if let Some((step, expected)) = self.nav_expect.take() {
-                    let got = nav_observed(ui);
+                    let got = format!(
+                        "{} rows={}",
+                        nav_observed(ui),
+                        ui.get_outline_rows().row_count()
+                    );
                     with_state(|state| state.bench.nav_check(step, &expected, &got));
                 }
                 let row = self.step as usize;
@@ -1509,7 +1509,15 @@ impl Driver {
                     };
                     let y = y.clamp(0.0, (doc_h - view_h).max(0.0));
                     let page = state.layout.page_near(y + view_h / 2.0).unwrap_or(0) + 1;
-                    expected = Some(format!("zoom={} page={page} y={y:.0}", state.scale_milli));
+                    let mut opened = state.outline_expanded.clone();
+                    if let Some(&index) = state.outline_visible.get(row) {
+                        crate::expand_on_click(&state.outline_items, &mut opened, index);
+                    }
+                    let rows = crate::visible_outline(&state.outline_items, &opened).len();
+                    expected = Some(format!(
+                        "zoom={} page={page} y={y:.0} rows={rows}",
+                        state.scale_milli
+                    ));
                 });
                 let Some(expected) = expected else {
                     self.settle();

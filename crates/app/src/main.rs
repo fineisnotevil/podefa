@@ -1008,22 +1008,9 @@ impl AppState {
     fn rebuild_outline(&mut self) {
         let mut rows = Vec::new();
         self.outline_visible.clear();
-        let mut collapsed_at: Option<u32> = None;
-        for (i, item) in self.outline_items.iter().enumerate() {
-            if let Some(depth) = collapsed_at {
-                if item.depth > depth {
-                    continue;
-                }
-                collapsed_at = None;
-            }
-            let expandable = self
-                .outline_items
-                .get(i + 1)
-                .is_some_and(|next| next.depth > item.depth);
+        for (i, expandable) in visible_outline(&self.outline_items, &self.outline_expanded) {
+            let item = &self.outline_items[i];
             let expanded = self.outline_expanded.get(i).copied().unwrap_or(false);
-            if expandable && !expanded {
-                collapsed_at = Some(item.depth);
-            }
             self.outline_visible.push(i);
             rows.push(OutlineRow {
                 title: SharedString::from(item.title.as_str()),
@@ -1047,15 +1034,20 @@ impl AppState {
     }
 
     /// Goes to an outline row's destination: its page, at the position it names.
+    ///
+    /// A click on the title of a collapsed entry with children also opens it, so the reader does
+    /// not have to aim for the chevron; it never closes one, so a click meant to navigate cannot
+    /// hide the entries below. Closing is the chevron's job.
     fn outline_clicked(&mut self, ui: &MainWindow, row: usize) {
-        let Some(item) = self
-            .outline_visible
-            .get(row)
-            .and_then(|&i| self.outline_items.get(i))
-        else {
+        let Some(&index) = self.outline_visible.get(row) else {
             return;
         };
-        if let Some(page) = item.page {
+        if expand_on_click(&self.outline_items, &mut self.outline_expanded, index) {
+            self.rebuild_outline();
+        }
+        if let Some(item) = self.outline_items.get(index)
+            && let Some(page) = item.page
+        {
             let top = item.top;
             self.go_to_dest(ui, page as usize, top);
         }
@@ -1726,6 +1718,42 @@ fn pick_document() -> Option<PathBuf> {
         .pick_file()
 }
 
+/// The outline entries a tree with these `expanded` flags shows, in order, each with whether it has
+/// children: an entry is hidden while any ancestor is collapsed.
+fn visible_outline(items: &[OutlineItem], expanded: &[bool]) -> Vec<(usize, bool)> {
+    let mut rows = Vec::new();
+    let mut collapsed_at: Option<u32> = None;
+    for (i, item) in items.iter().enumerate() {
+        if let Some(depth) = collapsed_at {
+            if item.depth > depth {
+                continue;
+            }
+            collapsed_at = None;
+        }
+        let expandable = items.get(i + 1).is_some_and(|next| next.depth > item.depth);
+        if expandable && !expanded.get(i).copied().unwrap_or(false) {
+            collapsed_at = Some(item.depth);
+        }
+        rows.push((i, expandable));
+    }
+    rows
+}
+
+/// Opens entry `index` if it has children and is closed; returns whether anything changed.
+fn expand_on_click(items: &[OutlineItem], expanded: &mut [bool], index: usize) -> bool {
+    let has_children = items
+        .get(index)
+        .zip(items.get(index + 1))
+        .is_some_and(|(item, next)| next.depth > item.depth);
+    match expanded.get_mut(index) {
+        Some(open) if has_children && !*open => {
+            *open = true;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// What a key on the viewport does: a scroll action, a zoom, or nothing (the event is rejected and
 /// goes on to the parent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2288,6 +2316,82 @@ mod tests {
             Some(KeyCommand::ToggleSidebar)
         );
         assert_eq!(key_command("b", false, false), None);
+    }
+
+    fn entry(depth: u32, title: &str) -> OutlineItem {
+        OutlineItem {
+            depth,
+            title: title.to_owned(),
+            page: Some(0),
+            top: None,
+        }
+    }
+
+    #[test]
+    fn collapsed_entries_hide_their_descendants_only() {
+        let items = [
+            entry(0, "1"),
+            entry(1, "1.1"),
+            entry(2, "1.1.1"),
+            entry(1, "1.2"),
+            entry(0, "2"),
+        ];
+        let titles = |expanded: &[bool]| -> Vec<(String, bool)> {
+            visible_outline(&items, expanded)
+                .into_iter()
+                .map(|(i, expandable)| (items[i].title.clone(), expandable))
+                .collect()
+        };
+        let row = |t: &str, e: bool| (t.to_owned(), e);
+        assert_eq!(titles(&[false; 5]), vec![row("1", true), row("2", false)]);
+        assert_eq!(
+            titles(&[true, false, false, false, false]),
+            vec![
+                row("1", true),
+                row("1.1", true),
+                row("1.2", false),
+                row("2", false)
+            ]
+        );
+        assert_eq!(titles(&[true; 5]).len(), 5);
+        // A collapsed child hides only its own subtree, even under an open parent.
+        assert_eq!(
+            titles(&[true, false, true, true, true]),
+            vec![
+                row("1", true),
+                row("1.1", true),
+                row("1.2", false),
+                row("2", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_title_click_opens_a_closed_parent_and_never_closes_one() {
+        let items = [entry(0, "1"), entry(1, "1.1"), entry(0, "2")];
+        let mut expanded = vec![false; 3];
+        assert!(
+            expand_on_click(&items, &mut expanded, 0),
+            "closed parent opens"
+        );
+        assert_eq!(expanded, [true, false, false]);
+        assert!(
+            !expand_on_click(&items, &mut expanded, 0),
+            "an open parent stays open"
+        );
+        assert_eq!(expanded, [true, false, false]);
+        assert!(
+            !expand_on_click(&items, &mut expanded, 1),
+            "a leaf has nothing to open"
+        );
+        assert!(
+            !expand_on_click(&items, &mut expanded, 2),
+            "the last entry is a leaf"
+        );
+        assert!(
+            !expand_on_click(&items, &mut expanded, 9),
+            "out of range is ignored"
+        );
     }
 
     #[test]
