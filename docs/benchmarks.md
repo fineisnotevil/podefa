@@ -881,3 +881,50 @@ replaced before these runs.) `outline.pdf` is written by `crates/engine-mupdf/te
 Row K's expected positions are computed in the harness from the layout and the outline entry, not by
 the app's `go_to_dest`; the entries' `top` values themselves (100 and 292 pt below the page top, from
 `/XYZ 0 692` and `/FitH 500` on a 792 pt page) are asserted in `sidebar_test.rs`.
+
+### 9.6 Phase 3: search (rows L, M, O)
+
+Release builds of `bd894f8` (first runs) and `2a8ae47` (search document warmed up at open), 2026-10-20,
+the §1 machine, viewport 884x612 logical px at scale factor 1, `--bench-step-ms 16`. The text
+documents are §9.1's generator (`synthetic_text_1000p.pdf`, and `synthetic_text_20000p.pdf` from
+`FA_PDF_BENCH_PAGES=20000`), whose run also re-measured the per-page costs at 20,000 pages: 0.884 ms
+extraction and 0.371 / 0.358 ms search (hit / miss) a page, first page 1435.63 ms.
+`search_400p.pdf` is written by `crates/engine-mupdf/tests/search_test.rs` (`podefa` on every page,
+`rare` on page 1 only).
+
+```powershell
+$env:FA_PDF_TRACE = 1
+target\release\app.exe target\tmp\synthetic_text_1000p.pdf --bench-search podefa --bench-search-zoom --bench-step-ms 16 --bench-settle-ms 3000   # L
+target\release\app.exe target\tmp\search_400p.pdf --bench-search podefa --bench-search-replace rare --bench-search-expect 1 --bench-step-ms 16 --bench-settle-ms 3000   # M
+target\release\app.exe target\tmp\synthetic_text_20000p.pdf --bench-search podefa --bench-step-ms 16 --bench-settle-ms 10000   # O
+target\release\app.exe target\tmp\synthetic_text_20000p.pdf --bench-zoom 19 --bench-step-ms 1000 --bench-settle-ms 3000   # control, no search
+```
+
+| Run | `t_first_hit` | search (thread / wall) | hits | `ws` before / done / at report |
+| :--- | ---: | :--- | ---: | :--- |
+| L, `bd894f8` | 816 ms | 2184 / 2187 ms, 2.18 ms/page | 1000 | 129.6 / 172.5 / 172.5 MiB (zooming) |
+| L, `2a8ae47` | **1 ms** | 1390 / 1396 ms, **1.39 ms/page** | 1000 | 154.0 / 170.0 / 170.0 MiB (zooming) |
+| M, `bd894f8` | 761 ms | 243 / 1004 ms (second search) | 1 of 1 expected; 1 stale hit refused | 145.9 / 183.3 / 183.2 MiB (zooming) |
+| M, `2a8ae47` | 0 / 1 ms | 237 / 238 ms (second search) | **1 of 1 expected**; 3 stale hits refused | 159.0 / 162.8 / 162.7 MiB |
+| O, `bd894f8` with zoom | 905 ms | 29563 ms, 1.48 ms/page | 20000 | not usable: zoom steps grew the tile cache meanwhile |
+| O, `2a8ae47`, no zoom | **1 ms** | 27545 / 27549 ms, **1.38 ms/page** | 20000 | **167.8 / 180.4 / 180.4 MiB** |
+
+- **`t_first_hit`**: MuPDF's first text extraction of a *document* costs about a second (§9.1 shows
+  it on every generated document, not once per process), and the first search paid it: 761-905 ms.
+  Since `2a8ae47` the search document is opened and its first page extracted when the document opens,
+  and the first hit arrives 0-1 ms after the search is sent.
+- **Search speed** is 1.38-1.39 ms a page in the app, against ~1.5 ms in §9.1 and the 2x limit of row L.
+- **Row M**: the app refused 3 hits of the replaced search that were already in flight; the final
+  result is exactly the one `rare` hit. The engine-side guarantee - no hit of the old search after
+  the first of the new one, and the old search never reports done - is `search_test.rs`, which fails
+  when the per-page generation check is removed (mutation run, reverted).
+- **Row O**: a full search of 20,000 pages adds **12.6 MiB** of working set, still there 10 s later
+  (the search document's object cache). Opening and warming the search document is included in the
+  "before" figure; the whole second document is therefore about 1.2 KiB a page or less.
+
+**`t_blank` during a search.** The L run with zoom took only one zoom step (the search lasted 1.4 s:
+11 ms). The first O run zoomed 19 steps during a 30 s search: up to 2276% every step took 0-12 ms;
+from 2845% to 6400% they took 128-190 ms. The control run - the same zoom steps on the same document
+with **no search** - took 96-155 ms at those levels and 0-10 ms below them. So the slow levels are the
+cost of rendering this text at very high zoom, not of searching (search adds ~20-35 ms there); this
+is a new finding, since §7's fixtures have little text, and it is `backlog.md` item 6.

@@ -225,3 +225,27 @@ labelling applies here as well.
 
 - *Accept it*: at 0.13 MiB an open it would take hundreds of reopens to matter; but it must be
   measured before it is accepted.
+
+---
+
+## 6. Text pages render slowly above ~2800% zoom
+
+**Labels:** `performance`, `rendering`, `investigation`
+
+### Problem Statement
+
+On `synthetic_text_20000p.pdf` (10 pt Helvetica, 50 lines a page) a zoom step up to 2276% shows its
+first tile in 0-12 ms, but from 2845% to 6400% it takes 96-155 ms with nothing else running
+(`benchmarks.md` §9.6, control run) - over Plan 0001's 50 ms `t_blank` line. Plan 0001's fixtures are
+grids and vector fills, so this was not seen before.
+
+### Proposed Solution
+
+Measure one tile at 2276% and at 2845% with a profiler. The likely cause is MuPDF's glyph cache: glyphs
+above a size limit are not cached as bitmaps and are filled as outlines for every tile they touch; a
+10 pt glyph at 2845% is ~285 px. If so, the options are MuPDF's glyph-cache size limit (an `fz_context`
+setting) or accepting it - text at those zooms is far larger than a screen.
+
+### Alternatives Considered
+
+- *Cap the zoom for text documents* - rejected by CLAUDE.md §4 rule 1.
