@@ -13,6 +13,7 @@
 //!   *resolved* jobs (page display list included) instead of commands.
 
 mod pool;
+mod search;
 
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
 use pdf_core::{
@@ -27,6 +28,7 @@ use thiserror::Error;
 
 pub use pool::worker_count;
 use pool::{Job, Pool, Prepared, run_tile};
+use search::SearchThread;
 
 /// Typed error enum for MuPDF engine operations.
 #[derive(Debug, Error)]
@@ -586,12 +588,15 @@ impl EngineHandle {
                 // One core is left for the UI thread; `FA_PDF_WORKERS` overrides the count, and a
                 // count of one gives a single-worker pool, i.e. serial rasterization.
                 let pool = Pool::start(worker_count(), event_tx.clone());
+                // Search runs beside the pool, on a document of its own (Plan 0003, §3.6).
+                let search = SearchThread::start(event_tx.clone());
 
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
                         EngineCmd::Open { path, password } => {
                             match engine.open_document_with_password(&path, password.as_deref()) {
                                 Ok(page_count) => {
+                                    search.document(path.clone(), password.clone());
                                     let (page_sizes, unsized_pages) = engine.page_sizes_lenient();
                                     let _ = event_tx.send(EngineEvent::Opened {
                                         page_count,
@@ -658,12 +663,20 @@ impl EngineHandle {
                                 Err(err) => Self::report(&event_tx, &err),
                             }
                         }
+                        EngineCmd::Search {
+                            query,
+                            from_page,
+                            generation,
+                        } => search.search(query, from_page, generation),
+                        EngineCmd::CancelSearch => search.cancel(),
                         EngineCmd::Cancel { request_id } => pool.cancel(request_id),
                         EngineCmd::Shutdown => break,
                     }
                 }
 
-                // Dropping the pool stops and joins the workers before the actor thread exits.
+                // Dropping the pool and the search thread stops and joins them before the actor
+                // thread exits.
+                drop(search);
                 drop(pool);
             })
             .expect("Failed to spawn engine actor thread");

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 pub mod layout;
 pub mod nav;
 pub mod scheduler;
+pub mod search;
 pub mod settings;
 pub mod tiling;
 
@@ -147,6 +148,15 @@ pub enum EngineCmd {
         width_px: u32,
         request_id: RequestId,
     },
+    /// Search the document for `query` from `from_page` onwards, wrapping (Plan 0003, §4.4). Runs on
+    /// the search thread; the search with an older `generation` stops at its next page.
+    Search {
+        query: String,
+        from_page: u32,
+        generation: u64,
+    },
+    /// Stop the running search without starting another.
+    CancelSearch,
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -223,6 +233,18 @@ pub enum EngineEvent {
         page: u32,
         request_id: RequestId,
         bitmap: Bitmap,
+    },
+    /// One page's search hits, each the rectangles that cover it, in MuPDF's page space.
+    SearchHits {
+        generation: u64,
+        page: u32,
+        hits: Vec<Vec<Rect>>,
+    },
+    /// A search covered all `pages` in `ms` milliseconds. Not sent for a superseded search.
+    SearchDone {
+        generation: u64,
+        pages: u32,
+        ms: u64,
     },
     /// The document's outline, flattened in reading order; sent right after `Opened`, empty when
     /// the document has none.
