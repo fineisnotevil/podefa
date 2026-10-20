@@ -67,6 +67,16 @@ pub fn base_scale_milli(long_pt: f32) -> u32 {
     clamp_zoom_milli((BASE_LONG_PX as f32 * 1000.0 / long_pt).round() as u32)
 }
 
+/// Permille scale that renders a page `width_pt` wide at about `width_px` device pixels, for a
+/// thumbnail (Plan 0003, §4.3); clamped to the zoom range, so a page wider than
+/// `width_px * 10` points comes out wider than asked.
+pub fn thumb_scale_milli(width_pt: f32, width_px: u32) -> u32 {
+    if !width_pt.is_finite() || width_pt <= 0.0 {
+        return ZOOM_MIN_MILLI;
+    }
+    clamp_zoom_milli((width_px as f32 * 1000.0 / width_pt).floor() as u32)
+}
+
 /// Clamps a scale in permille to the supported range.
 pub fn clamp_zoom_milli(milli: u32) -> u32 {
     milli.clamp(ZOOM_MIN_MILLI, ZOOM_MAX_MILLI)
@@ -321,6 +331,19 @@ mod tests {
 
     fn a0() -> PageGeometry {
         PageGeometry::new(0, Rect::new(0.0, 0.0, 2384.0, 3370.0), 1_000)
+    }
+
+    #[test]
+    fn thumb_scale_fits_the_width_and_stays_in_range() {
+        // Letter at 160 px: 261 permille, 160 px wide (floor keeps it at or under the width).
+        let milli = thumb_scale_milli(612.0, 160);
+        assert_eq!(milli, 261);
+        let geo = PageGeometry::new(0, Rect::new(0.0, 0.0, 612.0, 792.0), milli);
+        assert!(geo.device_size().0 <= 160);
+        // A0 at 160 px would be 67 permille; the zoom floor is 100.
+        assert_eq!(thumb_scale_milli(2384.0, 160), ZOOM_MIN_MILLI);
+        assert_eq!(thumb_scale_milli(0.0, 160), ZOOM_MIN_MILLI);
+        assert_eq!(thumb_scale_milli(f32::NAN, 160), ZOOM_MIN_MILLI);
     }
 
     #[test]

@@ -52,6 +52,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Recently opened documents, newest first, at most [`RECENT_MAX`].
     pub recent: Vec<PathBuf>,
+    /// Whether the sidebar (thumbnails and outline) is shown.
+    pub sidebar: bool,
 }
 
 impl Settings {
@@ -68,6 +70,11 @@ impl Settings {
                 continue;
             };
             match key.trim() {
+                "sidebar" => match value.trim() {
+                    "1" | "true" => settings.sidebar = true,
+                    "0" | "false" => settings.sidebar = false,
+                    _ => {}
+                },
                 "theme" => {
                     if let Some(theme) = Theme::parse(value.trim()) {
                         settings.theme = theme;
@@ -93,6 +100,11 @@ impl Settings {
         out.push_str("theme=");
         out.push_str(self.theme.as_str());
         out.push('\n');
+        out.push_str(if self.sidebar {
+            "sidebar=1\n"
+        } else {
+            "sidebar=0\n"
+        });
         for path in &self.recent {
             let Some(text) = path.to_str() else {
                 continue;
@@ -124,6 +136,7 @@ mod tests {
     fn a_round_trip_keeps_theme_and_order() {
         let mut settings = Settings {
             theme: Theme::Dark,
+            sidebar: true,
             ..Settings::default()
         };
         settings.opened(Path::new("C:\\docs\\a.pdf"));

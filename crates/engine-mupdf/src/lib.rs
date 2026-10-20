@@ -16,8 +16,8 @@ mod pool;
 
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
 use pdf_core::{
-    Bitmap, EngineCmd, EngineEvent, PageGeometry, PageSize, PdfEngine, PixelFormat, Rect,
-    RequestId, TILE_STRIDE_PX,
+    Bitmap, EngineCmd, EngineEvent, OutlineItem, PageGeometry, PageSize, PdfEngine, PixelFormat,
+    Rect, RequestId, TILE_STRIDE_PX, thumb_scale_milli,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -287,6 +287,17 @@ impl MupdfEngine {
     /// raster size at this scale must equal what `core`'s geometry computes, otherwise the cell
     /// offsets would silently drift. Once per page *and scale*, instead of once per tile.
     fn prepare(&mut self, geometry: &PageGeometry) -> Result<Prepared, MupdfError> {
+        self.prepare_with(geometry, true)
+    }
+
+    /// [`Self::prepare`], with the display list either taken from the page cache (`cache`) or
+    /// built for this one job and left out of it - what thumbnails need, so a sidebar scrolled
+    /// through thousands of pages cannot evict the viewport's lists (Plan 0003, §3.5).
+    fn prepare_with(
+        &mut self,
+        geometry: &PageGeometry,
+        cache: bool,
+    ) -> Result<Prepared, MupdfError> {
         let page_index = geometry.page;
         let total = self.page_count();
         if page_index as usize >= total {
@@ -328,7 +339,17 @@ impl MupdfEngine {
             });
         }
 
-        let list = self.display_list_for(page_index, &page)?;
+        let list = if cache {
+            self.display_list_for(page_index, &page)?
+        } else {
+            Arc::new(
+                page.to_display_list(false)
+                    .map_err(|e| MupdfError::RenderFailed {
+                        page_index: page_index as usize,
+                        source: e,
+                    })?,
+            )
+        };
         Ok(Prepared {
             geometry: *geometry,
             list,
@@ -355,6 +376,43 @@ impl MupdfEngine {
     /// Pages whose display list is cached, least recently used first.
     pub fn display_list_pages(&self) -> Vec<u32> {
         self.display_lists.iter().map(|(page, _)| *page).collect()
+    }
+
+    /// Resolves a thumbnail of a page, about `width_px` wide, without touching the display-list
+    /// cache (Plan 0003, §4.3).
+    pub(crate) fn prepare_thumb(
+        &mut self,
+        page_index: u32,
+        width_px: u32,
+    ) -> Result<Prepared, MupdfError> {
+        let bounds = self.page_size(page_index as usize)?;
+        let geometry = PageGeometry::new(
+            page_index,
+            bounds,
+            thumb_scale_milli(bounds.width, width_px),
+        );
+        self.prepare_with(&geometry, false)
+    }
+
+    /// Renders a thumbnail on the calling thread: what the pool does for `RenderThumb`, for tests.
+    pub fn render_thumb(&mut self, page_index: u32, width_px: u32) -> Result<Bitmap, MupdfError> {
+        let prepared = self.prepare_thumb(page_index, width_px)?;
+        pool::run_whole_page(&prepared)
+    }
+
+    /// The document's outline, flattened depth-first in reading order (Plan 0003, §4.1). A
+    /// document without one, or one MuPDF cannot read, gives an empty list rather than an error:
+    /// the outline is an aid, and the document is still readable without it.
+    pub fn outline(&self) -> Vec<OutlineItem> {
+        let Some(doc) = self.doc.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(tree) = doc.outlines() else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        flatten_outline(&tree, 0, &mut items);
+        items
     }
 
     /// Returns the cached display list for a page, building it on a miss and evicting the least
@@ -391,6 +449,33 @@ impl MupdfEngine {
         }
         self.display_lists.push((page_index, Arc::clone(&list)));
         Ok(list)
+    }
+}
+
+/// Depth-first, so the list reads in the order the tree shows its entries.
+fn flatten_outline(nodes: &[mupdf::Outline], depth: u32, out: &mut Vec<OutlineItem>) {
+    for node in nodes {
+        let (page, top) = match node.dest {
+            Some(dest) => (Some(dest.loc.page_number), destination_top(dest.kind)),
+            None => (None, None),
+        };
+        out.push(OutlineItem {
+            depth,
+            title: node.title.clone(),
+            page,
+            top,
+        });
+        flatten_outline(&node.down, depth + 1, out);
+    }
+}
+
+/// The vertical position a destination names, in MuPDF's page space (points from the page's top).
+fn destination_top(kind: mupdf::DestinationKind) -> Option<f32> {
+    use mupdf::DestinationKind as Kind;
+    match kind {
+        Kind::FitH { top } | Kind::FitBH { top } | Kind::XYZ { top, .. } => top,
+        Kind::FitR { top, bottom, .. } => Some(top.min(bottom)),
+        _ => None,
     }
 }
 
@@ -513,6 +598,9 @@ impl EngineHandle {
                                         page_sizes,
                                         unsized_pages,
                                     });
+                                    let _ = event_tx.send(EngineEvent::Outline {
+                                        items: engine.outline(),
+                                    });
                                 }
                                 Err(err) => {
                                     let _ = event_tx.send(EngineEvent::Error {
@@ -550,6 +638,20 @@ impl EngineHandle {
                             // appear beats watching a grid fill in.
                             match engine.prepare_base(page, scale_milli) {
                                 Ok(prepared) => pool.dispatch_first(Job::Base {
+                                    prepared,
+                                    request_id,
+                                }),
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
+                        }
+                        EngineCmd::RenderThumb {
+                            page,
+                            width_px,
+                            request_id,
+                        } => {
+                            // Behind the tiles already queued: the viewport comes first.
+                            match engine.prepare_thumb(page, width_px) {
+                                Ok(prepared) => pool.dispatch(Job::Thumb {
                                     prepared,
                                     request_id,
                                 }),

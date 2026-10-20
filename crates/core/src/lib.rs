@@ -28,7 +28,7 @@ pub use scheduler::{TileAction, TileScheduler};
 pub use tiling::{
     BASE_LONG_PX, PageGeometry, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileKey, TileRect,
     ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli, clamp_zoom_milli, scale_from_milli,
-    zoom_anchor, zoom_in_milli, zoom_out_milli,
+    thumb_scale_milli, zoom_anchor, zoom_in_milli, zoom_out_milli,
 };
 
 /// 2D floating-point rectangle representing coordinates and dimensions.
@@ -137,6 +137,16 @@ pub enum EngineCmd {
         scale_milli: u32,
         request_id: RequestId,
     },
+    /// Render a thumbnail of one page, `width_px` device pixels wide (Plan 0003, §4.3).
+    ///
+    /// Like a base layer it is a whole-page raster and never cancelled, but its display list is
+    /// built for this one raster and not kept: a sidebar scrolled through thousands of pages must
+    /// not evict the display lists of the pages in the viewport (Plan 0003, §3.5).
+    RenderThumb {
+        page: u32,
+        width_px: u32,
+        request_id: RequestId,
+    },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -159,6 +169,21 @@ impl PageSize {
     pub fn bounds(&self) -> Rect {
         Rect::new(self.x, self.y, self.width, self.height)
     }
+}
+
+/// One outline (bookmark) entry, flattened: its depth in the tree replaces the nesting, so a list
+/// can show the tree without recursion (Plan 0003, §4.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineItem {
+    /// 0 for a top-level entry, 1 for its children, and so on.
+    pub depth: u32,
+    /// The title as the document gives it.
+    pub title: String,
+    /// The page it points at (0-based), or `None` for an external link or an unresolvable target.
+    pub page: Option<u32>,
+    /// Vertical position on that page in points from the page's top edge (MuPDF's page space,
+    /// rotation applied), when the destination names one.
+    pub top: Option<f32>,
 }
 
 /// Events sent from the engine actor thread back to the UI thread.
@@ -192,6 +217,16 @@ pub enum EngineEvent {
         request_id: RequestId,
         bitmap: Bitmap,
     },
+    /// A page thumbnail (Plan 0003, §4.3): the whole page at the scale that makes it about
+    /// `width_px` wide (clamped to the zoom range, so a very wide page can come back wider).
+    ThumbRendered {
+        page: u32,
+        request_id: RequestId,
+        bitmap: Bitmap,
+    },
+    /// The document's outline, flattened in reading order; sent right after `Opened`, empty when
+    /// the document has none.
+    Outline { items: Vec<OutlineItem> },
     /// A tile was aborted mid-raster because its epoch had been superseded (Plan 0001, §5 Phase 2).
     ///
     /// `ms` is the measured time from the abort signal to the rasterizer noticing it, which is the

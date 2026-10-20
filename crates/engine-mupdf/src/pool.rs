@@ -101,13 +101,20 @@ pub(crate) enum Job {
         prepared: Prepared,
         request_id: RequestId,
     },
+    /// A sidebar thumbnail: rasterized like a base layer, from a display list nobody else holds.
+    Thumb {
+        prepared: Prepared,
+        request_id: RequestId,
+    },
 }
 
 impl Job {
     /// The epoch this job belongs to.
     fn request_id(&self) -> RequestId {
         match self {
-            Job::Tile { request_id, .. } | Job::Base { request_id, .. } => *request_id,
+            Job::Tile { request_id, .. }
+            | Job::Base { request_id, .. }
+            | Job::Thumb { request_id, .. } => *request_id,
         }
     }
 
@@ -128,7 +135,7 @@ impl Job {
             Job::Tile {
                 prepared, col, row, ..
             } => run_tile(prepared, *col, *row, scratch, cookie),
-            Job::Base { prepared, .. } => run_base(prepared, cookie),
+            Job::Base { prepared, .. } | Job::Thumb { prepared, .. } => run_base(prepared, cookie),
         }
     }
 }
@@ -185,6 +192,11 @@ pub(crate) fn run_tile(
 ///
 /// One allocation per page rather than per level: the base layer is a page property, so this runs
 /// once on open and once per page change, and `base_scale_milli` keeps it at about 2.3 MiB of RGB8.
+/// [`run_base`] without a cookie, on the calling thread: the serial path for thumbnails in tests.
+pub(crate) fn run_whole_page(prepared: &Prepared) -> Result<Bitmap, MupdfError> {
+    run_base(prepared, None)
+}
+
 fn run_base(prepared: &Prepared, cookie: Option<&Cookie>) -> Result<Bitmap, MupdfError> {
     let page_index = prepared.geometry.page;
     let fail = |source| MupdfError::RenderFailed {
@@ -527,6 +539,14 @@ fn publish(shared: &Shared, job: &Job, bitmap: Bitmap) {
         } => EngineEvent::BaseRendered {
             page: prepared.geometry.page,
             scale_milli: prepared.geometry.scale_milli,
+            request_id: *request_id,
+            bitmap,
+        },
+        Job::Thumb {
+            prepared,
+            request_id,
+        } => EngineEvent::ThumbRendered {
+            page: prepared.geometry.page,
             request_id: *request_id,
             bitmap,
         },
