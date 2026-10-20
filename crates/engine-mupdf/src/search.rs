@@ -8,6 +8,11 @@
 //! opened on the same file the first time a search asks for it; MuPDF gives every thread its own
 //! context, and a second document is the supported way to read one file from two threads.
 //!
+//! The document is opened, and its first page's text extracted, as soon as the actor opens a new
+//! document - not on the first search - because MuPDF's first text extraction of a document costs
+//! about a second (the one-off of `docs/benchmarks.md` §9.1); paying it while the reader is still
+//! looking at the first page keeps it out of the first search's `t_first_hit` (§9.6).
+//!
 //! A search walks the pages from the reader's page onwards, wrapping, and sends each page's hits as
 //! soon as they are found. Cancelling is a shared generation counter: the actor stores the new
 //! generation *before* it forwards a search, and the loop compares it before every page, so a
@@ -25,7 +30,7 @@ use std::time::Instant;
 
 /// What the actor asks of the search thread.
 enum SearchCmd {
-    /// A new document: forget the old one; it is opened on the first search.
+    /// A new document: forget the old one, open this one and warm it up.
     Document {
         path: PathBuf,
         password: Option<String>,
@@ -104,8 +109,11 @@ fn serve(rx: Receiver<SearchCmd>, current: Arc<AtomicU64>, events: Sender<Engine
     while let Ok(cmd) = rx.recv() {
         match cmd {
             SearchCmd::Document { path, password } => {
+                doc = open(&path, &password);
                 source = Some((path, password));
-                doc = None;
+                if let Some(doc) = &doc {
+                    warm_up(doc);
+                }
             }
             SearchCmd::Search {
                 query,
@@ -133,6 +141,14 @@ fn serve(rx: Receiver<SearchCmd>, current: Arc<AtomicU64>, events: Sender<Engine
                 }
             }
         }
+    }
+}
+
+/// Extracts the first page's text and drops it: the document's one-off first-touch cost, paid
+/// before anyone searches.
+fn warm_up(doc: &Document) {
+    if let Ok(page) = doc.load_page(0) {
+        let _ = page.to_text_page(TextPageFlags::empty());
     }
 }
 

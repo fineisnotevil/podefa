@@ -100,6 +100,9 @@ pub struct Cfg {
     pub search_replace: Option<String>,
     /// `--bench-search-expect N`: the final search must end with exactly N hits.
     pub search_expect: Option<usize>,
+    /// `--bench-search-zoom`: zoom in once a second while the search runs (row L's `t_blank`);
+    /// off by default, so a memory run (row O) measures the search alone.
+    pub search_zoom: bool,
 }
 
 impl Default for Cfg {
@@ -124,6 +127,7 @@ impl Default for Cfg {
             search: None,
             search_replace: None,
             search_expect: None,
+            search_zoom: false,
         }
     }
 }
@@ -210,6 +214,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-search-replace" => {
                 cfg.search_replace = args.get(i + 1).cloned();
                 consumed = 2;
+            }
+            "--bench-search-zoom" => {
+                cfg.search_zoom = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-search-expect" => {
                 cfg.search_expect = number.map(|n| n.max(0.0) as usize);
@@ -1592,7 +1600,7 @@ impl Driver {
                     });
                 }
                 let per_second = (1000 / self.cfg.step_ms.max(1)).max(1) as u32;
-                if self.step % per_second == per_second - 1 {
+                if self.cfg.search_zoom && self.step % per_second == per_second - 1 {
                     let (anchor_x, anchor_y) = viewport_center(ui);
                     with_state(|state| {
                         let next = zoom_in_milli(state.scale_milli);
