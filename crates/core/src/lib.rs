@@ -18,6 +18,7 @@ pub mod layout;
 pub mod nav;
 pub mod scheduler;
 pub mod search;
+pub mod select;
 pub mod settings;
 pub mod tiling;
 
