@@ -15,6 +15,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 pub mod layout;
+pub mod nav;
 pub mod scheduler;
 pub mod tiling;
 

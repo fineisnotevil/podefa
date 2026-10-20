@@ -34,6 +34,10 @@ Phase 0 gate passed 2026-10-20. The maintainer approved every proposal in §9:
 | 4. Ctrl+wheel | Moves into this plan's Phase 2; pinch and the stretched level stay in Plan 0001's deferred Phase 3. |
 | 5. Real-world documents | The maintainer will supply them separately; row G waits for them. |
 
+Phase 1 gate passed 2026-10-20: the maintainer ran the three manual checks (fling across a re-anchor,
+wheel scroll across pages, centring on resize) with no problem found, and accepted row B's
+`ws_growth` FAIL as documented in `benchmarks.md` §8.3. Phase 2 started.
+
 ## 1. Problem
 
 The viewer shows one page at a time. `set_page` drops every tile and the base layer, starts a new
