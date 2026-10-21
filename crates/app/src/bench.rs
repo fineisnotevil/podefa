@@ -1457,6 +1457,13 @@ fn select_click(ui: &MainWindow, at: (f32, usize), shift: bool) {
     }
 }
 
+/// Whether the open document has unsaved changes.
+fn with_dirty() -> bool {
+    let mut dirty = false;
+    with_state(|state| dirty = state.save_state.is_dirty());
+    dirty
+}
+
 /// The most thumbnails held so far in this run.
 fn with_thumbs_max() -> usize {
     let mut max = 0;
@@ -2036,29 +2043,88 @@ impl Driver {
                     self.step += 1;
                     return false;
                 }
-                // One tick after the last edit: check the page has them all, then save if asked.
-                if self.step == edits {
-                    let mut got = String::new();
-                    with_state(|state| {
-                        state.bench.requests_during_edits(false);
-                        let marks = state.annots.get(&0).map_or(0, |items| items.len());
-                        got = format!("annotations={marks} dirty={}", state.save_state.is_dirty());
-                    });
-                    let expected = format!("annotations={edits} dirty=true");
-                    with_state(|state| state.bench.nav_check("edits on page 1", &expected, &got));
-                    if self.cfg.edit_save {
-                        ui.invoke_save();
+                // After the edits, one step a tick, each checked on the next: the page has them
+                // all; a click selects the highlight of line 2; a swatch recolours it; Delete
+                // removes it; and the save, if asked for, leaves nothing unsaved.
+                let marks = || {
+                    let mut n = 0;
+                    with_state(|state| n = state.annots.get(&0).map_or(0, |items| items.len()));
+                    n
+                };
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                match self.step - edits {
+                    0 => {
+                        with_state(|state| state.bench.requests_during_edits(false));
+                        let dirty = with_dirty();
+                        check(
+                            "edits on page 1",
+                            format!("annotations={edits} dirty=true"),
+                            format!("annotations={} dirty={dirty}", marks()),
+                        );
+                        ui.invoke_choose_tool(0);
+                        select_click(ui, (94.0, 2), false);
                     }
-                    self.step += 1;
-                    return false;
+                    1 => {
+                        check(
+                            "click selects it",
+                            "selected=true".to_owned(),
+                            format!("selected={}", ui.get_has_annot_selection()),
+                        );
+                        ui.invoke_choose_colour(2);
+                    }
+                    2 => {
+                        let mut colour = None;
+                        with_state(|state| {
+                            colour = state.selected_annot.and_then(|(page, id)| {
+                                state
+                                    .annots
+                                    .get(&page)
+                                    .and_then(|items| items.iter().find(|item| item.id == id))
+                                    .and_then(|item| item.colour)
+                            });
+                        });
+                        let want = pdf_core::annot::PALETTE[2];
+                        let recoloured = colour.is_some_and(|c| {
+                            (c.r - want.r).abs() < 0.01
+                                && (c.g - want.g).abs() < 0.01
+                                && (c.b - want.b).abs() < 0.01
+                        });
+                        check(
+                            "swatch recolours it",
+                            "recoloured=true".to_owned(),
+                            format!("recoloured={recoloured}"),
+                        );
+                        press(ui, char::from(Key::Delete).into());
+                    }
+                    3 => {
+                        check(
+                            "Delete removes it",
+                            format!("annotations={} selected=false", edits - 1),
+                            format!(
+                                "annotations={} selected={}",
+                                marks(),
+                                ui.get_has_annot_selection()
+                            ),
+                        );
+                        if self.cfg.edit_save {
+                            ui.invoke_save();
+                        }
+                    }
+                    4 if self.cfg.edit_save => {
+                        check(
+                            "saved",
+                            "dirty=false".to_owned(),
+                            format!("dirty={}", with_dirty()),
+                        );
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
                 }
-                if self.cfg.edit_save {
-                    let mut got = String::new();
-                    with_state(|state| got = format!("dirty={}", state.save_state.is_dirty()));
-                    with_state(|state| state.bench.nav_check("saved", "dirty=false", &got));
-                }
-                ui.invoke_choose_tool(0);
-                self.settle();
+                self.step += 1;
                 false
             }
             Phase::Outline => {
