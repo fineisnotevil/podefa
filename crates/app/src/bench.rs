@@ -2072,6 +2072,9 @@ impl Driver {
                 // After the edits, one step a tick, each checked on the next: the page has them
                 // all; a click selects the highlight of line 2; a swatch recolours it; Delete
                 // removes it; and the save, if asked for, leaves nothing unsaved.
+                // The edits cycle over 40 lines, and a highlight over a highlighted line replaces
+                // it (Plan 0004 Phase 1 review, option B): one annotation per distinct line.
+                let marked = edits.min(40);
                 let marks = || {
                     let mut n = 0;
                     with_state(|state| n = state.annots.get(&0).map_or(0, |items| items.len()));
@@ -2086,7 +2089,7 @@ impl Driver {
                         let dirty = with_dirty();
                         check(
                             "edits on page 1",
-                            format!("annotations={edits} dirty=true"),
+                            format!("annotations={marked} dirty=true"),
                             format!("annotations={} dirty={dirty}", marks()),
                         );
                         ui.invoke_choose_tool(0);
@@ -2127,7 +2130,7 @@ impl Driver {
                     3 => {
                         check(
                             "Delete removes it",
-                            format!("annotations={} selected=false", edits - 1),
+                            format!("annotations={} selected=false", marked - 1),
                             format!(
                                 "annotations={} selected={}",
                                 marks(),

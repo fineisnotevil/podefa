@@ -120,6 +120,55 @@ impl EditOp {
     }
 }
 
+/// Pieces of a cut line narrower than this, in points, are dropped rather than kept as slivers.
+pub const CUT_MIN_WIDTH_PT: f32 = 0.5;
+
+/// Whether two line boxes are on the same text line: they overlap vertically by at least half of
+/// the shorter one's height.
+fn same_line(a: &Rect, b: &Rect) -> bool {
+    let top = a.y.max(b.y);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    bottom - top >= 0.5 * a.height.min(b.height)
+}
+
+/// Cuts a markup's line boxes where new markup of the same kind covers them (Plan 0004 Phase 1
+/// review, option B): each old box loses the horizontal span of every new box on its line, which
+/// leaves it whole, shortened, split in two, or gone. Returns `None` when nothing overlaps - the old
+/// markup stays as it is - and otherwise the boxes that remain, possibly none.
+pub fn cut(old: &[Rect], new: &[Rect]) -> Option<Vec<Rect>> {
+    let mut changed = false;
+    let mut out = Vec::with_capacity(old.len());
+    for line in old {
+        // The spans of this line that are still unmarked, left to right.
+        let mut spans = vec![(line.x, line.x + line.width)];
+        for cover in new.iter().filter(|cover| same_line(line, cover)) {
+            let (c0, c1) = (cover.x, cover.x + cover.width);
+            let mut next = Vec::with_capacity(spans.len() + 1);
+            for (s0, s1) in spans {
+                if c1 <= s0 || c0 >= s1 {
+                    next.push((s0, s1));
+                    continue;
+                }
+                changed = true;
+                if c0 > s0 {
+                    next.push((s0, c0));
+                }
+                if c1 < s1 {
+                    next.push((c1, s1));
+                }
+            }
+            spans = next;
+        }
+        out.extend(
+            spans
+                .into_iter()
+                .filter(|(s0, s1)| s1 - s0 >= CUT_MIN_WIDTH_PT)
+                .map(|(s0, s1)| Rect::new(s0, line.y, s1 - s0, line.height)),
+        );
+    }
+    changed.then_some(out)
+}
+
 /// How far outside an annotation's area a click still selects it, in points.
 pub const ANNOT_HIT_PAD_PT: f32 = 2.0;
 
@@ -223,6 +272,43 @@ mod tests {
         // The pad reaches just outside a line.
         assert!(hit(&items, 60.0, 99.0).is_some());
         assert!(hit(&items, 60.0, 96.0).is_none());
+    }
+
+    #[test]
+    fn a_cut_shortens_splits_or_removes_the_old_lines() {
+        let line = |x: f32, w: f32, y: f32| Rect::new(x, y, w, 12.0);
+        // Two marked lines; new markup over the middle of the first only.
+        let old = [line(50.0, 200.0, 100.0), line(50.0, 200.0, 112.0)];
+        let rest = cut(&old, &[line(100.0, 50.0, 100.0)]).expect("overlaps");
+        assert_eq!(
+            rest,
+            vec![
+                line(50.0, 50.0, 100.0),
+                line(150.0, 100.0, 100.0),
+                line(50.0, 200.0, 112.0)
+            ]
+        );
+        // Over the start: shortened from the left.
+        let rest = cut(&old[..1], &[line(0.0, 80.0, 100.0)]).expect("overlaps");
+        assert_eq!(rest, vec![line(80.0, 170.0, 100.0)]);
+        // Over everything: nothing remains.
+        let rest = cut(&old, &[line(0.0, 300.0, 100.0), line(0.0, 300.0, 112.0)]);
+        assert_eq!(rest, Some(Vec::new()));
+        // A sliver under the minimum width is dropped, not kept.
+        let rest = cut(&old[..1], &[line(50.2, 199.8, 100.0)]).expect("overlaps");
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn a_cut_leaves_other_lines_and_untouched_markup_alone() {
+        let old = [Rect::new(50.0, 100.0, 200.0, 12.0)];
+        // The next line down, touching the old one's bottom edge, is a different line.
+        assert_eq!(cut(&old, &[Rect::new(50.0, 112.0, 200.0, 12.0)]), None);
+        // Same line, but beside it.
+        assert_eq!(cut(&old, &[Rect::new(260.0, 100.0, 40.0, 12.0)]), None);
+        assert_eq!(cut(&old, &[]), None);
+        // A line box of slightly different height on the same line still counts as the same line.
+        assert!(cut(&old, &[Rect::new(60.0, 101.0, 20.0, 11.0)]).is_some());
     }
 
     #[test]

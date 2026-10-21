@@ -380,8 +380,16 @@ fn save_as_switches_to_the_copy() {
     // Save As naming the open file itself saves incrementally instead of rewriting the file
     // being read. MuPDF writes one section holding every change since the file was opened after
     // the bytes it opened (`pdf-write.c`, `ensure_initial_incremental_contents`), so the bytes at
-    // open are what survives, and the reopened file has every edit.
-    assert_eq!(edit(&handle, &rx, mark(0), 3).result, Ok(()));
+    // open are what survives, and the reopened file has every edit. The underline goes on another
+    // line: over the first one it would replace it, not join it.
+    let lower = EditOp::AddMarkup {
+        page: 0,
+        kind: MarkupKind::Underline,
+        rects: vec![Rect::new(60.0, 400.0, 120.0, 20.0)],
+        colour: RED,
+        author: None,
+    };
+    assert_eq!(edit(&handle, &rx, lower, 3).result, Ok(()));
     let (_, result) = save(&handle, &rx, Some(copy.clone()));
     result.expect("save as onto itself");
     let after = std::fs::read(&copy).expect("copy");
@@ -476,4 +484,130 @@ fn a_file_mupdf_repaired_needs_save_as_and_its_copy_saves_in_place() {
     let (saved_to, result) = save(&handle, &rx, None);
     assert_eq!(saved_to, copy);
     result.expect("the copy MuPDF wrote can be appended to");
+}
+
+/// The quads of the annotation `id` in a `PageChanged` list, as line boxes.
+fn quads_of(items: &[pdf_core::annot::AnnotInfo], id: u32) -> Vec<Rect> {
+    items
+        .iter()
+        .find(|item| item.id == id)
+        .map(|item| item.quads.clone())
+        .unwrap_or_default()
+}
+
+fn close(a: &Rect, b: &Rect) -> bool {
+    (a.x - b.x).abs() < 0.01
+        && (a.y - b.y).abs() < 0.01
+        && (a.width - b.width).abs() < 0.01
+        && (a.height - b.height).abs() < 0.01
+}
+
+#[test]
+fn new_markup_cuts_old_markup_of_the_same_kind() {
+    let path = scratch("edit_cut.pdf");
+    std::fs::write(&path, text_pdf(1)).expect("write fixture");
+    let (handle, rx) = EngineHandle::spawn();
+    assert!(open(&handle, &rx, &path));
+    let blue = Colour::new(0.0, 0.0, 1.0);
+    let markup = |kind, rect: Rect, colour| EditOp::AddMarkup {
+        page: 0,
+        kind,
+        rects: vec![rect],
+        colour,
+        author: None,
+    };
+
+    // A red highlight over 60..180 of the top margin's "line", then a blue one over 100..140.
+    let seen = edit(&handle, &rx, markup(MarkupKind::Highlight, MARGIN, RED), 1);
+    let (_, _, items) = seen.changed.expect("changed");
+    let old = items[0].id;
+    let middle = Rect::new(100.0, MARGIN.y, 40.0, MARGIN.height);
+    let seen = edit(&handle, &rx, markup(MarkupKind::Highlight, middle, blue), 2);
+    assert_eq!(seen.result, Ok(()));
+    let (_, _, items) = seen.changed.expect("changed");
+    assert_eq!(items.len(), 2, "the old highlight is split, not replaced");
+    let rest = quads_of(&items, old);
+    assert_eq!(rest.len(), 2);
+    assert!(
+        close(&rest[0], &Rect::new(60.0, MARGIN.y, 40.0, MARGIN.height)),
+        "{rest:?}"
+    );
+    assert!(
+        close(&rest[1], &Rect::new(140.0, MARGIN.y, 40.0, MARGIN.height)),
+        "{rest:?}"
+    );
+
+    // Drawn: red where only the old one remains, blue in the middle - not the dark mix two
+    // stacked multiply-blended highlights would give.
+    let (_, after) = tile(&handle, &rx, 1);
+    let (left, mid) = (rgb(&after, 80, 16), rgb(&after, 120, 16));
+    assert!(
+        left[0] > 200 && left[1] < 80 && left[2] < 80,
+        "left part red: {left:?}"
+    );
+    assert!(
+        mid[2] > 200 && mid[0] < 80 && mid[1] < 80,
+        "middle blue: {mid:?}"
+    );
+
+    // An underline over the same span is another kind: the highlights stay as they are.
+    let seen = edit(&handle, &rx, markup(MarkupKind::Underline, MARGIN, RED), 3);
+    let (_, _, items) = seen.changed.expect("changed");
+    assert_eq!(items.len(), 3);
+    assert_eq!(quads_of(&items, old).len(), 2);
+
+    // A highlight over all of it removes both earlier highlights; the underline stays.
+    let wide = Rect::new(40.0, MARGIN.y, 200.0, MARGIN.height);
+    let seen = edit(&handle, &rx, markup(MarkupKind::Highlight, wide, RED), 4);
+    let (_, _, items) = seen.changed.expect("changed");
+    let kinds: Vec<AnnotKind> = items.iter().map(|item| item.kind).collect();
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
+    assert!(kinds.contains(&AnnotKind::Underline) && kinds.contains(&AnnotKind::Highlight));
+    assert!(items.iter().all(|item| item.id != old));
+}
+
+#[test]
+fn markup_with_a_comment_is_never_cut() {
+    // A highlight with a comment, as another reader would leave it.
+    let source = scratch("edit_cut_comment_source.pdf");
+    let path = scratch("edit_cut_comment.pdf");
+    std::fs::write(&source, text_pdf(1)).expect("write fixture");
+    {
+        let doc = PdfDocument::open(source.to_str().expect("utf-8")).expect("open");
+        let mut page = PdfPage::try_from(doc.load_page(0).expect("page")).expect("pdf page");
+        let quad = mupdf::Quad::from(mupdf::Rect::new(
+            MARGIN.x,
+            MARGIN.y,
+            MARGIN.x + MARGIN.width,
+            MARGIN.y + MARGIN.height,
+        ));
+        let mut annot = page.add_highlight_annotation([quad]).expect("highlight");
+        annot.set_contents("keep me").expect("comment");
+        annot.update().expect("appearance");
+        drop(annot);
+        drop(page);
+        doc.save(path.to_str().expect("utf-8")).expect("save");
+    }
+    let (handle, rx) = EngineHandle::spawn();
+    assert!(open(&handle, &rx, &path));
+    let middle = Rect::new(100.0, MARGIN.y, 40.0, MARGIN.height);
+    let seen = edit(
+        &handle,
+        &rx,
+        EditOp::AddMarkup {
+            page: 0,
+            kind: MarkupKind::Highlight,
+            rects: vec![middle],
+            colour: RED,
+            author: None,
+        },
+        1,
+    );
+    let (_, _, items) = seen.changed.expect("changed");
+    assert_eq!(items.len(), 2);
+    let commented = items
+        .iter()
+        .find(|item| item.quads.len() == 1 && close(&item.quads[0], &MARGIN))
+        .expect("the commented highlight keeps its one full line");
+    assert_eq!(commented.kind, AnnotKind::Highlight);
 }
