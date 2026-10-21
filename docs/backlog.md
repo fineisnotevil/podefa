@@ -311,3 +311,59 @@ reload while there are no unsaved changes.
 ### Additional Context
 
 Out of scope for v0.2 (Plan 0004 §7). Found while reading MuPDF's incremental writer in Phase 1.
+
+---
+
+## 9. Build and test on Android (first) and iOS
+
+**Labels:** `platform`, `mobile`, `investigation`
+
+### Problem Statement
+
+Android and then iOS are targets (CLAUDE.md §1; the maintainer set Android first on 2026-10-21).
+Nothing has been built for either yet. Read from the pinned crates on 2026-10-21, without a mobile
+build (this machine has the Android SDK but no NDK and no Rust mobile targets; CI has no mobile job):
+
+- **Certain compile blockers, in this repository's app crate:**
+  - `rfd` 0.17.2 has file-dialog backends for Windows, macOS, Linux/BSD and wasm only
+    (`rfd-0.17.2/src/backend.rs`); on Android and iOS its dialog traits have no implementation.
+  - `arboard` 3.6.1 has platform modules for Windows, macOS and Linux only, and excludes Android
+    explicitly (`arboard-3.6.1/src/platform/mod.rs:1-16`).
+  - The app is a `bin` with `main()`. Slint on Android needs the `backend-android-activity-06`
+    feature and an `android_main` entry point in a `cdylib` (`slint-1.18.1/android.rs:5-16`), plus
+    packaging (an APK/AAB tool such as `cargo-apk` or `xbuild`).
+- **To verify by a trial build:** `mupdf-sys` 0.8.0 builds MuPDF with `make` for every target except
+  MSVC (`mupdf-sys-0.8.0/build.rs:355-364`), so an Android build needs the NDK's clang through the
+  `cc` crate and GNU make on the host; whether it succeeds unchanged is not known. `patches/mupdf`
+  already leaves `font-kit` out on Android (`Cargo.toml:177`). iOS: Slint's winit backend has iOS code
+  (for example `i-slint-backend-winit-1.18.1/clipboard.rs:117`, a `UIPasteboard` clipboard).
+- **Design work, not compile errors:**
+  - Android hands the app `content://` URIs, not paths. MuPDF and the search thread open by path,
+    and an in-place incremental save (ADR 0007) cannot append to a URI. A cache copy, plus a full
+    write back through the Storage Access Framework, is the likely shape.
+  - The settings file path comes from desktop environment variables. Without them it is `None`,
+    which keeps the defaults rather than failing.
+  - The UI is desktop-shaped: a menu bar, a wide tool strip, and hover. Touch selection by long
+    press already exists (ADR 0006).
+- **Already portable:** `pdf-core` (pure Rust, no I/O) and the engine logic. The tile cache budget
+  is already 16 MiB on Android/iOS (`pdf_core::scheduler::default_cache_bytes`).
+
+### Proposed Solution
+
+A plan of its own when the maintainer starts mobile work:
+
+- **Phase 0:**
+  1. Install the NDK and `aarch64-linux-android`.
+  2. Build `pdf-core` and `engine-mupdf` alone, then the app with `rfd`/`arboard` behind a desktop
+     `cfg`.
+  3. Add an Android CI job.
+- **After that:** design file access and the mobile UI.
+
+### Alternatives Considered
+
+- *Gate `rfd` and `arboard` behind a desktop `cfg` now*: cheap, but untestable until a mobile build
+  exists, so it waits for that plan's Phase 0.
+
+### Additional Context
+
+Found while answering the maintainer's question on 2026-10-21; nothing was changed for it.
