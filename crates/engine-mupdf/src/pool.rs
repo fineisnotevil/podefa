@@ -82,6 +82,8 @@ pub(crate) struct Prepared {
     pub(crate) list: Arc<DisplayList>,
     /// Raster origin in device pixels, taken from MuPDF's own rounded bounds.
     pub(crate) origin: (i32, i32),
+    /// The page revision the display list was built from (Plan 0004, §4.1).
+    pub(crate) revision: u32,
 }
 
 /// One unit of pool work.
@@ -544,6 +546,7 @@ fn publish(shared: &Shared, job: &Job, bitmap: Bitmap) {
         } => EngineEvent::TileRendered {
             key: prepared.geometry.key(*col, *row),
             request_id: *request_id,
+            revision: prepared.revision,
             bitmap,
         },
         Job::Base {
@@ -553,6 +556,7 @@ fn publish(shared: &Shared, job: &Job, bitmap: Bitmap) {
             page: prepared.geometry.page,
             scale_milli: prepared.geometry.scale_milli,
             request_id: *request_id,
+            revision: prepared.revision,
             bitmap,
         },
         Job::Thumb {
@@ -561,6 +565,7 @@ fn publish(shared: &Shared, job: &Job, bitmap: Bitmap) {
         } => EngineEvent::ThumbRendered {
             page: prepared.geometry.page,
             request_id: *request_id,
+            revision: prepared.revision,
             bitmap,
         },
     };

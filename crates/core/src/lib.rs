@@ -10,10 +10,12 @@
 //! - [`EngineCmd`] and [`EngineEvent`]: Inter-thread messages for actor engines.
 //! - [`tiling`]: pure tile geometry, and [`scheduler`]: the pure tile cache/request policy.
 //! - [`layout`]: the continuous page layout and the canvas window (Plan 0002).
+//! - [`annot`]: annotations, edits and the unsaved-changes state (Plan 0004).
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+pub mod annot;
 pub mod layout;
 pub mod nav;
 pub mod scheduler;
@@ -170,6 +172,20 @@ pub enum EngineCmd {
         mode: select::SelectMode,
         generation: u64,
     },
+    /// List a page's annotations (Plan 0004, §4.1), answered with [`EngineEvent::Annotations`].
+    /// `generation` is echoed back, so an answer about a previous document can be recognised.
+    Annotations { page: u32, generation: u64 },
+    /// Apply one edit to the document. The engine answers with [`EngineEvent::PageChanged`] for
+    /// the page it changed, then [`EngineEvent::Edited`]; `generation` is the document's, so an
+    /// answer about a previous document can be recognised.
+    Edit {
+        op: annot::EditOp,
+        edit_id: u64,
+        generation: u64,
+    },
+    /// Write the document: `None` appends an incremental update to the open file, `Some(path)`
+    /// writes a full copy there and switches to it (Plan 0004, §4.4).
+    Save { path: Option<PathBuf> },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -219,14 +235,20 @@ pub enum EngineEvent {
         /// Pages whose bounds could not be read; they are in `page_sizes` as Letter, so the
         /// layout stays complete, and the receiver can tell the user which ones are guesses.
         unsized_pages: Vec<u32>,
+        /// Whether the document can be annotated and saved: only PDFs can (Plan 0004, §1).
+        editable: bool,
     },
     /// One tile has been rendered.
     ///
     /// `request_id` is the epoch the request was issued under; results carrying an older epoch
     /// are stale and must be dropped by the receiver.
+    ///
+    /// `revision` is the page's revision the tile was drawn from (Plan 0004, §4.1): a tile of an
+    /// older revision than the receiver knows shows the page as it was before an edit.
     TileRendered {
         key: TileKey,
         request_id: RequestId,
+        revision: u32,
         bitmap: Bitmap,
     },
     /// The low-resolution base layer of a page (Plan 0001, §5 Phase 2).
@@ -238,6 +260,7 @@ pub enum EngineEvent {
         page: u32,
         scale_milli: u32,
         request_id: RequestId,
+        revision: u32,
         bitmap: Bitmap,
     },
     /// A page thumbnail (Plan 0003, §4.3): the whole page at the scale that makes it about
@@ -245,6 +268,7 @@ pub enum EngineEvent {
     ThumbRendered {
         page: u32,
         request_id: RequestId,
+        revision: u32,
         bitmap: Bitmap,
     },
     /// One page's search hits, each the rectangles that cover it, in MuPDF's page space.
@@ -274,6 +298,32 @@ pub enum EngineEvent {
     /// The document's outline, flattened in reading order; sent right after `Opened`, empty when
     /// the document has none.
     Outline { items: Vec<OutlineItem> },
+    /// A page's annotations, in drawing order (the last is on top).
+    Annotations {
+        page: u32,
+        generation: u64,
+        items: Vec<annot::AnnotInfo>,
+    },
+    /// An edit changed a page: it is now at `revision`, with these annotations. Every tile, base
+    /// layer and thumbnail of the page rendered from an older revision is out of date.
+    PageChanged {
+        generation: u64,
+        page: u32,
+        revision: u32,
+        items: Vec<annot::AnnotInfo>,
+    },
+    /// An edit was applied, or why it was not.
+    Edited {
+        edit_id: u64,
+        generation: u64,
+        result: Result<(), String>,
+    },
+    /// A save finished: the file now holds the document (its size in bytes), or why not. After a
+    /// Save As `path` is the new file, which the engine has switched to.
+    Saved {
+        path: PathBuf,
+        result: Result<u64, SaveError>,
+    },
     /// A tile was aborted mid-raster because its epoch had been superseded (Plan 0001, §5 Phase 2).
     ///
     /// `ms` is the measured time from the abort signal to the rasterizer noticing it, which is the
@@ -283,6 +333,18 @@ pub enum EngineEvent {
     TileAborted { request_id: RequestId, ms: u64 },
     /// An error occurred.
     Error { message: String },
+}
+
+/// Why a save did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveError {
+    /// The file cannot take an incremental update (MuPDF repaired it at open, for example), so it
+    /// needs a full copy written elsewhere: Save As.
+    NeedsSaveAs,
+    /// The document cannot be saved at all (not a PDF).
+    NotEditable,
+    /// Writing failed (read-only file, missing drive, ...).
+    Failed(String),
 }
 
 /// Minimum allowed zoom scale factor.

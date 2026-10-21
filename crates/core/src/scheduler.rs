@@ -74,6 +74,9 @@ struct Entry {
     slot: usize,
     tick: u64,
     visible: bool,
+    /// Drawn from an older revision of its page (Plan 0004, §4.1): kept on screen until the new
+    /// pixels arrive, so an edit never blanks the page, and requested again.
+    stale: bool,
 }
 
 /// Tile cache, eviction policy and request planning. Pure data structure.
@@ -216,6 +219,20 @@ impl TileScheduler {
         self.slots.get(slot).copied().flatten()
     }
 
+    /// Whether the tile is cached but drawn from an older revision of its page.
+    pub fn is_stale(&self, key: &TileKey) -> bool {
+        self.entries.get(key).is_some_and(|entry| entry.stale)
+    }
+
+    /// Visible tiles of a page still showing an older revision: an edit's re-render is complete
+    /// when this reaches zero (`t_edit`, `docs/benchmarks.md` §10.2).
+    pub fn stale_visible(&self, page: u32) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.key.page == page && entry.visible && entry.stale)
+            .count()
+    }
+
     /// Number of keys the last [`Self::update_view`] wanted.
     pub fn desired_len(&self) -> usize {
         self.desired.len()
@@ -264,7 +281,14 @@ impl TileScheduler {
         // evicted on arrival, so they must not stop new tiles from being requested.
         let mut free = self.capacity.saturating_sub(visible_cached);
         for key in desired {
-            if self.entries.contains_key(key) || self.pending.contains(key) {
+            if let Some(entry) = self.entries.get(key) {
+                // A stale tile already has its row: asking for its new pixels takes no other.
+                if entry.stale && self.pending.insert(*key) {
+                    actions.push(TileAction::Request { key: *key });
+                }
+                continue;
+            }
+            if self.pending.contains(key) {
                 continue;
             }
             if free == 0 {
@@ -336,7 +360,13 @@ impl TileScheduler {
         let prefetched = self.prefetch.remove(&key);
         let mut out = InsertOutcome::default();
 
-        if let Some(entry) = self.entries.get(&key) {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            // A stale tile's new pixels replace the old ones in the same row.
+            if entry.stale {
+                entry.stale = false;
+                self.bytes = self.bytes.saturating_sub(entry.bytes) + bytes;
+                entry.bytes = bytes;
+            }
             out.slot = Some(entry.slot);
             return out;
         }
@@ -363,6 +393,7 @@ impl TileScheduler {
                         slot,
                         tick: self.tick,
                         visible,
+                        stale: false,
                     },
                 );
                 self.bytes += bytes;
@@ -387,6 +418,54 @@ impl TileScheduler {
         self.desired.clear();
         self.prefetch.clear();
         self.bytes = 0;
+        actions
+    }
+
+    /// A page changed (Plan 0004, §4.1): its tiles on screen are kept but marked stale and asked
+    /// for again, its hidden tiles are released (nothing would show them before they are out of
+    /// date), and its requests in flight are forgotten, because they were made against the old
+    /// revision and their results will be dropped. Other pages are not touched.
+    pub fn invalidate_page(&mut self, page: u32) -> Vec<TileAction> {
+        let mut actions = Vec::new();
+        let hidden: Vec<TileKey> = self
+            .entries
+            .values()
+            .filter(|entry| entry.key.page == page && !entry.visible)
+            .map(|entry| entry.key)
+            .collect();
+        for key in hidden {
+            if let Some(entry) = self.entries.remove(&key) {
+                self.slots[entry.slot] = None;
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
+                actions.push(TileAction::Release { slot: entry.slot });
+            }
+        }
+        self.pending.retain(|key| key.page != page);
+        self.prefetch.retain(|key| key.page != page);
+        let mut shown: Vec<TileKey> = Vec::new();
+        for entry in self.entries.values_mut() {
+            if entry.key.page == page {
+                entry.stale = true;
+                shown.push(entry.key);
+            }
+        }
+        shown.sort();
+        for key in shown {
+            self.pending.insert(key);
+            actions.push(TileAction::Request { key });
+        }
+        // Cells of the page in view whose first render was still in flight.
+        let mut missing: Vec<TileKey> = self
+            .desired
+            .iter()
+            .filter(|key| key.page == page && !self.entries.contains_key(key))
+            .copied()
+            .collect();
+        missing.sort();
+        for key in missing {
+            self.pending.insert(key);
+            actions.push(TileAction::Request { key });
+        }
         actions
     }
 
@@ -461,6 +540,87 @@ mod tests {
             row,
             scale_milli: scale,
         }
+    }
+
+    fn page_key(page: u32, col: i32) -> TileKey {
+        TileKey {
+            page,
+            col,
+            row: 0,
+            scale_milli: 1000,
+        }
+    }
+
+    #[test]
+    fn invalidating_a_page_keeps_its_visible_tiles_and_asks_for_them_again() {
+        let mut sched = TileScheduler::new(8, usize::MAX);
+        let (a0, a1, b0) = (page_key(0, 0), page_key(0, 1), page_key(1, 0));
+        let hidden = page_key(0, 2);
+        sched.update_view(&[a0, a1, b0, hidden], 1000);
+        insert_all(&mut sched, &[a0, a1, b0, hidden]);
+        sched.update_view(&[a0, a1, b0], 1000);
+        let slot_a0 = sched.slot_of(&a0).expect("cached");
+        let slot_hidden = sched.slot_of(&hidden).expect("cached");
+        let before = sched.cache_bytes();
+
+        let actions = sched.invalidate_page(0);
+        // Page 0's visible tiles stay (no Hide, no Release) and are requested again; its hidden
+        // tile is released; page 1 is not touched.
+        assert!(actions.contains(&TileAction::Request { key: a0 }));
+        assert!(actions.contains(&TileAction::Request { key: a1 }));
+        assert!(actions.contains(&TileAction::Release { slot: slot_hidden }));
+        assert!(!sched.contains(&hidden));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, TileAction::Request { key } if key.page == 1))
+        );
+        assert!(sched.is_visible(&a0) && sched.is_stale(&a0));
+        assert!(!sched.is_stale(&b0));
+        assert_eq!(sched.stale_visible(0), 2);
+        assert_eq!(sched.stale_visible(1), 0);
+
+        // The new pixels land in the same row, and the page is fresh again once both are in.
+        let out = sched.insert(a0, TILE / 2);
+        assert_eq!(out.slot, Some(slot_a0));
+        assert!(out.actions.is_empty());
+        assert!(!sched.is_stale(&a0));
+        assert_eq!(sched.stale_visible(0), 1);
+        sched.insert(a1, TILE);
+        assert_eq!(sched.stale_visible(0), 0);
+        // Bytes follow the replacement: a0 shrank by half a tile, `hidden` was released.
+        assert_eq!(sched.cache_bytes(), before - TILE - TILE / 2);
+    }
+
+    #[test]
+    fn a_stale_tile_is_requested_again_after_an_epoch_change() {
+        let mut sched = TileScheduler::new(4, usize::MAX);
+        let a0 = page_key(0, 0);
+        sched.update_view(&[a0], 1000);
+        insert_all(&mut sched, &[a0]);
+        sched.invalidate_page(0);
+        // The zoom or jump that started an epoch forgot the request; the next view diff makes it.
+        sched.clear_pending();
+        let actions = sched.update_view(&[a0], 1000);
+        assert_eq!(actions, vec![TileAction::Request { key: a0 }]);
+        // And only once.
+        assert!(sched.update_view(&[a0], 1000).is_empty());
+    }
+
+    #[test]
+    fn invalidating_requests_cells_whose_first_render_was_in_flight() {
+        let mut sched = TileScheduler::new(4, usize::MAX);
+        let a0 = page_key(0, 0);
+        assert_eq!(
+            sched.update_view(&[a0], 1000),
+            vec![TileAction::Request { key: a0 }]
+        );
+        // The edit lands before the tile: the request in flight is for the old revision.
+        assert_eq!(
+            sched.invalidate_page(0),
+            vec![TileAction::Request { key: a0 }]
+        );
+        assert!(sched.is_pending(&a0));
     }
 
     /// Inserts every key as if it had just arrived, returning the row-change actions.

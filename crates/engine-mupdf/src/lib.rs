@@ -12,13 +12,16 @@
 //!   [`worker_count`] threads, which never touch the document because the actor hands them
 //!   *resolved* jobs (page display list included) instead of commands.
 
+mod edit;
 mod pool;
 mod search;
 
+use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
+use pdf_core::annot::{AnnotInfo, EditOp};
 use pdf_core::{
     Bitmap, EngineCmd, EngineEvent, OutlineItem, PageGeometry, PageSize, PdfEngine, PixelFormat,
-    Rect, RequestId, TILE_STRIDE_PX, thumb_scale_milli,
+    Rect, RequestId, SaveError, TILE_STRIDE_PX, thumb_scale_milli,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -103,6 +106,18 @@ pub enum MupdfError {
         actual: (u32, u32),
     },
 
+    /// The document cannot be annotated or saved: MuPDF opened it, but it is not a PDF.
+    #[error("Only PDF documents can be edited")]
+    NotEditable,
+
+    /// An edit named an annotation the page does not have (it was deleted meanwhile).
+    #[error("Page {page} has no annotation {id}")]
+    AnnotationNotFound { page: u32, id: u32 },
+
+    /// MuPDF refused an edit.
+    #[error("Failed to edit page {page}: {source}")]
+    EditFailed { page: u32, source: mupdf::Error },
+
     /// Non-UTF8 path provided.
     #[error("Path is not valid UTF-8: '{0}'")]
     InvalidPath(PathBuf),
@@ -130,11 +145,33 @@ pub enum MupdfError {
 ///   rasterizing thread at once. Several entries because continuous scroll shows several pages at
 ///   once: a one-page cache would rebuild each visible page's list every time a tile of the other
 ///   one was requested (Plan 0002, §3.3).
+///
+/// A PDF is held as a [`PdfDocument`], which can be annotated and saved; any other format MuPDF
+/// opens (images, EPUB, ...) as a plain [`Document`], which is view-only (Plan 0004, §1).
+/// `revisions` counts the edits of each page (Plan 0004, §4.1): every job carries the revision of
+/// the display list it was given, so the app can tell pixels drawn before an edit.
 pub struct MupdfEngine {
-    doc: Option<Document>,
+    doc: Option<Doc>,
     path: Option<PathBuf>,
+    password: Option<String>,
     scratch: Option<Pixmap>,
     display_lists: Vec<(u32, Arc<DisplayList>)>,
+    revisions: Vec<u32>,
+}
+
+/// The open document, editable or not.
+enum Doc {
+    Plain(Document),
+    Pdf(PdfDocument),
+}
+
+impl Doc {
+    fn document(&self) -> &Document {
+        match self {
+            Doc::Plain(doc) => doc,
+            Doc::Pdf(pdf) => pdf,
+        }
+    }
 }
 
 /// Whether pages are drawn with their annotations (highlights, notes, stamps, form-field
@@ -163,8 +200,10 @@ impl MupdfEngine {
         Self {
             doc: None,
             path: None,
+            password: None,
             scratch: None,
             display_lists: Vec::new(),
+            revisions: Vec::new(),
         }
     }
 
@@ -200,10 +239,22 @@ impl MupdfEngine {
             .map_err(|e| MupdfError::Backend(e.to_string()))?
             .max(0) as usize;
 
+        let doc = if doc.is_pdf() {
+            Doc::Pdf(
+                PdfDocument::try_from(doc).map_err(|source| MupdfError::OpenFailed {
+                    path: path.to_path_buf(),
+                    source,
+                })?,
+            )
+        } else {
+            Doc::Plain(doc)
+        };
         self.doc = Some(doc);
         self.path = Some(path.to_path_buf());
-        // A display list belongs to the document that produced it.
+        self.password = password.map(str::to_owned);
+        // A display list belongs to the document that produced it, and so do the revisions.
         self.display_lists.clear();
+        self.revisions = vec![0; count];
 
         Ok(count)
     }
@@ -314,7 +365,7 @@ impl MupdfEngine {
                 total_pages: total,
             });
         }
-        let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
+        let doc = self.document().ok_or(MupdfError::NoDocumentOpen)?;
         let page =
             doc.load_page(page_index as i32)
                 .map_err(|source| MupdfError::PageLoadFailed {
@@ -361,6 +412,7 @@ impl MupdfEngine {
             geometry: *geometry,
             list,
             origin: (bbox.x0, bbox.y0),
+            revision: self.revision(page_index),
         })
     }
 
@@ -411,7 +463,7 @@ impl MupdfEngine {
     /// document without one, or one MuPDF cannot read, gives an empty list rather than an error:
     /// the outline is an aid, and the document is still readable without it.
     pub fn outline(&self) -> Vec<OutlineItem> {
-        let Some(doc) = self.doc.as_ref() else {
+        let Some(doc) = self.document() else {
             return Vec::new();
         };
         let Ok(tree) = doc.outlines() else {
@@ -420,6 +472,96 @@ impl MupdfEngine {
         let mut items = Vec::new();
         flatten_outline(&tree, 0, &mut items);
         items
+    }
+
+    fn document(&self) -> Option<&Document> {
+        self.doc.as_ref().map(Doc::document)
+    }
+
+    fn pdf(&self) -> Result<&PdfDocument, MupdfError> {
+        match self.doc.as_ref() {
+            Some(Doc::Pdf(pdf)) => Ok(pdf),
+            Some(Doc::Plain(_)) => Err(MupdfError::NotEditable),
+            None => Err(MupdfError::NoDocumentOpen),
+        }
+    }
+
+    /// Whether the open document can be annotated and saved.
+    pub fn is_editable(&self) -> bool {
+        matches!(self.doc, Some(Doc::Pdf(_)))
+    }
+
+    /// How many edits a page has had since the document was opened.
+    pub fn revision(&self, page: u32) -> u32 {
+        self.revisions.get(page as usize).copied().unwrap_or(0)
+    }
+
+    /// A page's annotations, in drawing order; empty for a view-only document.
+    pub fn annotations(&self, page: u32) -> Result<Vec<AnnotInfo>, MupdfError> {
+        match self.pdf() {
+            Ok(pdf) => edit::annotations(pdf, page),
+            Err(MupdfError::NotEditable) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Applies one edit (Plan 0004, §4.1) and gives the page a new revision, which it returns.
+    /// The page's cached display list is dropped, so its next job is drawn from the edited page;
+    /// lists already handed to workers keep drawing the old revision, which their jobs say.
+    pub fn edit(&mut self, op: &EditOp) -> Result<u32, MupdfError> {
+        let page = op.page();
+        if page as usize >= self.revisions.len() {
+            return Err(MupdfError::PageOutOfBounds {
+                page_index: page as usize,
+                total_pages: self.revisions.len(),
+            });
+        }
+        edit::apply(self.pdf()?, op)?;
+        self.display_lists.retain(|(cached, _)| *cached != page);
+        let revision = &mut self.revisions[page as usize];
+        *revision += 1;
+        Ok(*revision)
+    }
+
+    /// Writes the document (Plan 0004, §3.3 and §4.4) and returns the file and its size.
+    ///
+    /// `None` appends an incremental update to the open file: the bytes already there stay as
+    /// they are, existing signatures stay valid, and the open document keeps reading the file.
+    /// `Some(path)` writes a full copy there and reopens it, so later saves go to the new file. A
+    /// path naming the open file itself is saved incrementally instead, because a full rewrite of
+    /// the file MuPDF is reading from would destroy what it reads.
+    pub fn save(&mut self, path: Option<&Path>) -> Result<(PathBuf, u64), SaveError> {
+        let current = self.path.clone().ok_or(SaveError::NotEditable)?;
+        let target = path.map(Path::to_path_buf);
+        let in_place = target
+            .as_deref()
+            .is_none_or(|target| same_file(target, &current));
+        let pdf = self.pdf().map_err(|_| SaveError::NotEditable)?;
+        if in_place {
+            if !pdf.can_be_saved_incrementally() {
+                return Err(SaveError::NeedsSaveAs);
+            }
+            let name = current.to_str().ok_or(SaveError::NeedsSaveAs)?;
+            let mut options = PdfWriteOptions::default();
+            options.set_incremental(true);
+            pdf.save_with_options(name, options)
+                .map_err(|e| SaveError::Failed(e.to_string()))?;
+            let len = file_len(&current);
+            return Ok((current, len));
+        }
+        let target = target.ok_or(SaveError::NeedsSaveAs)?;
+        let name = target
+            .to_str()
+            .ok_or_else(|| SaveError::Failed(format!("not a UTF-8 path: {}", target.display())))?;
+        pdf.save(name)
+            .map_err(|e| SaveError::Failed(e.to_string()))?;
+        // The copy is the document from now on. Reopening forgets the revisions, which is right:
+        // every display list goes with it, and the app re-renders what it shows.
+        let password = self.password.clone();
+        self.open_document_with_password(&target, password.as_deref())
+            .map_err(|e| SaveError::Failed(e.to_string()))?;
+        let len = file_len(&target);
+        Ok((target, len))
     }
 
     /// Returns the cached display list for a page, building it on a miss and evicting the least
@@ -458,6 +600,18 @@ impl MupdfEngine {
     }
 }
 
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Whether two paths name the same file, by their canonical form when both exist.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Depth-first, so the list reads in the order the tree shows its entries.
 fn flatten_outline(nodes: &[mupdf::Outline], depth: u32, out: &mut Vec<OutlineItem>) {
     for node in nodes {
@@ -493,15 +647,14 @@ impl PdfEngine for MupdfEngine {
     }
 
     fn page_count(&self) -> usize {
-        self.doc
-            .as_ref()
+        self.document()
             .and_then(|d| d.page_count().ok())
             .map(|c| c.max(0) as usize)
             .unwrap_or(0)
     }
 
     fn page_size(&self, page_index: usize) -> Result<Rect, Self::Error> {
-        let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
+        let doc = self.document().ok_or(MupdfError::NoDocumentOpen)?;
         let total = self.page_count();
         if page_index >= total {
             return Err(MupdfError::PageOutOfBounds {
@@ -526,7 +679,7 @@ impl PdfEngine for MupdfEngine {
     }
 
     fn render_page(&self, page_index: usize, scale: f32) -> Result<Bitmap, Self::Error> {
-        let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
+        let doc = self.document().ok_or(MupdfError::NoDocumentOpen)?;
         let total = self.page_count();
         if page_index >= total {
             return Err(MupdfError::PageOutOfBounds {
@@ -606,6 +759,7 @@ impl EngineHandle {
                                         page_count,
                                         page_sizes,
                                         unsized_pages,
+                                        editable: engine.is_editable(),
                                     });
                                     let _ = event_tx.send(EngineEvent::Outline {
                                         items: engine.outline(),
@@ -682,6 +836,58 @@ impl EngineHandle {
                             mode,
                             generation,
                         } => search.select(from, to, mode, generation),
+                        EngineCmd::Annotations { page, generation } => {
+                            match engine.annotations(page) {
+                                Ok(items) => {
+                                    let _ = event_tx.send(EngineEvent::Annotations {
+                                        page,
+                                        generation,
+                                        items,
+                                    });
+                                }
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
+                        }
+                        EngineCmd::Edit {
+                            op,
+                            edit_id,
+                            generation,
+                        } => {
+                            // `PageChanged` goes out before any tile of the new revision can be
+                            // prepared - this loop prepares nothing until it returns - so the app
+                            // always knows a revision before it sees pixels of it.
+                            let page = op.page();
+                            let result = engine.edit(&op).and_then(|revision| {
+                                let items = engine.annotations(page)?;
+                                let _ = event_tx.send(EngineEvent::PageChanged {
+                                    generation,
+                                    page,
+                                    revision,
+                                    items,
+                                });
+                                Ok(())
+                            });
+                            let _ = event_tx.send(EngineEvent::Edited {
+                                edit_id,
+                                generation,
+                                result: result.map_err(|err| err.to_string()),
+                            });
+                        }
+                        EngineCmd::Save { path } => {
+                            let result = engine.save(path.as_deref());
+                            let saved_to = match &result {
+                                Ok((file, _)) => file.clone(),
+                                Err(_) => path.clone().unwrap_or_default(),
+                            };
+                            // After a Save As the search thread reads the new file too.
+                            if path.is_some() && result.is_ok() {
+                                search.document(saved_to.clone(), engine.password.clone());
+                            }
+                            let _ = event_tx.send(EngineEvent::Saved {
+                                path: saved_to,
+                                result: result.map(|(_, bytes)| bytes),
+                            });
+                        }
                         EngineCmd::Cancel { request_id } => pool.cancel(request_id),
                         EngineCmd::Shutdown => break,
                     }

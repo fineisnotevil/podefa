@@ -149,6 +149,7 @@ fn drain_batch(
                 key,
                 request_id: id,
                 bitmap,
+                ..
             } => {
                 assert_eq!(
                     id, request_id,

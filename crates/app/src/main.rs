@@ -2613,6 +2613,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     page_count,
                     page_sizes,
                     unsized_pages,
+                    ..
                 } => {
                     ui.set_has_error(false);
                     ui.set_error_text(SharedString::from(""));
@@ -2644,6 +2645,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     key,
                     request_id,
                     bitmap,
+                    ..
                 } => {
                     if epoch.load(Ordering::Relaxed) != request_id {
                         return;
@@ -2659,6 +2661,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     page,
                     request_id,
                     bitmap,
+                    ..
                 } => {
                     with_state(|state| state.apply_thumb(&ui, page, request_id, &bitmap));
                 }
@@ -2693,6 +2696,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 EngineEvent::Outline { items } => {
                     with_state(|state| state.set_outline(items));
                 }
+                // Handled from Plan 0004 Phase 1's app commit on.
+                EngineEvent::Annotations { .. }
+                | EngineEvent::PageChanged { .. }
+                | EngineEvent::Edited { .. }
+                | EngineEvent::Saved { .. } => {}
                 EngineEvent::TileAborted { ms, .. } => {
                     with_state(|state| state.bench.aborted(ms));
                 }
