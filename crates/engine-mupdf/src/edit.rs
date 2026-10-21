@@ -104,12 +104,19 @@ fn describe(annot: &PdfAnnotation) -> Option<AnnotInfo> {
         _ => Vec::new(),
     };
     let colour = annot.color().ok().flatten().map(to_colour);
+    let contents = annot
+        .contents()
+        .ok()
+        .flatten()
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
     Some(AnnotInfo {
         id,
         kind,
         rect,
         quads,
         colour,
+        contents,
     })
 }
 
@@ -198,6 +205,13 @@ fn cut_same_kind(
     Ok(())
 }
 
+/// Where another reader opens a note's text: beside its icon, not at the page corner MuPDF puts a
+/// new note's popup (`pdf_create_annot`).
+fn popup_beside(note: &Rect) -> MuRect {
+    let x = note.x + note.width + 4.0;
+    MuRect::new(x, note.y, x + 200.0, note.y + 100.0)
+}
+
 fn find(pdf_page: &PdfPage, id: u32) -> Option<PdfAnnotation> {
     pdf_page
         .annotations()
@@ -238,6 +252,38 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
             let annot =
                 find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;
             pdf_page.delete_annotation(annot).map_err(fail)?;
+        }
+        EditOp::AddNote {
+            rect,
+            contents,
+            colour,
+            author,
+            ..
+        } => {
+            let mut annot = pdf_page
+                .add_text_annotation(to_mu(rect), contents)
+                .map_err(fail)?;
+            annot
+                .set_color(to_annotation_colour(*colour))
+                .map_err(fail)?;
+            if let Some(author) = author.as_deref().filter(|a| !a.is_empty()) {
+                annot.set_author(author).map_err(fail)?;
+            }
+            annot.set_popup(popup_beside(rect)).map_err(fail)?;
+            annot.update().map_err(fail)?;
+        }
+        EditOp::SetContents { id, contents, .. } => {
+            let mut annot =
+                find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;
+            annot.set_contents(contents).map_err(fail)?;
+            annot.update().map_err(fail)?;
+        }
+        EditOp::MoveNote { id, rect, .. } => {
+            let mut annot =
+                find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;
+            annot.set_rect(to_mu(rect)).map_err(fail)?;
+            annot.set_popup(popup_beside(rect)).map_err(fail)?;
+            annot.update().map_err(fail)?;
         }
         EditOp::SetColour { id, colour, .. } => {
             let mut annot =

@@ -84,6 +84,25 @@ pub struct AnnotInfo {
     pub quads: Vec<Rect>,
     /// Its colour, when it has one the app can show and change.
     pub colour: Option<Colour>,
+    /// Its text (`/Contents`): what a note says, or a comment left on any other annotation.
+    pub contents: Option<String>,
+}
+
+/// The size of a sticky note's icon, in points (Plan 0004 Phase 3): MuPDF gives every `Text`
+/// annotation a 16 pt icon and its rectangle that size (`pdf-annot.c`, `pdf_create_annot`).
+pub const NOTE_SIZE_PT: f32 = 16.0;
+
+/// The rectangle of a note whose icon has its top-left corner at a page point, kept inside a page
+/// of the given size (page space, origin at the page's top-left).
+pub fn note_rect(x: f32, y: f32, page_width: f32, page_height: f32) -> Rect {
+    let max_x = (page_width - NOTE_SIZE_PT).max(0.0);
+    let max_y = (page_height - NOTE_SIZE_PT).max(0.0);
+    Rect::new(
+        x.clamp(0.0, max_x),
+        y.clamp(0.0, max_y),
+        NOTE_SIZE_PT,
+        NOTE_SIZE_PT,
+    )
 }
 
 /// An edit the app asks the engine for. Each is applied to one page, which gets a new revision.
@@ -107,6 +126,26 @@ pub enum EditOp {
         id: u32,
         colour: Colour,
     },
+    /// Places a sticky note (PDF `Text` annotation) with its text.
+    AddNote {
+        page: u32,
+        rect: Rect,
+        contents: String,
+        colour: Colour,
+        author: Option<String>,
+    },
+    /// Replaces an annotation's text.
+    SetContents {
+        page: u32,
+        id: u32,
+        contents: String,
+    },
+    /// Moves a note to a new rectangle on its page.
+    MoveNote {
+        page: u32,
+        id: u32,
+        rect: Rect,
+    },
 }
 
 impl EditOp {
@@ -121,6 +160,9 @@ impl EditOp {
             },
             Self::Delete { .. } => "Delete annotation",
             Self::SetColour { .. } => "Change colour",
+            Self::AddNote { .. } => "Add note",
+            Self::SetContents { .. } => "Edit note",
+            Self::MoveNote { .. } => "Move note",
         }
     }
 
@@ -129,7 +171,10 @@ impl EditOp {
         match self {
             Self::AddMarkup { page, .. }
             | Self::Delete { page, .. }
-            | Self::SetColour { page, .. } => *page,
+            | Self::SetColour { page, .. }
+            | Self::AddNote { page, .. }
+            | Self::SetContents { page, .. }
+            | Self::MoveNote { page, .. } => *page,
         }
     }
 }
@@ -280,7 +325,29 @@ mod tests {
             rect,
             quads,
             colour: None,
+            contents: None,
         }
+    }
+
+    #[test]
+    fn a_note_stays_on_its_page() {
+        let n = NOTE_SIZE_PT;
+        assert_eq!(
+            note_rect(100.0, 50.0, 612.0, 792.0),
+            Rect::new(100.0, 50.0, n, n)
+        );
+        // Past the right and bottom edges: pulled back so the whole icon is on the page.
+        assert_eq!(
+            note_rect(605.0, 790.0, 612.0, 792.0),
+            Rect::new(612.0 - n, 792.0 - n, n, n)
+        );
+        // Above and left of the page.
+        assert_eq!(
+            note_rect(-30.0, -1.0, 612.0, 792.0),
+            Rect::new(0.0, 0.0, n, n)
+        );
+        // A page smaller than the icon.
+        assert_eq!(note_rect(5.0, 5.0, 10.0, 10.0), Rect::new(0.0, 0.0, n, n));
     }
 
     #[test]
@@ -424,8 +491,25 @@ mod tests {
                 id: 1,
                 colour,
             },
+            EditOp::AddNote {
+                page: 6,
+                rect: note_rect(0.0, 0.0, 100.0, 100.0),
+                contents: "x".into(),
+                colour,
+                author: None,
+            },
+            EditOp::SetContents {
+                page: 7,
+                id: 1,
+                contents: String::new(),
+            },
+            EditOp::MoveNote {
+                page: 8,
+                id: 1,
+                rect: Rect::default(),
+            },
         ];
         let pages: Vec<u32> = ops.iter().map(EditOp::page).collect();
-        assert_eq!(pages, [3, 4, 5]);
+        assert_eq!(pages, [3, 4, 5, 6, 7, 8]);
     }
 }
