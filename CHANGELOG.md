@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Added
+- **The v0.1 viewer plan is complete** (`docs/plans/0003-v0.1-viewer.md`, closed 2026-10-21): opening documents, recent files and themes, a thumbnail and outline sidebar, search, and text selection with copy.
 - **Text selection and copy** (Plan 0003 Phase 4): a mouse drag selects text (double-click a word, triple-click a line, Shift+click extends, dragging past an edge scrolls), touch pans and a long press selects; Ctrl+C or Edit > Copy copies through `arboard` (the copy Slint already links). Selection is computed in `pdf_core::select` from MuPDF's structured text on the search thread, so the highlight and the copied text always match (ADR 0006). `--bench-select` checks the pointer path; a pull request to mupdf-rs adds a safe `copy_selection` (messense/mupdf-rs#272).
 
 ### Fixed
