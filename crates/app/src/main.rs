@@ -15,7 +15,7 @@
 //! to that window's start.
 
 use engine_mupdf::EngineHandle;
-use pdf_core::annot::{AnnotInfo, EditOp, MarkupKind, PALETTE, SaveState};
+use pdf_core::annot::{AnnotInfo, AnnotKind, EditOp, MarkupKind, PALETTE, SaveState, note_rect};
 use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
@@ -50,7 +50,7 @@ use std::time::Instant;
 mod bench;
 
 slint::slint! {
-    import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+    import { Button, LineEdit, ListView, Palette, TextEdit } from "std-widgets.slint";
 
     // One model row: an image plus where it goes, in canvas logical pixels.
     //
@@ -168,6 +168,16 @@ slint::slint! {
         // Whether Edit > Undo and Redo have anything to do (Plan 0004 Phase 2).
         in-out property <bool> can-undo: false;
         in-out property <bool> can-redo: false;
+        // Sticky notes (Plan 0004 Phase 3): the editor, placed in viewport coordinates next to its
+        // note, and the preview shown while the pointer rests on a note.
+        in-out property <bool> note-editor-visible: false;
+        in-out property <length> note-editor-x: 0px;
+        in-out property <length> note-editor-y: 0px;
+        in-out property <string> note-text: "";
+        in-out property <bool> note-hover-visible: false;
+        in-out property <length> note-hover-x: 0px;
+        in-out property <length> note-hover-y: 0px;
+        in-out property <string> note-hover-text: "";
         // Where the viewport sits in the window, for scripted pointer input (bench only).
         out property <length> viewport-abs-x: viewport.absolute-position.x;
         out property <length> viewport-abs-y: viewport.absolute-position.y;
@@ -217,6 +227,8 @@ slint::slint! {
         callback delete_annotation();
         callback undo();
         callback redo();
+        callback note_save();
+        callback note_cancel();
         callback save();
         callback save_as();
         // The pointer moved over the page without a button down, viewport-relative.
@@ -464,6 +476,11 @@ slint::slint! {
                     text: "Squiggly";
                     primary: root.tool == 4;
                     clicked => { root.choose_tool(4); }
+                }
+                Button {
+                    text: "Note (N)";
+                    primary: root.tool == 5;
+                    clicked => { root.choose_tool(5); }
                 }
                 Rectangle { width: 6px; }
                 for swatch[index] in root.swatches : VerticalLayout {
@@ -744,7 +761,8 @@ slint::slint! {
                             }
                             return reject;
                         }
-                        mouse-cursor: root.text-cursor ? MouseCursor.text : MouseCursor.default;
+                        mouse-cursor: root.tool == 5 ? MouseCursor.crosshair
+                            : root.text-cursor ? MouseCursor.text : MouseCursor.default;
                         changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
                         changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
                         pointer-event(event) => {
@@ -803,6 +821,76 @@ slint::slint! {
                         moved => {
                             if (self.pressed) {
                                 root.scrollbar_moved(self.mouse-y - self.grab, self.height);
+                            }
+                        }
+                    }
+                }
+
+                // A note's text while the pointer rests on it.
+                if root.note-hover-visible && !root.note-editor-visible : Rectangle {
+                    x: root.note-hover-x;
+                    y: root.note-hover-y;
+                    width: min(280px, hover-text.preferred-width + 16px);
+                    height: hover-text.preferred-height + 12px;
+                    background: #fff8c4;
+                    border-width: 1px;
+                    border-color: #c9b458;
+                    border-radius: 4px;
+                    hover-text := Text {
+                        x: 8px;
+                        y: 6px;
+                        width: parent.width - 16px;
+                        text: root.note-hover-text;
+                        wrap: word-wrap;
+                        color: #3b3000;
+                    }
+                }
+
+                // The note editor: Ctrl+Enter or Save keeps the text, Esc or Cancel drops it.
+                if root.note-editor-visible : FocusScope {
+                    x: root.note-editor-x;
+                    y: root.note-editor-y;
+                    width: 280px;
+                    height: 170px;
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.note_cancel();
+                            return accept;
+                        }
+                        if (event.text == Key.Return && event.modifiers.control) {
+                            root.note_save();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 4px;
+                        drop-shadow-blur: 6px;
+                        drop-shadow-color: #00000040;
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 6px;
+                            TextEdit {
+                                text <=> root.note-text;
+                                wrap: word-wrap;
+                                init => { self.focus(); }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Text {
+                                    text: "Ctrl+Enter";
+                                    color: Palette.foreground;
+                                    opacity: 0.6;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.note_cancel(); } }
+                                Button { text: "Save"; primary: true; clicked => { root.note_save(); } }
                             }
                         }
                     }
@@ -922,6 +1010,26 @@ enum Tool {
     Select,
     /// Select text, and mark it with this markup when the drag ends.
     Markup(MarkupKind),
+    /// A click places a sticky note there (Plan 0004 Phase 3).
+    Note,
+}
+
+/// The note the editor is open for: a new one at a rectangle, or an existing one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NoteTarget {
+    New(pdf_core::Rect),
+    Existing(u32),
+}
+
+/// A press on a note, which becomes a move once the pointer leaves the click slop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NoteDrag {
+    page: u32,
+    id: u32,
+    /// Where on the note the pointer took it, in points from its top-left corner.
+    grab: (f32, f32),
+    /// Where the note would land now; `None` until the pointer has moved past the slop.
+    rect: Option<pdf_core::Rect>,
 }
 
 impl Tool {
@@ -933,6 +1041,7 @@ impl Tool {
             Tool::Markup(MarkupKind::Underline) => 2,
             Tool::Markup(MarkupKind::StrikeOut) => 3,
             Tool::Markup(MarkupKind::Squiggly) => 4,
+            Tool::Note => 5,
         }
     }
 
@@ -942,6 +1051,7 @@ impl Tool {
             2 => Tool::Markup(MarkupKind::Underline),
             3 => Tool::Markup(MarkupKind::StrikeOut),
             4 => Tool::Markup(MarkupKind::Squiggly),
+            5 => Tool::Note,
             _ => Tool::Select,
         }
     }
@@ -1072,6 +1182,10 @@ struct AppState {
     /// the newest one.
     sel_answered: u64,
     pending_mark: Option<MarkupKind>,
+    /// The note editor's target (page and note) while it is open, and a press on a note that may
+    /// become a move (Plan 0004 Phase 3).
+    note_edit: Option<(u32, NoteTarget)>,
+    note_drag: Option<NoteDrag>,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -1453,10 +1567,115 @@ impl AppState {
         if self.sel_pressed || self.touch_selecting {
             return;
         }
-        let over = self.on_text(self.page_point(ui, x, y));
+        let point = self.page_point(ui, x, y);
+        let over = self.on_text(point);
         if ui.get_text_cursor() != over {
             ui.set_text_cursor(over);
         }
+        // A note's text shows while the pointer rests on the note (Plan 0004 Phase 3).
+        let text = point
+            .and_then(|p| self.note_at(p))
+            .and_then(|note| note.contents.clone());
+        match text {
+            Some(text) if self.note_drag.is_none() => {
+                ui.set_note_hover_text(SharedString::from(text));
+                ui.set_note_hover_x(x + 14.0);
+                ui.set_note_hover_y(y + 14.0);
+                ui.set_note_hover_visible(true);
+            }
+            _ => {
+                if ui.get_note_hover_visible() {
+                    ui.set_note_hover_visible(false);
+                }
+            }
+        }
+    }
+
+    /// The note under a page point, if there is one there.
+    fn note_at(&self, point: PagePoint) -> Option<&AnnotInfo> {
+        let (page, id) = self.annot_at(point)?;
+        self.annots
+            .get(&page)?
+            .iter()
+            .find(|item| item.id == id && item.kind == AnnotKind::Note)
+    }
+
+    /// Opens the note editor for a new note at `rect` or for an existing one, beside the note.
+    fn open_note_editor(&mut self, ui: &MainWindow, page: u32, target: NoteTarget) {
+        if !self.editable {
+            return;
+        }
+        let (rect, text) = match target {
+            NoteTarget::New(rect) => (rect, String::new()),
+            NoteTarget::Existing(id) => {
+                let Some(note) = self
+                    .annots
+                    .get(&page)
+                    .and_then(|items| items.iter().find(|item| item.id == id))
+                else {
+                    return;
+                };
+                (note.rect, note.contents.clone().unwrap_or_default())
+            }
+        };
+        let Some(slot) = self.layout.slot(page as usize) else {
+            return;
+        };
+        // Just below the note's icon, kept inside the viewport.
+        let s = self.scale_milli as f64 / 1000.0;
+        let sf = self.sf();
+        let x = ((slot.x as f64 + rect.x as f64 * s - self.pos.0) / sf) as f32;
+        let y =
+            ((slot.y as f64 + (rect.y + rect.height) as f64 * s - self.pos.1) / sf) as f32 + 4.0;
+        let x = x.clamp(0.0, (ui.get_view_w() - 284.0).max(0.0));
+        let y = y.clamp(0.0, (ui.get_view_h() - 174.0).max(0.0));
+        ui.set_note_editor_x(x);
+        ui.set_note_editor_y(y);
+        ui.set_note_text(SharedString::from(text));
+        ui.set_note_hover_visible(false);
+        ui.set_note_editor_visible(true);
+        self.note_edit = Some((page, target));
+    }
+
+    /// Save in the note editor: a new note with text is placed, an existing one gets its new text;
+    /// a new note left empty is not created.
+    fn note_save(&mut self, ui: &MainWindow) {
+        let Some((page, target)) = self.note_edit.take() else {
+            return;
+        };
+        ui.set_note_editor_visible(false);
+        let text = ui.get_note_text().to_string();
+        match target {
+            NoteTarget::New(rect) if !text.trim().is_empty() => self.send_edit(EditOp::AddNote {
+                page,
+                rect,
+                contents: text,
+                colour: PALETTE[self.colour],
+                author: self.settings.author.clone(),
+            }),
+            NoteTarget::New(_) => {}
+            NoteTarget::Existing(id) => {
+                let old = self
+                    .annots
+                    .get(&page)
+                    .and_then(|items| items.iter().find(|item| item.id == id))
+                    .and_then(|note| note.contents.clone())
+                    .unwrap_or_default();
+                if old != text {
+                    self.send_edit(EditOp::SetContents {
+                        page,
+                        id,
+                        contents: text,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Cancel or Esc in the note editor: nothing changes.
+    fn note_cancel(&mut self, ui: &MainWindow) {
+        self.note_edit = None;
+        ui.set_note_editor_visible(false);
     }
 
     /// Pointer input on the page (Plan 0003, §4.5): a mouse drag selects characters, a
@@ -1490,12 +1709,40 @@ impl AppState {
             0 => {
                 let Some(point) = point else { return };
                 let extend = shift && self.sel_anchor.is_some();
+                // The Note tool places a note where it is pressed, or opens the one pressed on.
+                if self.tool == Tool::Note && self.editable {
+                    self.clear_selection(ui);
+                    let target = match self.note_at(point) {
+                        Some(note) => NoteTarget::Existing(note.id),
+                        None => {
+                            let (w, h) = self
+                                .page_sizes
+                                .get(point.page as usize)
+                                .map_or((f32::MAX, f32::MAX), |size| (size.width, size.height));
+                            NoteTarget::New(note_rect(point.x, point.y, w, h))
+                        }
+                    };
+                    self.open_note_editor(ui, point.page, target);
+                    return;
+                }
                 // An annotation under the press is selected if the button comes up without a drag
                 // (Plan 0004, §4.2); a press anywhere else drops the annotation selection.
                 self.press_at = (x, y);
                 self.annot_candidate = if extend { None } else { self.annot_at(point) };
                 if self.annot_candidate.is_none() {
                     self.select_annotation(ui, None);
+                }
+                // A press on a note may move it: no text selection starts under it.
+                if !extend && let Some(note) = self.note_at(point) {
+                    self.note_drag = Some(NoteDrag {
+                        page: point.page,
+                        id: note.id,
+                        grab: (point.x - note.rect.x, point.y - note.rect.y),
+                        rect: None,
+                    });
+                    self.sel_pressed = false;
+                    self.clear_selection(ui);
+                    return;
                 }
                 if !extend && !self.on_text(Some(point)) {
                     // A click in a margin, between paragraphs or beside the page selects nothing:
@@ -1542,9 +1789,31 @@ impl AppState {
                     self.touch_down = None;
                     return;
                 }
-                if (x - self.press_at.0).abs() > TOUCH_SLOP_LOGICAL_PX
-                    || (y - self.press_at.1).abs() > TOUCH_SLOP_LOGICAL_PX
-                {
+                let dragged = (x - self.press_at.0).abs() > TOUCH_SLOP_LOGICAL_PX
+                    || (y - self.press_at.1).abs() > TOUCH_SLOP_LOGICAL_PX;
+                if let Some(mut drag) = self.note_drag {
+                    // Moving a note: its outline follows the pointer, on its own page.
+                    if dragged
+                        && let Some(slot) = self.layout.slot(drag.page as usize)
+                        && let Some(size) = self.page_sizes.get(drag.page as usize)
+                    {
+                        let s = self.scale_milli as f64 / 1000.0;
+                        let sf = self.sf();
+                        let px = ((self.pos.0 + x as f64 * sf - slot.x as f64) / s) as f32;
+                        let py = ((self.pos.1 + y as f64 * sf - slot.y as f64) / s) as f32;
+                        let rect =
+                            note_rect(px - drag.grab.0, py - drag.grab.1, size.width, size.height);
+                        drag.rect = Some(rect);
+                        self.note_drag = Some(drag);
+                        self.annot_candidate = None;
+                        self.selected_annot = Some((drag.page, drag.id));
+                        ui.set_has_annot_selection(true);
+                        ui.set_note_hover_visible(false);
+                        self.update_annot_selection(ui);
+                    }
+                    return;
+                }
+                if dragged {
                     // A drag, not a click: it selects text, not the annotation under it.
                     self.annot_candidate = None;
                 }
@@ -1566,6 +1835,15 @@ impl AppState {
             }
             // Double-click: a word.
             3 => {
+                // A double-click on a note opens it.
+                if let Some(p) = point
+                    && let Some(note) = self.note_at(p)
+                {
+                    let id = note.id;
+                    self.note_drag = None;
+                    self.open_note_editor(ui, p.page, NoteTarget::Existing(id));
+                    return;
+                }
                 let Some(point) = point.filter(|p| self.on_text(Some(*p))) else {
                     return;
                 };
@@ -1586,6 +1864,22 @@ impl AppState {
                 if kind == 1 && touch && self.touch_down.is_some() && !self.touch_selecting {
                     self.clear_selection(ui);
                     self.select_annotation(ui, None);
+                }
+                if let Some(drag) = self.note_drag.take() {
+                    match drag.rect {
+                        // Released after a move: the note goes there.
+                        Some(rect) if kind == 1 => self.send_edit(EditOp::MoveNote {
+                            page: drag.page,
+                            id: drag.id,
+                            rect,
+                        }),
+                        // Cancelled: back where it was.
+                        Some(_) => self.update_annot_selection(ui),
+                        None => {}
+                    }
+                    if drag.rect.is_some() {
+                        self.annot_candidate = None;
+                    }
                 }
                 if kind == 1 {
                     if let Some(annot) = self.annot_candidate.take() {
@@ -1743,7 +2037,12 @@ impl AppState {
         {
             let s = self.scale_milli as f64 / 1000.0;
             let sf = self.sf() as f32;
-            let rect = item.rect;
+            // A note being moved is outlined where it would land.
+            let rect = self
+                .note_drag
+                .filter(|drag| drag.page == page && drag.id == id)
+                .and_then(|drag| drag.rect)
+                .unwrap_or(item.rect);
             rows.push((
                 self.canvas_x(slot.x as f64 + rect.x as f64 * s),
                 self.canvas_y(slot.y as f64 + rect.y as f64 * s),
@@ -1923,6 +2222,9 @@ impl AppState {
     /// A tool button or its key (Plan 0004, §4.2): with text selected, a markup marks it and the
     /// tool stays; with nothing selected, the markup tool is switched on (or off again).
     fn choose_tool(&mut self, ui: &MainWindow, tool: Tool) {
+        if tool == Tool::Note && !self.editable {
+            return;
+        }
         if let Tool::Markup(kind) = tool
             && self.editable
             && !self.sel_pages.is_empty()
@@ -2685,6 +2987,9 @@ impl AppState {
         self.cancel_search();
         self.clear_selection(ui);
         self.select_annotation(ui, None);
+        self.note_cancel(ui);
+        self.note_drag = None;
+        ui.set_note_hover_visible(false);
         self.text_lines.clear();
         self.lines_pending.clear();
         self.annots.clear();
@@ -3131,6 +3436,7 @@ enum KeyCommand {
     Save,
     SaveAs,
     Mark(MarkupKind),
+    NoteTool,
     DeleteAnnotation,
     Undo,
     Redo,
@@ -3167,6 +3473,7 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
         'h' | 'H' => return Some(KeyCommand::Mark(MarkupKind::Highlight)),
         'u' | 'U' => return Some(KeyCommand::Mark(MarkupKind::Underline)),
         'k' | 'K' => return Some(KeyCommand::Mark(MarkupKind::StrikeOut)),
+        'n' | 'N' => return Some(KeyCommand::NoteTool),
         _ => {}
     }
     if c == char::from(Key::F4) {
@@ -3334,6 +3641,8 @@ fn main() -> Result<(), slint::PlatformError> {
             annot_sel_rows: Vec::new(),
             sel_answered: 0,
             pending_mark: None,
+            note_edit: None,
+            note_drag: None,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -3616,6 +3925,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
                 KeyCommand::DeleteAnnotation => state.delete_annotation(&ui),
+                KeyCommand::NoteTool => state.choose_tool(&ui, Tool::Note),
                 KeyCommand::Undo => state.undo(),
                 KeyCommand::Redo => state.redo(),
                 KeyCommand::Open | KeyCommand::SaveAs => {}
@@ -3922,6 +4232,24 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     main_window.on_undo(|| with_state(|state| state.undo()));
+    {
+        let weak = main_window.as_weak();
+        main_window.on_note_save(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.note_save(&ui));
+                ui.invoke_focus_viewport();
+            }
+        });
+    }
+    {
+        let weak = main_window.as_weak();
+        main_window.on_note_cancel(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.note_cancel(&ui));
+                ui.invoke_focus_viewport();
+            }
+        });
+    }
     main_window.on_redo(|| with_state(|state| state.redo()));
 
     {
@@ -4149,6 +4477,7 @@ mod tests {
             key_command("k", false, false),
             Some(KeyCommand::Mark(MarkupKind::StrikeOut))
         );
+        assert_eq!(key_command("n", false, false), Some(KeyCommand::NoteTool));
         assert_eq!(key_command("z", true, false), Some(KeyCommand::Undo));
         assert_eq!(key_command("Z", true, true), Some(KeyCommand::Redo));
         assert_eq!(key_command("y", true, false), Some(KeyCommand::Redo));
@@ -4163,7 +4492,7 @@ mod tests {
 
     #[test]
     fn tool_indices_round_trip() {
-        for index in 0..5 {
+        for index in 0..6 {
             assert_eq!(Tool::from_index(index).index(), index);
         }
         assert_eq!(Tool::from_index(99), Tool::Select);
