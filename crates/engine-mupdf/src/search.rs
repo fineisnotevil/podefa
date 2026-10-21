@@ -54,6 +54,7 @@ enum SearchCmd {
     },
     Lines {
         page: u32,
+        generation: u64,
     },
 }
 
@@ -117,9 +118,9 @@ impl SearchThread {
     }
 
     /// Asks for a page's text line boxes; answered ahead of a running search.
-    pub(crate) fn text_lines(&self, page: u32) {
+    pub(crate) fn text_lines(&self, page: u32, generation: u64) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(SearchCmd::Lines { page });
+            let _ = tx.send(SearchCmd::Lines { page, generation });
         }
     }
 
@@ -214,14 +215,18 @@ impl Searcher {
                 }
             }
             select @ SearchCmd::Select { .. } => self.select_latest(select),
-            SearchCmd::Lines { page } => self.send_lines(page),
+            SearchCmd::Lines { page, generation } => self.send_lines(page, generation),
         }
     }
 
     /// A page's text line boxes, from the same character cache selection uses.
-    fn send_lines(&mut self, page: u32) {
+    fn send_lines(&mut self, page: u32, generation: u64) {
         let lines = select::line_boxes(&self.page_chars(page));
-        let _ = self.events.send(EngineEvent::TextLines { page, lines });
+        let _ = self.events.send(EngineEvent::TextLines {
+            page,
+            generation,
+            lines,
+        });
     }
 
     /// Serves a selection, skipping to the newest one already waiting: during a drag only the
@@ -229,8 +234,12 @@ impl Searcher {
     fn select_latest(&mut self, mut latest: SearchCmd) {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
-                newer @ SearchCmd::Select { .. } => latest = newer,
-                SearchCmd::Lines { page } => self.send_lines(page),
+                newer @ SearchCmd::Select { .. } if self.pending.is_empty() => latest = newer,
+                SearchCmd::Lines { page, generation } if self.pending.is_empty() => {
+                    self.send_lines(page, generation)
+                }
+                // Once a new document is waiting, everything after it waits too: it is about
+                // that document, not the one still open here.
                 other => self.pending.push_back(other),
             }
         }
@@ -289,8 +298,12 @@ impl Searcher {
             }
             while let Ok(cmd) = self.rx.try_recv() {
                 match cmd {
-                    select @ SearchCmd::Select { .. } => self.select_latest(select),
-                    SearchCmd::Lines { page } => self.send_lines(page),
+                    select @ SearchCmd::Select { .. } if self.pending.is_empty() => {
+                        self.select_latest(select)
+                    }
+                    SearchCmd::Lines { page, generation } if self.pending.is_empty() => {
+                        self.send_lines(page, generation)
+                    }
                     other => self.pending.push_back(other),
                 }
             }

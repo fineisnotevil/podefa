@@ -160,7 +160,8 @@ pub enum EngineCmd {
     CancelSearch,
     /// The boxes of a page's text lines, so the app can tell whether the pointer is over text.
     /// Answered on the search thread, like `Select`.
-    TextLines { page: u32 },
+    /// `generation` is echoed back, so an answer about a previous document can be recognised.
+    TextLines { page: u32, generation: u64 },
     /// Select the text from `from` to `to` in a mode (Plan 0003, §4.5). Answered on the search
     /// thread, ahead of any search it is running; only the latest of a burst is computed.
     Select {
@@ -253,7 +254,11 @@ pub enum EngineEvent {
         hits: Vec<Vec<Rect>>,
     },
     /// A page's text line boxes, in page space ([`select::line_boxes`]).
-    TextLines { page: u32, lines: Vec<Rect> },
+    TextLines {
+        page: u32,
+        generation: u64,
+        lines: Vec<Rect>,
+    },
     /// A selection: each page's highlight rectangles and text, and the whole text to copy.
     Selection {
         generation: u64,

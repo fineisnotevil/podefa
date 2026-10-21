@@ -669,7 +669,9 @@ impl EngineHandle {
                             generation,
                         } => search.search(query, from_page, generation),
                         EngineCmd::CancelSearch => search.cancel(),
-                        EngineCmd::TextLines { page } => search.text_lines(page),
+                        EngineCmd::TextLines { page, generation } => {
+                            search.text_lines(page, generation)
+                        }
                         EngineCmd::Select {
                             from,
                             to,

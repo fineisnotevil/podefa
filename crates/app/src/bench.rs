@@ -1764,7 +1764,8 @@ impl Driver {
                 let step = self.step;
                 let (name, expected): (&'static str, String) = match step {
                     0 => {
-                        select_drag(ui, (20.0, 2), (600.0, 4));
+                        // The text starts at x = 54 pt; the drag starts on its first character.
+                        select_drag(ui, (55.0, 2), (600.0, 4));
                         ("drag lines 2-4", lines(2, 4))
                     }
                     1 => {
@@ -1782,6 +1783,37 @@ impl Driver {
                         select_click(ui, (94.0, 11), false);
                         select_click(ui, (94.0, 11), false);
                         ("triple-click line", line(11))
+                    }
+                    // The review's finding: a click or drag that starts away from the text selects
+                    // nothing, and the text cursor shows only over text.
+                    4 => {
+                        select_click(ui, (20.0, 11), false);
+                        ("click in the margin clears", String::new())
+                    }
+                    5 => {
+                        select_drag(ui, (20.0, 2), (600.0, 4));
+                        ("drag from the margin", String::new())
+                    }
+                    6 => {
+                        for (name, at, expected) in [
+                            ("cursor over text", (94.0, 9), true),
+                            ("cursor in the margin", (20.0, 9), false),
+                            ("cursor below the text", (94.0, 60), false),
+                        ] {
+                            let position = window_point(ui, at);
+                            ui.window()
+                                .dispatch_event(WindowEvent::PointerMoved { position });
+                            let got = ui.get_text_cursor();
+                            with_state(|state| {
+                                state.bench.nav_check(
+                                    name,
+                                    &format!("text_cursor={expected}"),
+                                    &format!("text_cursor={got}"),
+                                )
+                            });
+                        }
+                        self.step += 1;
+                        return false;
                     }
                     _ => {
                         self.settle();

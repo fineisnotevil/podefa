@@ -150,6 +150,8 @@ slint::slint! {
         // press is selecting (the Flickable stops panning until the finger lifts).
         in-out property <[HitView]> sel-rects;
         in-out property <bool> touch-selecting: false;
+        // Whether the pointer is over text: the text cursor shows only there.
+        in-out property <bool> text-cursor: false;
         // Where the viewport sits in the window, for scripted pointer input (bench only).
         out property <length> viewport-abs-x: viewport.absolute-position.x;
         out property <length> viewport-abs-y: viewport.absolute-position.y;
@@ -194,6 +196,8 @@ slint::slint! {
         // 3 double-click, 4 cancel; with shift and whether it is a touch.
         callback select_pointer(int, length, length, bool, bool);
         callback copy_selection();
+        // The pointer moved over the page without a button down, viewport-relative.
+        callback hover(length, length);
         callback find_open();
         callback find_changed(string);
         callback find_next();
@@ -625,7 +629,9 @@ slint::slint! {
                             }
                             return reject;
                         }
-                        mouse-cursor: MouseCursor.text;
+                        mouse-cursor: root.text-cursor ? MouseCursor.text : MouseCursor.default;
+                        changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
+                        changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.down) {
                                 viewport-keys.focus();
@@ -871,6 +877,10 @@ struct AppState {
     touch_down: Option<(f32, f32)>,
     long_press: slint::Timer,
     touch_selecting: bool,
+    /// Text line boxes of the pages near the view, to tell text from margins under the pointer
+    /// (Plan 0003 Phase 4 review), and the pages asked for and not answered yet.
+    text_lines: HashMap<u32, Vec<pdf_core::Rect>>,
+    lines_pending: HashSet<u32>,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -1228,6 +1238,35 @@ impl AppState {
         })
     }
 
+    /// A page's text line boxes arrived; one about a previous document, or a page that has left
+    /// the view since, is dropped.
+    fn apply_text_lines(&mut self, page: u32, generation: u64, lines: Vec<pdf_core::Rect>) {
+        if generation == self.doc_generation && self.lines_pending.remove(&page) {
+            self.text_lines.insert(page, lines);
+        }
+    }
+
+    /// Whether a page point is over text. A page whose lines have not arrived yet counts as no
+    /// text: the pointer then behaves as it does over a margin until they do.
+    fn on_text(&self, point: Option<PagePoint>) -> bool {
+        point.is_some_and(|p| {
+            self.text_lines
+                .get(&p.page)
+                .is_some_and(|lines| pdf_core::select::on_text(lines, p.x, p.y))
+        })
+    }
+
+    /// The pointer moved without a button: show the text cursor only over text.
+    fn hover(&mut self, ui: &MainWindow, x: f32, y: f32) {
+        if self.sel_pressed || self.touch_selecting {
+            return;
+        }
+        let over = self.on_text(self.page_point(ui, x, y));
+        if ui.get_text_cursor() != over {
+            ui.set_text_cursor(over);
+        }
+    }
+
     /// Pointer input on the page (Plan 0003, §4.5): a mouse drag selects characters, a
     /// double-click a word, a triple-click a line, Shift+click extends; a touch pans unless it
     /// rests for [`LONG_PRESS_MS`], which starts a word selection that the finger then extends.
@@ -1258,8 +1297,16 @@ impl AppState {
             }
             0 => {
                 let Some(point) = point else { return };
+                let extend = shift && self.sel_anchor.is_some();
+                if !extend && !self.on_text(Some(point)) {
+                    // A click in a margin, between paragraphs or beside the page selects nothing:
+                    // it only clears what was selected.
+                    self.sel_pressed = false;
+                    self.clear_selection(ui);
+                    return;
+                }
                 self.sel_pressed = true;
-                if shift && self.sel_anchor.is_some() {
+                if extend {
                     self.sel_focus = Some(point);
                     self.request_selection();
                     return;
@@ -1309,7 +1356,9 @@ impl AppState {
             }
             // Double-click: a word.
             3 => {
-                let Some(point) = point else { return };
+                let Some(point) = point.filter(|p| self.on_text(Some(*p))) else {
+                    return;
+                };
                 self.last_double = Some(Instant::now());
                 self.sel_mode = SelectMode::Words;
                 self.sel_anchor = Some(point);
@@ -1334,7 +1383,7 @@ impl AppState {
         if self.touch_down.is_none() {
             return;
         }
-        let Some(point) = self.page_point(ui, x, y) else {
+        let Some(point) = self.page_point(ui, x, y).filter(|p| self.on_text(Some(*p))) else {
             return;
         };
         self.touch_selecting = true;
@@ -1767,6 +1816,20 @@ impl AppState {
     /// 0002, §4.3).
     fn update_pages(&mut self, ui: &MainWindow) {
         let near = self.near_pages(ui);
+        // The text line boxes follow the same pages: asked for once, dropped when the page leaves.
+        self.text_lines
+            .retain(|page, _| near.contains(&(*page as usize)));
+        self.lines_pending
+            .retain(|page| near.contains(&(*page as usize)));
+        for page in near.clone() {
+            let page = page as u32;
+            if !self.text_lines.contains_key(&page) && self.lines_pending.insert(page) {
+                let _ = self.cmd_tx.send(EngineCmd::TextLines {
+                    page,
+                    generation: self.doc_generation,
+                });
+            }
+        }
         let mut wanted = HashSet::new();
         let mut rows = Vec::with_capacity(near.len());
         for page in near {
@@ -2005,6 +2068,8 @@ impl AppState {
         self.doc_generation += 1;
         self.cancel_search();
         self.clear_selection(ui);
+        self.text_lines.clear();
+        self.lines_pending.clear();
         ui.set_find_visible(false);
         ui.set_find_text(SharedString::new());
         ui.set_find_counter(SharedString::new());
@@ -2518,6 +2583,8 @@ fn main() -> Result<(), slint::PlatformError> {
             touch_down: None,
             long_press: slint::Timer::default(),
             touch_selecting: false,
+            text_lines: HashMap::new(),
+            lines_pending: HashSet::new(),
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -2616,8 +2683,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 } => {
                     with_state(|state| state.apply_selection(&ui, generation, pages, text));
                 }
-                // The hover and click hit-test arrives with the next commit.
-                EngineEvent::TextLines { .. } => {}
+                EngineEvent::TextLines {
+                    page,
+                    generation,
+                    lines,
+                } => {
+                    with_state(|state| state.apply_text_lines(page, generation, lines));
+                }
                 EngineEvent::Outline { items } => {
                     with_state(|state| state.set_outline(items));
                 }
@@ -2957,6 +3029,15 @@ fn main() -> Result<(), slint::PlatformError> {
         main_window.on_select_pointer(move |kind, x, y, shift, touch| {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.select_pointer(&ui, kind, x, y, shift, touch));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_hover(move |x, y| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.hover(&ui, x, y));
             }
         });
     }

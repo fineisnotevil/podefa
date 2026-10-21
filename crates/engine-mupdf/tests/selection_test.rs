@@ -158,9 +158,19 @@ fn words_and_lines_snap_and_a_drag_inside_a_word_selects_part_of_it() {
 #[test]
 fn a_page_reports_one_box_per_text_line() {
     let (handle, rx) = open(1);
-    handle.send(EngineCmd::TextLines { page: 0 }).expect("send");
+    handle
+        .send(EngineCmd::TextLines {
+            page: 0,
+            generation: 4,
+        })
+        .expect("send");
     let lines = loop {
-        if let EngineEvent::TextLines { page: 0, lines } = next(&rx) {
+        if let EngineEvent::TextLines {
+            page: 0,
+            generation: 4,
+            lines,
+        } = next(&rx)
+        {
             break lines;
         }
     };
