@@ -2740,6 +2740,7 @@ name = "mupdf"
 version = "0.8.0"
 dependencies = [
  "bitflags 2.13.2",
+ "cc",
  "font-kit",
  "mupdf-sys",
  "once_cell",
