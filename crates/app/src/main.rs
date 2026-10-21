@@ -1502,8 +1502,13 @@ impl AppState {
                     self.sel_mode = SelectMode::Lines;
                     self.request_selection();
                 } else {
-                    // A plain click starts a new selection and, until the drag moves, clears it.
+                    // A plain click starts a new selection and, until the drag moves, clears it. A
+                    // new generation, so an answer still on its way for the old one cannot bring it
+                    // back.
                     self.sel_mode = SelectMode::Chars;
+                    self.sel_generation += 1;
+                    self.sel_answered = self.sel_generation;
+                    self.pending_mark = None;
                     self.show_selection(ui, Vec::new(), String::new());
                 }
             }
@@ -1558,6 +1563,12 @@ impl AppState {
             // Up or cancel.
             _ => {
                 let was_selecting = self.sel_pressed || self.touch_selecting;
+                // A finger that came up before the long press and without panning is a tap: like a
+                // click, it clears the selection.
+                if kind == 1 && touch && self.touch_down.is_some() && !self.touch_selecting {
+                    self.clear_selection(ui);
+                    self.select_annotation(ui, None);
+                }
                 if kind == 1 {
                     if let Some(annot) = self.annot_candidate.take() {
                         self.clear_selection(ui);
@@ -1625,10 +1636,11 @@ impl AppState {
         }
     }
 
+    /// Shows a selection's rectangles. The model is diffed against the rows on screen, so an empty
+    /// selection clears them (Plan 0004 Phase 1 review).
     fn show_selection(&mut self, ui: &MainWindow, pages: Vec<PageSelection>, text: String) {
         self.sel_pages = pages;
         self.sel_text = text;
-        self.sel_rows.clear();
         self.update_selection(ui);
     }
 

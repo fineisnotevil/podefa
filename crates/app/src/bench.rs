@@ -1923,8 +1923,15 @@ impl Driver {
             }
             Phase::Select => {
                 if let Some((step, expected)) = self.nav_expect.take() {
+                    // The text and the highlight on screen: an empty selection must show no rows.
                     let mut got = String::new();
                     with_state(|state| got = state.sel_text.clone());
+                    let rows = ui.get_sel_rects().row_count();
+                    let shown = |text: &str| {
+                        format!("{text:?} rows={}", if text.is_empty() { "0" } else { ">0" })
+                    };
+                    let got = format!("{got:?} rows={}", if rows == 0 { "0" } else { ">0" });
+                    let expected = shown(&expected);
                     with_state(|state| state.bench.nav_check(step, &expected, &got));
                 }
                 // `select_*p.pdf`: page p, line l reads "p{p}l{l} alpha beta", baselines 12 pt
@@ -1965,6 +1972,14 @@ impl Driver {
                         ("drag from the margin", String::new())
                     }
                     6 => {
+                        select_drag(ui, (55.0, 2), (600.0, 4));
+                        ("drag lines 2-4 again", lines(2, 4))
+                    }
+                    7 => {
+                        select_click(ui, (94.0, 12), false);
+                        ("click on text clears", String::new())
+                    }
+                    8 => {
                         for (name, at, expected) in [
                             ("cursor over text", (94.0, 9), true),
                             ("cursor in the margin", (20.0, 9), false),
