@@ -40,7 +40,10 @@ v0.1 copies selected text. Three things had to be decided:
 3. **A mouse drag selects; touch pans.** The `Flickable`'s `mouse-drag-pan-enabled` is off, so a mouse
    drag selects text (double-click: a word, triple-click: a line, Shift+click: extend), while touch
    still pans; a 500 ms long press starts a selection on touch, during which the `Flickable` stops
-   panning. Mouse and touch are told apart by `PointerEvent.touch_finger_id`.
+   panning. Mouse and touch are told apart by `PointerEvent.touch_finger_id`. A selection starts
+   only **on text**: the app keeps one box per text line for the pages near the view and shows the
+   text cursor, or starts a selection, only within 3 pt of one (added after the maintainer's review,
+   2026-10-21); elsewhere a press clears the selection.
 
 ## Consequences
 

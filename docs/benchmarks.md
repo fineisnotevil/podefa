@@ -991,3 +991,15 @@ target\release\app.exe target\tmp\select_3p.pdf --bench-select --bench-step-ms 4
 | triple-click on line 11 | line 11 | PASS |
 
 Ctrl+C is not scripted, so that a run never overwrites the user's clipboard; it is a manual check.
+
+After the review fix (`2e4df61`, the first drag now starting on the first character of its line):
+
+| Step | Expected | Result |
+| :--- | :--- | :--- |
+| the four steps above | as above | PASS x4 |
+| click in the left margin (x = 20 pt, text starts at 54) | selection cleared | PASS |
+| drag starting in the margin | nothing selected | PASS |
+| pointer over text / in the margin / below the text | text cursor / arrow / arrow | PASS x3 |
+
+9 of 9. With the off-text guard removed, the margin drag selects `p0l2 alpha beta` and the run ends
+`VERDICT FAIL`, exit code 1 (mutation reverted).
