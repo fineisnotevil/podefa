@@ -120,10 +120,11 @@ pub struct Cfg {
     /// `--bench-edit-save`: save in place after the edits and report `t_save`. It writes to the
     /// document, so run it on a scratch copy.
     pub edit_save: bool,
-    /// `--bench-edit-burst K`: K edits per tick instead of one drag, so the tiles the first edit
-    /// asks for are still in flight when the next one changes the page again (row W). A burst
-    /// sends the edits itself, one line box of page 1 each: drags would need the selection's
-    /// answer between them, which one tick does not wait for.
+    /// `--bench-edit-burst K`: K edits per tick, sent directly instead of made by a drag, one line
+    /// box of page 1 each - the page's text line when it has one, else a box where the line
+    /// would be, so a document without text (`large_200p.pdf`, row R) can be edited too. Above
+    /// one, the tiles the first edit asks for are still in flight when the next one changes the
+    /// page again (row W). 0, the default, edits by dragging over the text.
     pub edit_burst: u32,
 }
 
@@ -155,7 +156,7 @@ impl Default for Cfg {
             edits: 0,
             edit_pan_px: 0.0,
             edit_save: false,
-            edit_burst: 1,
+            edit_burst: 0,
         }
     }
 }
@@ -270,7 +271,7 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
                 consumed = 2;
             }
             "--bench-edit-burst" => {
-                cfg.edit_burst = number.unwrap_or(2.0).max(1.0) as u32;
+                cfg.edit_burst = number.unwrap_or(2.0).max(0.0) as u32;
                 consumed = 2;
             }
             "--bench-edit-save" => {
@@ -2003,22 +2004,32 @@ impl Driver {
                 if self.step < edits {
                     // Lines 2..=41 of page 0, starting on the line's first character.
                     let burst = self.cfg.edit_burst.min(edits - self.step);
-                    if burst <= 1 {
+                    if burst == 0 {
                         let line = 2 + (self.step as usize % 40);
                         select_drag(ui, (55.0, line), (600.0, line));
                     } else {
                         with_state(|state| {
                             for k in 0..burst {
                                 let line = 2 + ((self.step + k) as usize % 40);
-                                let Some(rect) =
-                                    state.text_lines.get(&0).and_then(|lines| lines.get(line))
-                                else {
-                                    continue;
-                                };
+                                // Where `window_point` puts line `line`: baselines 12 pt apart
+                                // from 42 pt below the top.
+                                let rect = state
+                                    .text_lines
+                                    .get(&0)
+                                    .and_then(|lines| lines.get(line))
+                                    .copied()
+                                    .unwrap_or_else(|| {
+                                        pdf_core::Rect::new(
+                                            54.0,
+                                            42.0 + 12.0 * line as f32 - 10.0,
+                                            246.0,
+                                            12.0,
+                                        )
+                                    });
                                 let op = pdf_core::annot::EditOp::AddMarkup {
                                     page: 0,
                                     kind: pdf_core::annot::MarkupKind::Highlight,
-                                    rects: vec![*rect],
+                                    rects: vec![rect],
                                     colour: pdf_core::annot::PALETTE[0],
                                     author: None,
                                 };
@@ -2026,7 +2037,7 @@ impl Driver {
                             }
                         });
                     }
-                    self.step += burst - 1;
+                    self.step += burst.max(1) - 1;
                     if self.cfg.edit_pan_px > 0.0 {
                         // Down and back up in turn, so page 1 stays where the next drag lands
                         // while every edit still races a scroll's tile requests.

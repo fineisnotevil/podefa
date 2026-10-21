@@ -438,3 +438,42 @@ fn a_document_that_is_not_a_pdf_is_view_only() {
     let (_, result) = save(&handle, &rx, None);
     assert_eq!(result, Err(SaveError::NotEditable));
 }
+
+#[test]
+fn a_file_mupdf_repaired_needs_save_as_and_its_copy_saves_in_place() {
+    // `large_200p.pdf`'s xref is repaired at open, so MuPDF cannot append to it.
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("large_200p.pdf");
+    let path = scratch("edit_repaired.pdf");
+    let copy = scratch("edit_repaired_copy.pdf");
+    let _ = std::fs::remove_file(&copy);
+    std::fs::copy(&fixture, &path).expect("copy fixture");
+    let original = std::fs::read(&path).expect("read");
+    let (handle, rx) = EngineHandle::spawn();
+    assert!(open(&handle, &rx, &path));
+
+    let mark = EditOp::AddMarkup {
+        page: 0,
+        kind: MarkupKind::Highlight,
+        rects: vec![MARGIN],
+        colour: RED,
+        author: None,
+    };
+    assert_eq!(edit(&handle, &rx, mark.clone(), 1).result, Ok(()));
+    let (_, result) = save(&handle, &rx, None);
+    assert_eq!(result, Err(SaveError::NeedsSaveAs));
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        original,
+        "nothing written"
+    );
+
+    let (_, result) = save(&handle, &rx, Some(copy.clone()));
+    result.expect("save as");
+    assert_eq!(edit(&handle, &rx, mark, 2).result, Ok(()));
+    let (saved_to, result) = save(&handle, &rx, None);
+    assert_eq!(saved_to, copy);
+    result.expect("the copy MuPDF wrote can be appended to");
+}
