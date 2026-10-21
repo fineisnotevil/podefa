@@ -1119,3 +1119,36 @@ click clears the selection's highlight), same commands, 2026-10-21:
 No late tile arrived in this W run: whether one does depends on how the bursts fall against the
 workers, which is why the earlier runs saw 5 and 2. `--bench-select` with the highlight rows
 checked: 11 of 11 (8 of 11 with the old `show_selection`).
+
+### 10.4 Phase 2: undo and redo (row S)
+
+Row S is a test (`crates/engine-mupdf/tests/undo_test.rs`):
+
+- **Setup:** 50 edits from a fixed linear congruential sequence over a generated five-page text
+  document that already has two annotations. The mix is 36 markup (9 highlight, 8 underline, 9
+  strike-out, 10 squiggly), 9 deletes and 5 recolours.
+- **Undo and redo:** each step is compared with a snapshot of every page's annotations, ids
+  included. All 50 undo back to the opened state and redo forward to the last edit. **Pass.**
+- **Save after undo:** 20 edits, 8 undone, saved in place. The reopened file has the undone
+  annotations (compared without object numbers), and the open document can still redo. **Pass.**
+- **Mutation check:** without the journal operations around an edit, MuPDF refuses the change and
+  3 of the 5 tests fail.
+- **Android:** the same test passes 5 of 5 on the Galaxy A34 (Android 16), built with NDK r28c on
+  the Debian mini PC.
+
+Through a real window, release build of `3cac9de`, 2026-10-22, the §1 machine:
+
+```powershell
+target\release\app.exe target\tmp\edit_bench.pdf --bench-edit 20 --bench-step-ms 400 --bench-settle-ms 1500 --bench-edit-save
+```
+
+7 of 7 checks pass:
+
+- The 20 highlights.
+- The click that selects one, the recolour and the Delete.
+- **Ctrl+Z** brings the deleted annotation back (20 again, `can_redo=true`).
+- **Ctrl+Y** removes it again (19, `can_redo=false`).
+- The save leaves nothing unsaved.
+
+`t_edit` median 4 ms, worst 19 ms (n = 22, edits only). `t_save` 0 ms (17,153 bytes; below the
+millisecond the harness reports).
