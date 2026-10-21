@@ -361,8 +361,20 @@ crates (below); the app crate has not been built for either:
   - With `CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-lc++_static -C link-arg=-lc++abi"`,
     all **15 test executables link** as AArch64 PIE binaries. Their dynamic dependencies are
     `libc`, `libm`, `libdl`, `liblog` and `libstdc++`, all system libraries on Android.
-  - **Not run:** no Android device or emulator was attached. Running them needs `adb` and a phone,
-    or an emulator. On an x86_64 emulator that means building `x86_64-linux-android` instead.
+  - **Run on a phone, 2026-10-22: 124 of 124 tests pass.**
+    - Device: Samsung Galaxy A34 (SM-A346E), Android 16 (API 36), arm64-v8a.
+    - Method: the test binaries were pushed with `adb` and run from `/data/local/tmp`.
+    - Per binary: `pdf_core` 82; `edit_test` 7; `tile_render_test` 8; `pool_test` 5;
+      `integration_test` 5; `search_test` 4; `selection_test` 4; `annotation_render_test` 3;
+      `sidebar_test` 3; `engine_mupdf` 2; `abort_safety_test` 1.
+    - The 7 ignored measurement tests were not run.
+    - Paths: the tests read fixtures and write scratch files at absolute paths fixed at build time
+      (`CARGO_MANIFEST_DIR`, `CARGO_TARGET_TMPDIR`). So the build ran from a checkout at
+      `/data/local/tmp/fa-pdf` on the build host, the same path the phone uses. The fixtures went
+      to that path too, plus `target/aarch64-linux-android/tmp`, which is where a cross build puts
+      `CARGO_TARGET_TMPDIR` instead of `target/tmp`.
+    - Notable: `edit_test` includes the in-place incremental save, which therefore works on
+      Android's file system as well. `abort_safety_test` took 19 s on the phone.
 
   **To do in the mobile plan:**
   - Make the libc++ link part of the build, not an environment variable: a `build.rs` line in
@@ -389,7 +401,8 @@ crates (below); the app crate has not been built for either:
 A plan of its own when the maintainer starts mobile work:
 
 - **Phase 0:**
-  1. Run the library tests on a device or emulator (they already build and link, above).
+  1. Script the device run above (build at the device path, push, run) or move the tests to
+     relative paths, so it is one command.
   2. Build the app with `rfd`/`arboard` behind a desktop `cfg`, an `android_main` entry point and
      Slint's `backend-android-activity-06`.
   3. Add an Android CI job (GitHub's Ubuntu runners ship an NDK).
