@@ -13,7 +13,8 @@
 edition = "2021"
 name = "mupdf"
 version = "0.8.0"
-build = false
+# fa-pdf: the undo-journal wrappers (journal/journal.c, ADR 0008). Not in the published crate.
+build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false
@@ -148,8 +149,10 @@ optional = true
 version = "0.8.0"
 optional = true
 
+# fa-pdf: pinned exactly, because journal/include holds the headers of the MuPDF this version
+# builds (1.27.2) and src/pdf/journal.rs refuses to compile against another.
 [dependencies.mupdf-sys]
-version = "0.8.0"
+version = "=0.8.0"
 features = ["zerocopy"]
 default-features = false
 
@@ -167,6 +170,9 @@ optional = true
 [dependencies.zerocopy]
 version = "0.8.17"
 features = ["derive"]
+
+[build-dependencies.cc]
+version = "1"
 
 [dev-dependencies.crossbeam-utils]
 version = "0.8.1"

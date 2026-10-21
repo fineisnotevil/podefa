@@ -33,3 +33,10 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 FINE Association <su@fa.org.tr>"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
 
+
+# MuPDF 1.27.2's headers, copied from mupdf-sys 0.8.0 for the undo-journal wrappers (ADR 0008).
+[[annotations]]
+path = "patches/mupdf/journal/include/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2004-2025 Artifex Software, Inc."
+SPDX-License-Identifier = "AGPL-3.0-or-later"
