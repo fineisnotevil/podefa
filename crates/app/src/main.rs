@@ -15,7 +15,7 @@
 //! to that window's start.
 
 use engine_mupdf::EngineHandle;
-use pdf_core::OutlineItem;
+use pdf_core::annot::{AnnotInfo, EditOp, MarkupKind, PALETTE, SaveState};
 use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
@@ -29,6 +29,7 @@ use pdf_core::{
     TileScheduler, ZOOM_DEFAULT_MILLI, ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli,
     zoom_in_milli, zoom_out_milli,
 };
+use pdf_core::{OutlineItem, SaveError};
 use slint::platform::Key;
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel,
@@ -102,7 +103,8 @@ slint::slint! {
     }
 
     export component MainWindow inherits Window {
-        title: root.doc-title == "" ? "PODEFA - PDF Viewer" : root.doc-title + " - PODEFA";
+        title: root.doc-title == "" ? "PODEFA - PDF Viewer"
+            : (root.dirty ? "*" : "") + root.doc-title + " - PODEFA";
         init => {
             root.apply-theme();
             viewport-keys.focus();
@@ -152,6 +154,17 @@ slint::slint! {
         in-out property <bool> touch-selecting: false;
         // Whether the pointer is over text: the text cursor shows only there.
         in-out property <bool> text-cursor: false;
+
+        // Annotating (Plan 0004 Phase 1): whether the document can be edited and has unsaved
+        // changes, the tool (0 select, 1 highlight, 2 underline, 3 strike-out, 4 squiggly), the
+        // colour and its swatches, and the outline of the selected annotation.
+        in-out property <bool> editable: false;
+        in-out property <bool> dirty: false;
+        in-out property <int> tool: 0;
+        in-out property <int> colour-index: 0;
+        in-out property <[color]> swatches;
+        in-out property <[HitView]> annot-sel-rects;
+        in-out property <bool> has-annot-selection: false;
         // Where the viewport sits in the window, for scripted pointer input (bench only).
         out property <length> viewport-abs-x: viewport.absolute-position.x;
         out property <length> viewport-abs-y: viewport.absolute-position.y;
@@ -196,6 +209,11 @@ slint::slint! {
         // 3 double-click, 4 cancel; with shift and whether it is a touch.
         callback select_pointer(int, length, length, bool, bool);
         callback copy_selection();
+        callback choose_tool(int);
+        callback choose_colour(int);
+        callback delete_annotation();
+        callback save();
+        callback save_as();
         // The pointer moved over the page without a button down, viewport-relative.
         callback hover(length, length);
         callback find_open();
@@ -243,6 +261,18 @@ slint::slint! {
                         activated => { root.open_recent(index); }
                     }
                 }
+                MenuItem {
+                    title: "Save";
+                    shortcut: @keys(Control + S);
+                    enabled: root.editable;
+                    activated => { root.save(); }
+                }
+                MenuItem {
+                    title: "Save As...";
+                    shortcut: @keys(Control + Shift + S);
+                    enabled: root.editable;
+                    activated => { root.save_as(); }
+                }
                 MenuSeparator {}
                 MenuItem {
                     title: "Quit";
@@ -261,6 +291,12 @@ slint::slint! {
                     title: "Find...";
                     shortcut: @keys(Control + F);
                     activated => { root.find_open(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Delete Annotation";
+                    enabled: root.has-annot-selection;
+                    activated => { root.delete_annotation(); }
                 }
             }
             Menu {
@@ -379,6 +415,58 @@ slint::slint! {
                     vertical-alignment: center;
                     min-width: 70px;
                 }
+            }
+
+            // The tool strip (Plan 0004, §4.2): with text selected a markup button marks it; with
+            // nothing selected it stays on, so every drag over text marks. Esc goes back to Select.
+            if root.editable : HorizontalLayout {
+                spacing: 6px;
+                height: 30px;
+                Button {
+                    text: "Select";
+                    primary: root.tool == 0;
+                    clicked => { root.choose_tool(0); }
+                }
+                Button {
+                    text: "Highlight (H)";
+                    primary: root.tool == 1;
+                    clicked => { root.choose_tool(1); }
+                }
+                Button {
+                    text: "Underline (U)";
+                    primary: root.tool == 2;
+                    clicked => { root.choose_tool(2); }
+                }
+                Button {
+                    text: "Strike-out (K)";
+                    primary: root.tool == 3;
+                    clicked => { root.choose_tool(3); }
+                }
+                Button {
+                    text: "Squiggly";
+                    primary: root.tool == 4;
+                    clicked => { root.choose_tool(4); }
+                }
+                Rectangle { width: 6px; }
+                for swatch[index] in root.swatches : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 4px;
+                        background: swatch;
+                        border-width: index == root.colour-index ? 2px : 1px;
+                        border-color: index == root.colour-index ? Palette.foreground : Palette.border;
+                        TouchArea { clicked => { root.choose_colour(index); } }
+                    }
+                }
+                Rectangle { width: 6px; }
+                Button {
+                    text: "Delete";
+                    enabled: root.has-annot-selection;
+                    clicked => { root.delete_annotation(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
             }
 
             // The find bar: Enter / F3 next, Shift+Enter / Shift+F3 previous, Esc closes.
@@ -616,6 +704,15 @@ slint::slint! {
                         background: rgba(37, 99, 235, 0.35);
                     }
 
+                    // The selected annotation's bounds.
+                    for annot in root.annot-sel-rects : Rectangle {
+                        x: annot.x - 2px; y: annot.y - 2px;
+                        width: annot.w + 4px; height: annot.h + 4px;
+                        border-width: 2px;
+                        border-radius: 2px;
+                        border-color: rgba(37, 99, 235, 0.9);
+                    }
+
                     // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
                     // children first, so this area - kept over the viewport, not the canvas -
                     // sees them; without ctrl it rejects them and the Flickable scrolls.
@@ -800,6 +897,54 @@ fn to_image(bitmap: &Bitmap) -> Image {
     Image::from_rgb8(buffer)
 }
 
+/// What a press on the page does (Plan 0004, §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    /// Select text, or an annotation by clicking it.
+    Select,
+    /// Select text, and mark it with this markup when the drag ends.
+    Markup(MarkupKind),
+}
+
+impl Tool {
+    /// The tool strip's index for the tool, as the markup's `tool` property holds it.
+    fn index(self) -> i32 {
+        match self {
+            Tool::Select => 0,
+            Tool::Markup(MarkupKind::Highlight) => 1,
+            Tool::Markup(MarkupKind::Underline) => 2,
+            Tool::Markup(MarkupKind::StrikeOut) => 3,
+            Tool::Markup(MarkupKind::Squiggly) => 4,
+        }
+    }
+
+    fn from_index(index: i32) -> Self {
+        match index {
+            1 => Tool::Markup(MarkupKind::Highlight),
+            2 => Tool::Markup(MarkupKind::Underline),
+            3 => Tool::Markup(MarkupKind::StrikeOut),
+            4 => Tool::Markup(MarkupKind::Squiggly),
+            _ => Tool::Select,
+        }
+    }
+}
+
+/// What happens once the document is saved, or once the user chose not to save it (Plan 0004,
+/// §4.4): the action that asked "save changes?" first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AfterSave {
+    Quit,
+    Open(PathBuf),
+    /// Show the file dialog, then open what it returns.
+    Pick,
+}
+
+/// What a `Saved` event leaves for the caller to do outside the state, where a modal dialog may run.
+enum SavedNext {
+    Then(AfterSave),
+    SaveAs,
+}
+
 /// One page row as last written to the model: page index and canvas rect in logical pixels, and
 /// whether it carried a base layer. Compared before a write, so a scroll that keeps the same pages
 /// near the viewport does not touch the model.
@@ -881,6 +1026,34 @@ struct AppState {
     /// (Plan 0003 Phase 4 review), and the pages asked for and not answered yet.
     text_lines: HashMap<u32, Vec<pdf_core::Rect>>,
     lines_pending: HashSet<u32>,
+    /// Annotating (Plan 0004 Phase 1): whether the open document can be edited, the file it is
+    /// saved to, and whether that file has every edit.
+    editable: bool,
+    doc_path: Option<PathBuf>,
+    save_state: SaveState,
+    saving: bool,
+    after_save: Option<AfterSave>,
+    tool: Tool,
+    /// Index into [`PALETTE`].
+    colour: usize,
+    next_edit_id: u64,
+    /// Each page's revision as the engine last reported it; a tile, base layer or thumbnail drawn
+    /// from an older one is dropped (Plan 0004, §4.1).
+    page_revs: HashMap<u32, u32>,
+    /// The annotations of the pages near the view, and the pages asked for and not answered yet.
+    annots: HashMap<u32, Vec<AnnotInfo>>,
+    annots_pending: HashSet<u32>,
+    /// The selected annotation as `(page, id)`, and the one under the press that a click without
+    /// a drag will select.
+    selected_annot: Option<(u32, u32)>,
+    annot_candidate: Option<(u32, u32)>,
+    press_at: (f32, f32),
+    annot_sel_model: Rc<VecModel<HitView>>,
+    annot_sel_rows: Vec<(f32, f32, f32, f32, bool)>,
+    /// The selection generation the engine answered last, and a markup waiting for the answer to
+    /// the newest one.
+    sel_answered: u64,
+    pending_mark: Option<MarkupKind>,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -1043,6 +1216,7 @@ impl AppState {
         self.update_pages(ui);
         self.update_hits(ui);
         self.update_selection(ui);
+        self.update_annot_selection(ui);
 
         let (_, view_h) = self.view_size(ui);
         if let Some(page) = self.layout.page_near(self.pos.1 + view_h / 2.0) {
@@ -1298,6 +1472,13 @@ impl AppState {
             0 => {
                 let Some(point) = point else { return };
                 let extend = shift && self.sel_anchor.is_some();
+                // An annotation under the press is selected if the button comes up without a drag
+                // (Plan 0004, §4.2); a press anywhere else drops the annotation selection.
+                self.press_at = (x, y);
+                self.annot_candidate = if extend { None } else { self.annot_at(point) };
+                if self.annot_candidate.is_none() {
+                    self.select_annotation(ui, None);
+                }
                 if !extend && !self.on_text(Some(point)) {
                     // A click in a margin, between paragraphs or beside the page selects nothing:
                     // it only clears what was selected.
@@ -1338,6 +1519,12 @@ impl AppState {
                     self.touch_down = None;
                     return;
                 }
+                if (x - self.press_at.0).abs() > TOUCH_SLOP_LOGICAL_PX
+                    || (y - self.press_at.1).abs() > TOUCH_SLOP_LOGICAL_PX
+                {
+                    // A drag, not a click: it selects text, not the annotation under it.
+                    self.annot_candidate = None;
+                }
                 if !(self.sel_pressed || self.touch_selecting) {
                     return;
                 }
@@ -1364,9 +1551,22 @@ impl AppState {
                 self.sel_anchor = Some(point);
                 self.sel_focus = Some(point);
                 self.request_selection();
+                if let Tool::Markup(kind) = self.tool {
+                    self.pending_mark = Some(kind);
+                }
             }
             // Up or cancel.
             _ => {
+                let was_selecting = self.sel_pressed || self.touch_selecting;
+                if kind == 1 {
+                    if let Some(annot) = self.annot_candidate.take() {
+                        self.clear_selection(ui);
+                        self.select_annotation(ui, Some(annot));
+                    } else if was_selecting && let Tool::Markup(markup) = self.tool {
+                        self.mark_when_answered(ui, markup);
+                    }
+                }
+                self.annot_candidate = None;
                 self.sel_pressed = false;
                 self.long_press.stop();
                 self.touch_down = None;
@@ -1417,7 +1617,11 @@ impl AppState {
         text: String,
     ) {
         if generation == self.sel_generation {
+            self.sel_answered = generation;
             self.show_selection(ui, pages, text);
+            if let Some(kind) = self.pending_mark.take() {
+                self.mark_selection(ui, kind);
+            }
         }
     }
 
@@ -1431,6 +1635,9 @@ impl AppState {
     /// No selection (a new document, Esc).
     fn clear_selection(&mut self, ui: &MainWindow) {
         self.sel_generation += 1;
+        // Nothing is asked for, so nothing is awaited.
+        self.sel_answered = self.sel_generation;
+        self.pending_mark = None;
         self.sel_anchor = None;
         self.sel_focus = None;
         self.sel_pressed = false;
@@ -1475,6 +1682,305 @@ impl AppState {
             .collect();
         self.sel_model.set_vec(views);
         self.sel_rows = rows;
+    }
+
+    /// The annotation under a page point, as `(page, id)`.
+    fn annot_at(&self, point: PagePoint) -> Option<(u32, u32)> {
+        let items = self.annots.get(&point.page)?;
+        pdf_core::annot::hit(items, point.x, point.y).map(|item| (point.page, item.id))
+    }
+
+    /// Selects an annotation (or none) and outlines it.
+    fn select_annotation(&mut self, ui: &MainWindow, annot: Option<(u32, u32)>) {
+        if self.selected_annot == annot {
+            return;
+        }
+        self.selected_annot = annot;
+        ui.set_has_annot_selection(annot.is_some());
+        self.update_annot_selection(ui);
+    }
+
+    /// The selected annotation's outline, placed like the selection's rectangles.
+    fn update_annot_selection(&mut self, ui: &MainWindow) {
+        let mut rows = Vec::new();
+        if let Some((page, id)) = self.selected_annot
+            && self.near_pages(ui).contains(&(page as usize))
+            && let Some(slot) = self.layout.slot(page as usize)
+            && let Some(item) = self
+                .annots
+                .get(&page)
+                .and_then(|items| items.iter().find(|item| item.id == id))
+        {
+            let s = self.scale_milli as f64 / 1000.0;
+            let sf = self.sf() as f32;
+            let rect = item.rect;
+            rows.push((
+                self.canvas_x(slot.x as f64 + rect.x as f64 * s),
+                self.canvas_y(slot.y as f64 + rect.y as f64 * s),
+                (rect.width as f64 * s) as f32 / sf,
+                (rect.height as f64 * s) as f32 / sf,
+                false,
+            ));
+        }
+        if rows == self.annot_sel_rows {
+            return;
+        }
+        let views: Vec<HitView> = rows
+            .iter()
+            .map(|&(x, y, w, h, current)| HitView {
+                x,
+                y,
+                w,
+                h,
+                current,
+            })
+            .collect();
+        self.annot_sel_model.set_vec(views);
+        self.annot_sel_rows = rows;
+    }
+
+    /// A page's annotations arrived; one about a previous document, or a page that has left the
+    /// view since, is dropped.
+    fn apply_annotations(
+        &mut self,
+        ui: &MainWindow,
+        page: u32,
+        generation: u64,
+        items: Vec<AnnotInfo>,
+    ) {
+        if generation == self.doc_generation && self.annots_pending.remove(&page) {
+            self.annots.insert(page, items);
+            self.update_annot_selection(ui);
+        }
+    }
+
+    fn page_revision(&self, page: u32) -> u32 {
+        self.page_revs.get(&page).copied().unwrap_or(0)
+    }
+
+    /// An edit changed a page (Plan 0004, §4.1): everything drawn of it is out of date. Its tiles
+    /// on screen stay until their new pixels arrive, so the page never blanks; its base layer
+    /// and thumbnail are asked for again.
+    fn page_changed(
+        &mut self,
+        ui: &MainWindow,
+        generation: u64,
+        page: u32,
+        revision: u32,
+        items: Vec<AnnotInfo>,
+    ) {
+        if generation != self.doc_generation || revision <= self.page_revision(page) {
+            return;
+        }
+        self.page_revs.insert(page, revision);
+        self.annots_pending.remove(&page);
+        if let Some((selected_page, id)) = self.selected_annot
+            && selected_page == page
+            && !items.iter().any(|item| item.id == id)
+        {
+            self.select_annotation(ui, None);
+        }
+        self.annots.insert(page, items);
+        let actions = self.scheduler.invalidate_page(page);
+        self.apply(ui, actions);
+        if self.bases.contains_key(&page) || self.base_pending.contains(&page) {
+            self.base_pending.insert(page);
+            self.request_base(page);
+        }
+        if self.thumb_cache.contains_key(&page) || self.thumb_inflight.contains(&page) {
+            self.thumb_inflight.insert(page);
+            self.send_thumb(page);
+        }
+        self.bench
+            .page_changed(page, self.scheduler.stale_visible(page));
+        self.update_annot_selection(ui);
+    }
+
+    /// Sends one edit of the open document.
+    fn send_edit(&mut self, op: EditOp) {
+        if !self.editable {
+            return;
+        }
+        self.next_edit_id += 1;
+        self.bench.edit_sent(op.page());
+        let _ = self.cmd_tx.send(EngineCmd::Edit {
+            op,
+            edit_id: self.next_edit_id,
+            generation: self.doc_generation,
+        });
+    }
+
+    /// The engine applied an edit, or refused it.
+    fn edited(&mut self, ui: &MainWindow, generation: u64, result: Result<(), String>) {
+        if generation != self.doc_generation {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.save_state.edited();
+                ui.set_dirty(self.save_state.is_dirty());
+            }
+            Err(message) => {
+                ui.set_status_text(SharedString::from(format!("Could not edit: {message}")));
+            }
+        }
+    }
+
+    /// Marks the selected text: one markup annotation per page of the selection.
+    fn mark_selection(&mut self, ui: &MainWindow, kind: MarkupKind) {
+        let colour = PALETTE[self.colour];
+        let parts = std::mem::take(&mut self.sel_pages);
+        for part in parts.into_iter().filter(|part| !part.rects.is_empty()) {
+            self.send_edit(EditOp::AddMarkup {
+                page: part.page,
+                kind,
+                rects: part.rects,
+                colour,
+                author: self.settings.author.clone(),
+            });
+        }
+        self.clear_selection(ui);
+    }
+
+    /// Marks the selection once the engine has answered the newest request for it: a drag's last
+    /// position may still be on its way when the button comes up.
+    fn mark_when_answered(&mut self, ui: &MainWindow, kind: MarkupKind) {
+        if self.sel_answered == self.sel_generation {
+            self.mark_selection(ui, kind);
+        } else {
+            self.pending_mark = Some(kind);
+        }
+    }
+
+    /// A tool button or its key (Plan 0004, §4.2): with text selected, a markup marks it and the
+    /// tool stays; with nothing selected, the markup tool is switched on (or off again).
+    fn choose_tool(&mut self, ui: &MainWindow, tool: Tool) {
+        if let Tool::Markup(kind) = tool
+            && self.editable
+            && !self.sel_pages.is_empty()
+        {
+            self.mark_selection(ui, kind);
+            return;
+        }
+        self.tool = if self.tool == tool {
+            Tool::Select
+        } else {
+            tool
+        };
+        ui.set_tool(self.tool.index());
+    }
+
+    /// A swatch: the colour of the next markup, and of the selected annotation.
+    fn choose_colour(&mut self, ui: &MainWindow, index: usize) {
+        if index >= PALETTE.len() {
+            return;
+        }
+        self.colour = index;
+        ui.set_colour_index(index as i32);
+        if let Some((page, id)) = self.selected_annot {
+            self.send_edit(EditOp::SetColour {
+                page,
+                id,
+                colour: PALETTE[index],
+            });
+        }
+    }
+
+    /// Delete: removes the selected annotation.
+    fn delete_annotation(&mut self, ui: &MainWindow) {
+        if let Some((page, id)) = self.selected_annot {
+            self.select_annotation(ui, None);
+            self.send_edit(EditOp::Delete { page, id });
+        }
+    }
+
+    /// Esc: back to the Select tool, nothing selected.
+    fn escape(&mut self, ui: &MainWindow) {
+        self.find_close(ui);
+        self.clear_selection(ui);
+        self.select_annotation(ui, None);
+        self.tool = Tool::Select;
+        ui.set_tool(self.tool.index());
+    }
+
+    /// Asks the engine to write the document: in place (`None`) or as a copy that becomes the
+    /// document (Plan 0004, §4.4).
+    fn send_save(&mut self, ui: &MainWindow, path: Option<PathBuf>) {
+        if !self.editable || self.doc_path.is_none() || self.saving {
+            return;
+        }
+        self.saving = true;
+        ui.set_status_text(SharedString::from("Saving..."));
+        self.bench.save_sent();
+        let _ = self.cmd_tx.send(EngineCmd::Save { path });
+    }
+
+    /// A save finished. Returns what the caller still has to do outside the state: the action
+    /// that waited for the save, or a Save As the file needs.
+    fn saved(
+        &mut self,
+        ui: &MainWindow,
+        path: PathBuf,
+        result: Result<u64, SaveError>,
+    ) -> Option<SavedNext> {
+        self.saving = false;
+        match result {
+            Ok(bytes) => {
+                self.save_state.saved();
+                ui.set_dirty(false);
+                if self.doc_path.as_deref() != Some(path.as_path()) {
+                    // Save As: the copy is the document now.
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    ui.set_doc_title(SharedString::from(name));
+                    self.settings.opened(&path);
+                    self.save_settings();
+                    self.update_recent();
+                    self.doc_path = Some(path.clone());
+                }
+                ui.set_status_text(SharedString::from(format!(
+                    "Saved {} ({:.1} KB)",
+                    path.display(),
+                    bytes as f64 / 1024.0
+                )));
+                self.bench.saved(bytes);
+                self.after_save.take().map(SavedNext::Then)
+            }
+            Err(SaveError::NeedsSaveAs) => {
+                ui.set_status_text(SharedString::from(
+                    "This file cannot be updated in place; choose where to save a copy",
+                ));
+                Some(SavedNext::SaveAs)
+            }
+            Err(SaveError::NotEditable) => {
+                self.after_save = None;
+                ui.set_status_text(SharedString::from("Only PDF documents can be saved"));
+                None
+            }
+            Err(SaveError::Failed(message)) => {
+                self.after_save = None;
+                ui.set_has_error(true);
+                ui.set_error_text(SharedString::from(format!("Could not save: {message}")));
+                ui.set_status_text(SharedString::from(format!("Could not save: {message}")));
+                None
+            }
+        }
+    }
+
+    /// The name the title bar shows for the document.
+    fn doc_name(&self) -> String {
+        self.doc_path
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Whether closing the document now would lose edits.
+    fn has_unsaved_changes(&self) -> bool {
+        self.editable && self.save_state.is_dirty()
     }
 
     /// Ctrl+C: the selected text to the clipboard (Plan 0003, §3.3).
@@ -1557,18 +2063,35 @@ impl AppState {
                 break;
             }
             if self.thumb_inflight.insert(page) {
-                let _ = self.cmd_tx.send(EngineCmd::RenderThumb {
-                    page,
-                    width_px,
-                    request_id: self.doc_generation,
-                });
+                self.send_thumb_at(page, width_px);
             }
         }
     }
 
+    fn send_thumb(&mut self, page: u32) {
+        let width_px = (THUMB_WIDTH_LOGICAL_PX * self.scale_factor).round() as u32;
+        self.send_thumb_at(page, width_px);
+    }
+
+    fn send_thumb_at(&mut self, page: u32, width_px: u32) {
+        let _ = self.cmd_tx.send(EngineCmd::RenderThumb {
+            page,
+            width_px,
+            request_id: self.doc_generation,
+        });
+    }
+
     /// A thumbnail arrived: show it, keep at most [`THUMB_CACHE`], and ask for the next one.
-    fn apply_thumb(&mut self, ui: &MainWindow, page: u32, generation: u64, bitmap: &Bitmap) {
-        if generation != self.doc_generation {
+    fn apply_thumb(
+        &mut self,
+        ui: &MainWindow,
+        page: u32,
+        generation: u64,
+        revision: u32,
+        bitmap: &Bitmap,
+    ) {
+        // A thumbnail drawn before an edit is dropped: the one asked for after it is on its way.
+        if generation != self.doc_generation || revision < self.page_revision(page) {
             return;
         }
         self.thumb_inflight.remove(&page);
@@ -1830,6 +2353,22 @@ impl AppState {
                 });
             }
         }
+        // And so do the annotations, for hit-testing and the selection outline (Plan 0004).
+        self.annots
+            .retain(|page, _| near.contains(&(*page as usize)));
+        self.annots_pending
+            .retain(|page| near.contains(&(*page as usize)));
+        if self.editable {
+            for page in near.clone() {
+                let page = page as u32;
+                if !self.annots.contains_key(&page) && self.annots_pending.insert(page) {
+                    let _ = self.cmd_tx.send(EngineCmd::Annotations {
+                        page,
+                        generation: self.doc_generation,
+                    });
+                }
+            }
+        }
         let mut wanted = HashSet::new();
         let mut rows = Vec::with_capacity(near.len());
         for page in near {
@@ -1954,6 +2493,7 @@ impl AppState {
         let Some(slot) = self.layout.slot(key.page as usize) else {
             return;
         };
+        self.bench.tile_requested(key.page);
         let _ = self.cmd_tx.send(EngineCmd::RenderTile {
             geometry: slot.geometry,
             col: key.col,
@@ -1980,8 +2520,13 @@ impl AppState {
         });
     }
 
-    /// A tile arrived: cache it and put it on screen.
-    fn apply_tile(&mut self, ui: &MainWindow, key: &TileKey, bitmap: &Bitmap) {
+    /// A tile arrived: cache it and put it on screen. One drawn from an older revision of its page
+    /// than the engine has reported shows the page before an edit, and is dropped.
+    fn apply_tile(&mut self, ui: &MainWindow, key: &TileKey, revision: u32, bitmap: &Bitmap) {
+        if revision < self.page_revision(key.page) {
+            self.bench.stale_dropped();
+            return;
+        }
         let outcome = self.scheduler.insert(*key, bitmap.data.len());
         self.apply(ui, outcome.actions);
         let Some(slot) = outcome.slot else {
@@ -1999,14 +2544,17 @@ impl AppState {
         ui.set_is_loading(false);
         let visible = self.visible(ui);
         self.bench.tile(&self.scheduler, &visible);
+        self.bench
+            .tile_after_edit(key.page, self.scheduler.stale_visible(key.page));
     }
 
     /// A base layer arrived: stretch it under its page's tiles, if the page is still near the view.
     ///
     /// A base layer *is* the page, so it is valid across every zoom of that page; it is only
     /// dropped when the page has moved away from the viewport since it was requested.
-    fn apply_base(&mut self, ui: &MainWindow, page: u32, bitmap: &Bitmap) {
-        if !self.base_pending.remove(&page) {
+    fn apply_base(&mut self, ui: &MainWindow, page: u32, revision: u32, bitmap: &Bitmap) {
+        // Drawn before an edit: the base layer asked for after it is still pending.
+        if revision < self.page_revision(page) || !self.base_pending.remove(&page) {
             return;
         }
         if !self.near_pages(ui).contains(&(page as usize)) {
@@ -2068,8 +2616,11 @@ impl AppState {
         self.doc_generation += 1;
         self.cancel_search();
         self.clear_selection(ui);
+        self.select_annotation(ui, None);
         self.text_lines.clear();
         self.lines_pending.clear();
+        self.annots.clear();
+        self.annots_pending.clear();
         ui.set_find_visible(false);
         ui.set_find_text(SharedString::new());
         ui.set_find_counter(SharedString::new());
@@ -2107,6 +2658,7 @@ impl AppState {
         self.settings.opened(&path);
         self.save_settings();
         self.update_recent();
+        self.doc_path = Some(path);
     }
 
     /// The engine could not open the document: the one that was showing is still open there, so
@@ -2153,8 +2705,20 @@ impl AppState {
     }
 
     /// A document was opened: forget everything and show the top of page 1 at 100%.
-    fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>) {
+    fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>, editable: bool) {
         self.page_sizes = page_sizes;
+        // The engine's revisions start again with the document, and so does the save state.
+        self.page_revs.clear();
+        self.editable = editable;
+        ui.set_editable(editable);
+        self.save_state = SaveState::new();
+        ui.set_dirty(false);
+        self.saving = false;
+        self.after_save = None;
+        if !editable {
+            self.tool = Tool::Select;
+            ui.set_tool(self.tool.index());
+        }
         self.scale_milli = ZOOM_DEFAULT_MILLI;
         self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
         self.reset_thumbs(self.page_sizes.len());
@@ -2269,6 +2833,76 @@ fn with_state(f: impl FnOnce(&mut AppState)) {
             f(state);
         }
     });
+}
+
+/// [`with_state`], returning what `f` returns.
+fn with_state_ret<T>(f: impl FnOnce(&mut AppState) -> T) -> Option<T> {
+    APP.with(|cell| cell.borrow_mut().as_mut().map(f))
+}
+
+/// Before `then` closes the document, asks whether to save its unsaved changes (Plan 0004,
+/// §4.4): Yes saves and runs `then` once the save succeeded, No runs it at once, Cancel does
+/// nothing. Called with the state unborrowed, because the dialog is modal.
+fn proceed(ui: &MainWindow, then: AfterSave) {
+    let unsaved =
+        with_state_ret(|state| state.has_unsaved_changes().then(|| state.doc_name())).flatten();
+    let Some(name) = unsaved else {
+        run_after(ui, then);
+        return;
+    };
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("PODEFA")
+        .set_description(format!("Save the changes to \"{name}\" before closing it?"))
+        .set_buttons(rfd::MessageButtons::YesNoCancel)
+        .show();
+    match answer {
+        rfd::MessageDialogResult::Yes => with_state(|state| {
+            state.after_save = Some(then);
+            state.send_save(ui, None);
+        }),
+        rfd::MessageDialogResult::No => run_after(ui, then),
+        _ => {}
+    }
+}
+
+/// Runs the action that waited for "save changes?".
+fn run_after(ui: &MainWindow, then: AfterSave) {
+    match then {
+        AfterSave::Quit => {
+            // Answered: the window may close now without asking again.
+            with_state(|state| state.save_state = SaveState::new());
+            let _ = slint::quit_event_loop();
+        }
+        AfterSave::Open(path) => with_state(|state| state.open_path(ui, path)),
+        AfterSave::Pick => {
+            if let Some(path) = pick_document() {
+                with_state(|state| state.open_path(ui, path));
+            }
+        }
+    }
+}
+
+/// File > Save As: the platform's save dialog, then a full copy that becomes the document.
+fn save_as(ui: &MainWindow) {
+    let Some(current) = with_state_ret(|state| state.editable.then(|| state.doc_path.clone()))
+        .flatten()
+        .flatten()
+    else {
+        return;
+    };
+    let mut dialog = rfd::FileDialog::new().add_filter("PDF document", &["pdf"]);
+    if let Some(dir) = current.parent() {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(name) = current.file_name() {
+        dialog = dialog.set_file_name(name.to_string_lossy());
+    }
+    match dialog.save_file() {
+        Some(path) => with_state(|state| state.send_save(ui, Some(path))),
+        // Cancelled: whatever waited for this save does not happen.
+        None => with_state(|state| state.after_save = None),
+    }
 }
 
 /// The single entry point for viewport changes.
@@ -2424,6 +3058,10 @@ enum KeyCommand {
     FindPrevious,
     FindClose,
     Copy,
+    Save,
+    SaveAs,
+    Mark(MarkupKind),
+    DeleteAnnotation,
 }
 
 /// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
@@ -2442,8 +3080,19 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             'b' | 'B' => Some(KeyCommand::ToggleSidebar),
             'f' | 'F' => Some(KeyCommand::Find),
             'c' | 'C' => Some(KeyCommand::Copy),
+            's' | 'S' if shift => Some(KeyCommand::SaveAs),
+            's' | 'S' => Some(KeyCommand::Save),
             _ => None,
         };
+    }
+    if c == char::from(Key::Delete) {
+        return Some(KeyCommand::DeleteAnnotation);
+    }
+    match c {
+        'h' | 'H' => return Some(KeyCommand::Mark(MarkupKind::Highlight)),
+        'u' | 'U' => return Some(KeyCommand::Mark(MarkupKind::Underline)),
+        'k' | 'K' => return Some(KeyCommand::Mark(MarkupKind::StrikeOut)),
+        _ => {}
     }
     if c == char::from(Key::F4) {
         return Some(KeyCommand::ToggleSidebar);
@@ -2531,6 +3180,13 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.set_hit_rects(ModelRc::from(hits_model.clone()));
     let sel_model = Rc::new(VecModel::<HitView>::default());
     main_window.set_sel_rects(ModelRc::from(sel_model.clone()));
+    let annot_sel_model = Rc::new(VecModel::<HitView>::default());
+    main_window.set_annot_sel_rects(ModelRc::from(annot_sel_model.clone()));
+    let swatches: Vec<slint::Color> = PALETTE
+        .iter()
+        .map(|c| slint::Color::from_rgb_f32(c.r, c.g, c.b))
+        .collect();
+    main_window.set_swatches(ModelRc::new(VecModel::from(swatches)));
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -2585,6 +3241,24 @@ fn main() -> Result<(), slint::PlatformError> {
             touch_selecting: false,
             text_lines: HashMap::new(),
             lines_pending: HashSet::new(),
+            editable: false,
+            doc_path: None,
+            save_state: SaveState::new(),
+            saving: false,
+            after_save: None,
+            tool: Tool::Select,
+            colour: 0,
+            next_edit_id: 0,
+            page_revs: HashMap::new(),
+            annots: HashMap::new(),
+            annots_pending: HashSet::new(),
+            selected_annot: None,
+            annot_candidate: None,
+            press_at: (0.0, 0.0),
+            annot_sel_model,
+            annot_sel_rows: Vec::new(),
+            sel_answered: 0,
+            pending_mark: None,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -2613,7 +3287,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     page_count,
                     page_sizes,
                     unsized_pages,
-                    ..
+                    editable,
                 } => {
                     ui.set_has_error(false);
                     ui.set_error_text(SharedString::from(""));
@@ -2632,7 +3306,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     };
                     ui.set_status_text(SharedString::from(status));
                     with_state(|state| {
-                        state.set_document(&ui, page_sizes);
+                        state.set_document(&ui, page_sizes, editable);
                         state.document_opened(&ui);
                     });
                     // A scripted run starts on the open, so its first step is a real zoom or pan
@@ -2644,26 +3318,31 @@ fn main() -> Result<(), slint::PlatformError> {
                 EngineEvent::TileRendered {
                     key,
                     request_id,
+                    revision,
                     bitmap,
-                    ..
                 } => {
                     if epoch.load(Ordering::Relaxed) != request_id {
                         return;
                     }
-                    with_state(|state| state.apply_tile(&ui, &key, &bitmap));
+                    with_state(|state| state.apply_tile(&ui, &key, revision, &bitmap));
                 }
-                EngineEvent::BaseRendered { page, bitmap, .. } => {
+                EngineEvent::BaseRendered {
+                    page,
+                    revision,
+                    bitmap,
+                    ..
+                } => {
                     // No epoch guard: a base layer belongs to a page, not to a zoom level, and it
                     // arrives while the epoch it was requested under is already superseded.
-                    with_state(|state| state.apply_base(&ui, page, &bitmap));
+                    with_state(|state| state.apply_base(&ui, page, revision, &bitmap));
                 }
                 EngineEvent::ThumbRendered {
                     page,
                     request_id,
+                    revision,
                     bitmap,
-                    ..
                 } => {
-                    with_state(|state| state.apply_thumb(&ui, page, request_id, &bitmap));
+                    with_state(|state| state.apply_thumb(&ui, page, request_id, revision, &bitmap));
                 }
                 EngineEvent::SearchHits {
                     generation,
@@ -2696,11 +3375,33 @@ fn main() -> Result<(), slint::PlatformError> {
                 EngineEvent::Outline { items } => {
                     with_state(|state| state.set_outline(items));
                 }
-                // Handled from Plan 0004 Phase 1's app commit on.
-                EngineEvent::Annotations { .. }
-                | EngineEvent::PageChanged { .. }
-                | EngineEvent::Edited { .. }
-                | EngineEvent::Saved { .. } => {}
+                EngineEvent::Annotations {
+                    page,
+                    generation,
+                    items,
+                } => {
+                    with_state(|state| state.apply_annotations(&ui, page, generation, items));
+                }
+                EngineEvent::PageChanged {
+                    generation,
+                    page,
+                    revision,
+                    items,
+                } => {
+                    with_state(|state| state.page_changed(&ui, generation, page, revision, items));
+                }
+                EngineEvent::Edited {
+                    generation, result, ..
+                } => {
+                    with_state(|state| state.edited(&ui, generation, result));
+                }
+                EngineEvent::Saved { path, result } => {
+                    match with_state_ret(|state| state.saved(&ui, path, result)).flatten() {
+                        Some(SavedNext::Then(then)) => run_after(&ui, then),
+                        Some(SavedNext::SaveAs) => save_as(&ui),
+                        None => {}
+                    }
+                }
                 EngineEvent::TileAborted { ms, .. } => {
                     with_state(|state| state.bench.aborted(ms));
                 }
@@ -2796,6 +3497,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 return false;
             };
             let (ax, ay) = viewport_center(&ui);
+            // The file dialogs are modal, so they run with the state unborrowed.
+            match command {
+                KeyCommand::Open => {
+                    proceed(&ui, AfterSave::Pick);
+                    return true;
+                }
+                KeyCommand::SaveAs => {
+                    save_as(&ui);
+                    return true;
+                }
+                _ => {}
+            }
             with_state(|state| match command {
                 KeyCommand::Scroll(action) => state.nav(&ui, action),
                 KeyCommand::ZoomIn => {
@@ -2811,16 +3524,16 @@ fn main() -> Result<(), slint::PlatformError> {
                 KeyCommand::Find => state.find_open(&ui),
                 KeyCommand::FindNext => state.step_hit(&ui, true),
                 KeyCommand::FindPrevious => state.step_hit(&ui, false),
-                KeyCommand::FindClose => {
-                    state.find_close(&ui);
-                    state.clear_selection(&ui);
-                }
+                KeyCommand::FindClose => state.escape(&ui),
                 KeyCommand::Copy => state.copy_selection(&ui),
-                KeyCommand::Open => {
-                    if let Some(path) = pick_document() {
-                        state.open_path(&ui, path);
+                KeyCommand::Save => state.send_save(&ui, None),
+                KeyCommand::Mark(kind) => {
+                    if state.editable {
+                        state.choose_tool(&ui, Tool::Markup(kind));
                     }
                 }
+                KeyCommand::DeleteAnnotation => state.delete_annotation(&ui),
+                KeyCommand::Open | KeyCommand::SaveAs => {}
             });
             true
         });
@@ -2886,10 +3599,8 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let weak = main_window.as_weak();
         main_window.on_open_file(move || {
-            if let Some(ui) = weak.upgrade()
-                && let Some(path) = pick_document()
-            {
-                with_state(|state| state.open_path(&ui, path));
+            if let Some(ui) = weak.upgrade() {
+                proceed(&ui, AfterSave::Pick);
             }
         });
     }
@@ -2898,14 +3609,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = main_window.as_weak();
         main_window.on_open_recent(move |index| {
             if let Some(ui) = weak.upgrade() {
-                with_state(|state| {
-                    let path = usize::try_from(index)
+                let path = with_state_ret(|state| {
+                    usize::try_from(index)
                         .ok()
-                        .and_then(|i| state.settings.recent.get(i).cloned());
-                    if let Some(path) = path {
-                        state.open_path(&ui, path);
-                    }
-                });
+                        .and_then(|i| state.settings.recent.get(i).cloned())
+                })
+                .flatten();
+                if let Some(path) = path {
+                    proceed(&ui, AfterSave::Open(path));
+                }
             }
         });
     }
@@ -3059,9 +3771,79 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    main_window.on_quit(|| {
-        let _ = slint::quit_event_loop();
-    });
+    {
+        let weak = main_window.as_weak();
+        main_window.on_quit(move || {
+            if let Some(ui) = weak.upgrade() {
+                proceed(&ui, AfterSave::Quit);
+            }
+        });
+    }
+
+    // Closing the window with unsaved changes asks first (Plan 0004, §4.4). The question runs
+    // after this handler returns, from the event loop, and the window stays until it is answered.
+    {
+        let weak = main_window.as_weak();
+        main_window.window().on_close_requested(move || {
+            if !with_state_ret(|state| state.has_unsaved_changes()).unwrap_or(false) {
+                return slint::CloseRequestResponse::HideWindow;
+            }
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                if let Some(ui) = weak.upgrade() {
+                    proceed(&ui, AfterSave::Quit);
+                }
+            });
+            slint::CloseRequestResponse::KeepWindowShown
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_save(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.send_save(&ui, None));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_save_as(move || {
+            if let Some(ui) = weak.upgrade() {
+                save_as(&ui);
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_choose_tool(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.choose_tool(&ui, Tool::from_index(index)));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_choose_colour(move |index| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(index) = usize::try_from(index)
+            {
+                with_state(|state| state.choose_colour(&ui, index));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_delete_annotation(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.delete_annotation(&ui));
+            }
+        });
+    }
 
     main_window.on_can_open_drop(|data| dropped_document(&data).is_some());
 
@@ -3071,7 +3853,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = weak.upgrade()
                 && let Some(path) = dropped_document(&data)
             {
-                with_state(|state| state.open_path(&ui, path));
+                proceed(&ui, AfterSave::Open(path));
             }
         });
     }
@@ -3260,6 +4042,39 @@ mod tests {
     fn ctrl_o_opens() {
         assert_eq!(key_command("o", true, false), Some(KeyCommand::Open));
         assert_eq!(key_command("o", false, false), None);
+    }
+
+    #[test]
+    fn save_markup_and_delete_keys() {
+        assert_eq!(key_command("s", true, false), Some(KeyCommand::Save));
+        assert_eq!(key_command("S", true, true), Some(KeyCommand::SaveAs));
+        assert_eq!(key_command("s", false, false), None);
+        assert_eq!(
+            key_command("h", false, false),
+            Some(KeyCommand::Mark(MarkupKind::Highlight))
+        );
+        assert_eq!(
+            key_command("U", false, true),
+            Some(KeyCommand::Mark(MarkupKind::Underline))
+        );
+        assert_eq!(
+            key_command("k", false, false),
+            Some(KeyCommand::Mark(MarkupKind::StrikeOut))
+        );
+        // With ctrl they are not markup: Ctrl+H, Ctrl+U and Ctrl+K stay free.
+        assert_eq!(key_command("h", true, false), None);
+        assert_eq!(
+            key_command(&key(Key::Delete), false, false),
+            Some(KeyCommand::DeleteAnnotation)
+        );
+    }
+
+    #[test]
+    fn tool_indices_round_trip() {
+        for index in 0..5 {
+            assert_eq!(Tool::from_index(index).index(), index);
+        }
+        assert_eq!(Tool::from_index(99), Tool::Select);
     }
 
     #[test]

@@ -36,7 +36,7 @@ use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Timer, TimerMode};
 use slint::{LogicalPosition, SharedString};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
 use std::sync::OnceLock;
@@ -110,6 +110,21 @@ pub struct Cfg {
     /// `--bench-search-zoom`: zoom in once a second while the search runs (row L's `t_blank`);
     /// off by default, so a memory run (row O) measures the search alone.
     pub search_zoom: bool,
+    /// `--bench-edit N`: highlight N lines of page 0 of a `select_*p.pdf` document through the
+    /// window's input path - the Highlight tool, then a drag over each line - one per tick, and
+    /// report `t_edit` (Plan 0004, §6 rows R and W).
+    pub edits: u32,
+    /// `--bench-edit-pan PX`: scroll down by this many device pixels between two edits, so tiles of
+    /// older revisions are still in flight when the next edit lands (row W).
+    pub edit_pan_px: f64,
+    /// `--bench-edit-save`: save in place after the edits and report `t_save`. It writes to the
+    /// document, so run it on a scratch copy.
+    pub edit_save: bool,
+    /// `--bench-edit-burst K`: K edits per tick instead of one drag, so the tiles the first edit
+    /// asks for are still in flight when the next one changes the page again (row W). A burst
+    /// sends the edits itself, one line box of page 1 each: drags would need the selection's
+    /// answer between them, which one tick does not wait for.
+    pub edit_burst: u32,
 }
 
 impl Default for Cfg {
@@ -137,6 +152,10 @@ impl Default for Cfg {
             search_zoom: false,
             search_keys: false,
             select: false,
+            edits: 0,
+            edit_pan_px: 0.0,
+            edit_save: false,
+            edit_burst: 1,
         }
     }
 }
@@ -154,6 +173,7 @@ impl Cfg {
             && !self.outline
             && self.search.is_none()
             && !self.select
+            && self.edits == 0
     }
 }
 
@@ -240,6 +260,22 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-search-expect" => {
                 cfg.search_expect = number.map(|n| n.max(0.0) as usize);
                 consumed = 2;
+            }
+            "--bench-edit" => {
+                cfg.edits = number.unwrap_or(20.0).max(0.0) as u32;
+                consumed = 2;
+            }
+            "--bench-edit-pan" => {
+                cfg.edit_pan_px = number.unwrap_or(40.0).max(0.0);
+                consumed = 2;
+            }
+            "--bench-edit-burst" => {
+                cfg.edit_burst = number.unwrap_or(2.0).max(1.0) as u32;
+                consumed = 2;
+            }
+            "--bench-edit-save" => {
+                cfg.edit_save = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-reopen" => {
                 cfg.reopen = number.unwrap_or(10.0).max(0.0) as u32;
@@ -564,6 +600,18 @@ pub struct Trace {
     nav_checks: Vec<(String, bool)>,
     /// `--bench-reopen` samples: `(open number, working set bytes)`.
     reopen_ws: Vec<(u32, usize)>,
+    /// Edits waiting for their page's tiles (Plan 0004, `t_edit` in benchmarks §10.2): when the
+    /// first edit of the page was sent, and whether its `PageChanged` has arrived.
+    edits: HashMap<u32, (Instant, bool)>,
+    edit_ms: Vec<u128>,
+    /// Tiles drawn from an older page revision than the app knows, dropped on arrival.
+    stale_dropped: u32,
+    save_started: Option<Instant>,
+    /// `t_save` samples: `(ms, file bytes)`.
+    saves: Vec<(u128, u64)>,
+    /// Tile requests per page while an edit phase runs: without a pan, only the edited page may
+    /// be asked for again (row W).
+    edit_requests: Option<HashMap<u32, u32>>,
 }
 
 impl Trace {
@@ -591,6 +639,102 @@ impl Trace {
             searches_done: 0,
             nav_checks: Vec::new(),
             reopen_ws: Vec::new(),
+            edits: HashMap::new(),
+            edit_ms: Vec::new(),
+            stale_dropped: 0,
+            save_started: None,
+            saves: Vec::new(),
+            edit_requests: None,
+        }
+    }
+
+    /// Starts or ends counting tile requests per page (row W).
+    pub fn requests_during_edits(&mut self, on: bool) {
+        if !self.on {
+            return;
+        }
+        if on {
+            self.edit_requests = Some(HashMap::new());
+        } else if let Some(counts) = self.edit_requests.take() {
+            let mut pages: Vec<(u32, u32)> = counts.into_iter().collect();
+            pages.sort_unstable();
+            let listed: Vec<String> = pages
+                .iter()
+                .map(|(page, n)| format!("page{}={n}", page + 1))
+                .collect();
+            self.print(format_args!(
+                "edit_requests {}",
+                if listed.is_empty() {
+                    "none".to_owned()
+                } else {
+                    listed.join(" ")
+                }
+            ));
+        }
+    }
+
+    /// A tile was requested.
+    pub fn tile_requested(&mut self, page: u32) {
+        if let Some(counts) = self.edit_requests.as_mut() {
+            *counts.entry(page).or_insert(0) += 1;
+        }
+    }
+
+    /// An edit of `page` was sent: `t_edit` starts, unless an earlier edit of it is still waiting.
+    pub fn edit_sent(&mut self, page: u32) {
+        if !self.on {
+            return;
+        }
+        self.edits.entry(page).or_insert((Instant::now(), false));
+    }
+
+    /// The engine reported the edited page's new revision; `stale` of its tiles are on screen.
+    /// A page with none in view has nothing to wait for.
+    pub fn page_changed(&mut self, page: u32, stale: usize) {
+        if !self.on {
+            return;
+        }
+        if stale == 0 {
+            self.edits.remove(&page);
+        } else if let Some(edit) = self.edits.get_mut(&page) {
+            edit.1 = true;
+        }
+    }
+
+    /// A tile of `page` landed and `stale` of its visible tiles still show the old revision: at
+    /// zero, the edit is on screen and `t_edit` ends.
+    pub fn tile_after_edit(&mut self, page: u32, stale: usize) {
+        if !self.on || stale > 0 {
+            return;
+        }
+        if let Some((started, true)) = self.edits.get(&page).copied() {
+            self.edits.remove(&page);
+            let ms = started.elapsed().as_millis();
+            self.edit_ms.push(ms);
+            let t = self.t_ms();
+            self.print(format_args!("edit t={t}ms page={page} t_edit={ms}"));
+        }
+    }
+
+    /// A tile of an older revision was dropped (`stale_tiles` counts the ones that were not).
+    pub fn stale_dropped(&mut self) {
+        self.stale_dropped += 1;
+    }
+
+    /// A save was sent: `t_save` starts.
+    pub fn save_sent(&mut self) {
+        if self.on {
+            self.save_started = Some(Instant::now());
+        }
+    }
+
+    /// A save finished with the file at `bytes`.
+    pub fn saved(&mut self, bytes: u64) {
+        if let Some(started) = self.save_started.take() {
+            let ms = started.elapsed().as_millis();
+            self.saves.push((ms, bytes));
+            let t = self.t_ms();
+            self.print(format_args!("save t={t}ms t_save={ms} bytes={bytes}"));
         }
     }
 
@@ -981,6 +1125,18 @@ impl Trace {
                 mem_str(process_memory().map(|mem| mem.ws))
             );
         }
+        if !self.edit_ms.is_empty() || self.stale_dropped > 0 {
+            let (e_min, e_med, e_max) = spread(&self.edit_ms);
+            println!(
+                "[bench] t_edit_ms   min={e_min} med={e_med} max={e_max} n={} \
+                 (old-revision tiles dropped={})",
+                self.edit_ms.len(),
+                self.stale_dropped
+            );
+        }
+        for (ms, bytes) in &self.saves {
+            println!("[bench] t_save_ms   {ms} ({bytes} bytes)");
+        }
         let (r_min, r_med, r_max) = spread(&self.reanchor_us);
         println!(
             "[bench] pages       visited={} resident_max={} reanchors={} reanchor_us \
@@ -1153,6 +1309,8 @@ enum Phase {
     Search,
     /// Pointer selections, one per tick, each checked on the next tick.
     Select,
+    /// Highlights made through the tool and a drag, one per tick (Plan 0004 rows R, W).
+    Edit,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1170,6 +1328,7 @@ struct Pending {
     outline: bool,
     search: bool,
     select: bool,
+    edit: bool,
 }
 
 impl Pending {
@@ -1186,6 +1345,7 @@ impl Pending {
             outline: cfg.outline,
             search: cfg.search.is_some(),
             select: cfg.select,
+            edit: cfg.edits > 0,
         }
     }
 
@@ -1202,6 +1362,7 @@ impl Pending {
             (&mut self.outline, Phase::Outline),
             (&mut self.search, Phase::Search),
             (&mut self.select, Phase::Select),
+            (&mut self.edit, Phase::Edit),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1550,6 +1711,7 @@ impl Driver {
             Phase::Outline => "outline",
             Phase::Search => "search",
             Phase::Select => "select",
+            Phase::Edit => "edit",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -1822,6 +1984,81 @@ impl Driver {
                 };
                 self.nav_expect = Some((name, expected));
                 self.step += 1;
+                false
+            }
+            Phase::Edit => {
+                let edits = self.cfg.edits;
+                if self.step == 0 {
+                    // The tool stays on, so each drag below marks the line it selects.
+                    ui.invoke_choose_tool(1);
+                    with_state(|state| state.bench.requests_during_edits(true));
+                }
+                if self.step < edits {
+                    // Lines 2..=41 of page 0, starting on the line's first character.
+                    let burst = self.cfg.edit_burst.min(edits - self.step);
+                    if burst <= 1 {
+                        let line = 2 + (self.step as usize % 40);
+                        select_drag(ui, (55.0, line), (600.0, line));
+                    } else {
+                        with_state(|state| {
+                            for k in 0..burst {
+                                let line = 2 + ((self.step + k) as usize % 40);
+                                let Some(rect) =
+                                    state.text_lines.get(&0).and_then(|lines| lines.get(line))
+                                else {
+                                    continue;
+                                };
+                                let op = pdf_core::annot::EditOp::AddMarkup {
+                                    page: 0,
+                                    kind: pdf_core::annot::MarkupKind::Highlight,
+                                    rects: vec![*rect],
+                                    colour: pdf_core::annot::PALETTE[0],
+                                    author: None,
+                                };
+                                state.send_edit(op);
+                            }
+                        });
+                    }
+                    self.step += burst - 1;
+                    if self.cfg.edit_pan_px > 0.0 {
+                        // Down and back up in turn, so page 1 stays where the next drag lands
+                        // while every edit still races a scroll's tile requests.
+                        let step = if self.step % 2 == 0 {
+                            self.cfg.edit_pan_px
+                        } else {
+                            -self.cfg.edit_pan_px
+                        };
+                        with_state(|state| {
+                            let to = (state.pos.0, state.pos.1 + step);
+                            state.scroll_to(ui, to);
+                        });
+                    }
+                    self.step += 1;
+                    return false;
+                }
+                // One tick after the last edit: check the page has them all, then save if asked.
+                if self.step == edits {
+                    let mut got = String::new();
+                    with_state(|state| {
+                        state.bench.requests_during_edits(false);
+                        let marks = state.annots.get(&0).map_or(0, |items| items.len());
+                        got = format!("annotations={marks} dirty={}", state.save_state.is_dirty());
+                    });
+                    let expected = format!("annotations={edits} dirty=true");
+                    with_state(|state| state.bench.nav_check("edits on page 1", &expected, &got));
+                    if self.cfg.edit_save {
+                        ui.invoke_save();
+                    }
+                    self.step += 1;
+                    return false;
+                }
+                if self.cfg.edit_save {
+                    let mut got = String::new();
+                    with_state(|state| got = format!("dirty={}", state.save_state.is_dirty()));
+                    with_state(|state| state.bench.nav_check("saved", "dirty=false", &got));
+                }
+                ui.invoke_choose_tool(0);
+                self.settle();
                 false
             }
             Phase::Outline => {

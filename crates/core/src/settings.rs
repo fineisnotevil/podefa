@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! The user's settings: theme and recent files (Plan 0003, §3.8 and §4.7).
+//! The user's settings: theme and recent files (Plan 0003, §3.8 and §4.7), and the name written
+//! into new annotations (Plan 0004, §4.3).
 //!
 //! Plain text, one `key=value` per line, so no parser dependency is needed and a user can read or
 //! fix the file by hand. Parsing never fails: an unknown key, a malformed line or a missing file
@@ -54,6 +55,9 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
     /// Whether the sidebar (thumbnails and outline) is shown.
     pub sidebar: bool,
+    /// The author written into new annotations. `None` writes none: nothing personal goes into a
+    /// shared file unless the user typed it here (Plan 0004 §0, question 5).
+    pub author: Option<String>,
 }
 
 impl Settings {
@@ -80,6 +84,10 @@ impl Settings {
                         settings.theme = theme;
                     }
                 }
+                "author" => {
+                    let name = value.trim();
+                    settings.author = (!name.is_empty()).then(|| name.to_owned());
+                }
                 // The value is taken as is: a path may start or end with spaces.
                 "recent" if !value.is_empty() && settings.recent.len() < RECENT_MAX => {
                     let path = PathBuf::from(value);
@@ -105,6 +113,11 @@ impl Settings {
         } else {
             "sidebar=0\n"
         });
+        if let Some(author) = self.author.as_deref().filter(|a| !a.contains(['\n', '\r'])) {
+            out.push_str("author=");
+            out.push_str(author);
+            out.push('\n');
+        }
         for path in &self.recent {
             let Some(text) = path.to_str() else {
                 continue;
@@ -144,6 +157,19 @@ mod tests {
         let text = settings.serialize();
         assert_eq!(Settings::parse(&text), settings);
         assert_eq!(settings.recent[0], PathBuf::from("/home/user/b c.pdf"));
+    }
+
+    #[test]
+    fn the_author_is_written_only_when_set() {
+        let settings = Settings::default();
+        assert!(!settings.serialize().contains("author"));
+        assert_eq!(Settings::parse("author=\n").author, None);
+        assert_eq!(Settings::parse("author=   \n").author, None);
+        let named = Settings {
+            author: Some("Ada Lovelace".into()),
+            ..Settings::default()
+        };
+        assert_eq!(Settings::parse(&named.serialize()), named);
     }
 
     #[test]

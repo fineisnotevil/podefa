@@ -555,11 +555,16 @@ impl MupdfEngine {
             .ok_or_else(|| SaveError::Failed(format!("not a UTF-8 path: {}", target.display())))?;
         pdf.save(name)
             .map_err(|e| SaveError::Failed(e.to_string()))?;
-        // The copy is the document from now on. Reopening forgets the revisions, which is right:
-        // every display list goes with it, and the app re-renders what it shows.
+        // The copy is the document from now on. Its pages are the edited pages, so they keep their
+        // revisions: a tile drawn before the switch then never passes for one drawn after a
+        // later edit.
         let password = self.password.clone();
+        let revisions = std::mem::take(&mut self.revisions);
         self.open_document_with_password(&target, password.as_deref())
             .map_err(|e| SaveError::Failed(e.to_string()))?;
+        if revisions.len() == self.revisions.len() {
+            self.revisions = revisions;
+        }
         let len = file_len(&target);
         Ok((target, len))
     }
