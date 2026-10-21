@@ -1027,7 +1027,7 @@ cargo test --release -p engine-mupdf --test annot_bench -- --ignored --nocapture
 | Incremental save **to the same path**, with this document and a second `Document` on the same file open | **ok**, 9.6 ms; file 2,786,703 -> 2,794,191 bytes; the original bytes are kept unchanged as a prefix |
 | Reopened after that save | page 0 has its 3 annotations |
 | Both open documents read the last page after the save | yes (the second one still sees the old revision) |
-| A second edit and incremental save on the same open document | ok, 5.2 ms, +649 bytes |
+| A second edit and incremental save on the same open document | ok, 5.2 ms; the file is then 2,794,840 bytes, +649 over the first save. Read in Phase 1 (§10.3): MuPDF does not append a second section but truncates the file to its length at open and writes one section with every change since then, so this is the original plus one section holding both edits |
 | Full (non-incremental) save to another path | ok, 15.4 ms, 2,789,569 bytes |
 | `std::fs::rename` of that copy over the open file | **fails on Windows**: `os error 5` (access denied) |
 
@@ -1050,3 +1050,60 @@ repairs at open (`can_be_saved_incrementally` false).
 | `stale_tiles` | Tiles of an older page revision that reached the model after a tile of the newer revision of the same page and scale. Must be 0. |
 | `ws_after_edits_n` | Working set sampled 2 s after the n-th scripted edit in one process, n = 0, 100, 1000. |
 | `ink_points` / `ink_rebuild_ms` | Points in the stroke being drawn, and the time to rebuild its live preview path on one pointer move. |
+
+### 10.3 Phase 1: editing and saving (rows P, Q, R, T, W)
+
+Rows P and Q are tests, not timings:
+
+- **Row P** (`crates/engine-mupdf/tests/annotation_render_test.rs`): a highlight, an ink stroke, a
+  note and a stamp added to `large_200p.pdf`'s page 1 are drawn in a tile, the full-page render, a
+  thumbnail and the base layer (the base layer through the actor), each checked against the page's
+  contents-only render; all 200 pages of the unannotated fixture render byte-identically to the
+  contents-only render at 50%. With `DRAW_ANNOTATIONS = false` the two annotated-page tests fail and
+  the identity test passes (mutation check, 2026-10-21).
+- **Row Q** (`crates/engine-mupdf/tests/edit_test.rs`): a selection from line 48 of page 1 to line 1
+  of page 2 of a generated text document, marked through the actor and saved in place; reopened by
+  a separate `PdfDocument`, each page has one highlight whose quads equal the selection's line boxes
+  within 0.01 pt, and the original file is an unchanged prefix of the saved one. The same file
+  checks revisions, recolour, delete, Save As (and Save As onto the open file), a non-PDF document,
+  and a file MuPDF repaired at open (`large_200p.pdf`: `can_be_saved_incrementally` is false, so
+  Save answers `NeedsSaveAs` and writes nothing). These run in CI on Windows, Linux and macOS.
+
+**How MuPDF writes an in-place save.** `pdf_save_document` with `do_incremental` compares the file
+on disk with the bytes it opened; if they match, it seeks to the opened length, truncates there and
+writes one section holding every object changed since the open
+(`mupdf/source/pdf/pdf-write.c`, `ensure_initial_incremental_contents`, read 2026-10-21). A second
+save of the same session therefore replaces the first one's section instead of appending after it;
+`edit_test.rs` asserts the opened bytes, not the previous save's, as the prefix.
+
+Rows R and W through a real window, release build of `46147a9` plus `64bf648`'s harness change,
+2026-10-21, the §1 machine:
+
+```powershell
+$env:FA_PDF_TRACE = 1
+# R: 20 edits on large_200p.pdf (no text: one direct edit a tick at a line box)
+target\release\app.exe target\tmp\edit_200p.pdf --bench-edit 20 --bench-edit-burst 1 --bench-step-ms 400 --bench-settle-ms 1500
+# R/T path: 20 highlights by drag with the Highlight tool, then a save, on a select_3p.pdf copy
+target\release\app.exe target\tmp\edit_bench.pdf --bench-edit 20 --bench-step-ms 400 --bench-settle-ms 1500 --bench-edit-save
+# W: 100 edits in bursts of 5, scrolling 24 px down and back between bursts
+target\release\app.exe target\tmp\edit_bench.pdf --bench-edit 100 --bench-edit-burst 5 --bench-edit-pan 24 --bench-step-ms 30 --bench-settle-ms 1500
+```
+
+After the edits every run clicks the highlight of line 2 through the window, picks the third
+swatch and presses Delete, checking the selection, the colour and the annotation count after each
+step (`t_edit` counts those two edits too, hence n = 22).
+
+| Run | `t_edit` min / med / max | n | old-revision tiles dropped | tile requests during the edits | checks |
+| :--- | ---: | ---: | ---: | :--- | :--- |
+| R, `large_200p.pdf` | 2 / 3 / 12 ms | 22 | 0 | page 1 only (80 = 4 tiles x 20) | 4 of 4 |
+| drag + save, `select_3p.pdf` | 2 / 3 / 12 ms | 22 | 0 | page 1 only (80) | 5 of 5; `t_save` 1 ms, 17,153 bytes |
+| W, bursts + scroll | 3 / 10 / 16 ms | 22 | 2 | page 1 only (400) | 4 of 4; 100 highlights, then 99 |
+
+- **Row R: pass** - median 3 ms against 100 ms.
+- **Row W: pass** - the bursts did produce the race the revision exists for: 2 tiles drawn before
+  a later edit of their page arrived after the app knew the newer revision and were dropped, so
+  `stale_tiles` (one that reached the model) is 0; it is 0 by construction, because the check runs
+  before the scheduler sees the tile. No page but the edited one was asked for again. Without bursts
+  the edits finish before the next one and no tile is ever late (0 dropped in the other two runs).
+- **Row T**: the save state is unit-tested (`pdf_core::annot`), the runs check `dirty=true` after the
+  edits and `dirty=false` after the save; the dialogs are manual checks.

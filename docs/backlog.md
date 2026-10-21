@@ -283,3 +283,31 @@ MSVC change to be rebased.
 - *A C shim in `patches/mupdf`*: keeps the abort now, but needs MuPDF's headers, which `mupdf-sys`
   does not expose to dependents, and compile flags matching its build; rejected by the maintainer.
 - *Vendoring `mupdf-sys`*: 65 MB of MuPDF sources in this repository; rejected.
+
+---
+
+## 8. Notice when the open file is changed by another program
+
+**Labels:** `enhancement`, `editing`
+
+### Problem Statement
+
+An in-place save (ADR 0007) writes after the bytes the document was opened with. If another
+program changed the file meanwhile, MuPDF's `ensure_initial_incremental_contents` finds the bytes
+different and copies the opened content into the file before its section, so the other program's
+change is overwritten without a word (Plan 0004, §7).
+
+### Proposed Solution
+
+Before an in-place save, compare the file's length and modification time with the ones at open;
+if they differ, ask whether to overwrite, Save As, or cancel. Optionally watch the file and offer to
+reload while there are no unsaved changes.
+
+### Alternatives Considered
+
+- *Always Save As when the file changed*: safe, but surprising when the change was the app's own
+  earlier save; the open-time values have to be updated after each save either way.
+
+### Additional Context
+
+Out of scope for v0.2 (Plan 0004 §7). Found while reading MuPDF's incremental writer in Phase 1.

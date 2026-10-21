@@ -24,3 +24,4 @@ Each ADR follows a standardized format:
 - [0004: Opening Documents - File Dialog, Drag-and-Drop and Settings](0004-opening-documents.md)
 - [0005: A Search Thread with Its Own Document](0005-search-thread.md)
 - [0006: Clipboard and Text Selection](0006-clipboard-and-selection.md)
+- [0007: Editing Annotations and Saving](0007-editing-and-saving.md)
