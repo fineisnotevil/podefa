@@ -321,8 +321,8 @@ Out of scope for v0.2 (Plan 0004 §7). Found while reading MuPDF's incremental w
 ### Problem Statement
 
 Android and then iOS are targets (CLAUDE.md §1; the maintainer set Android first on 2026-10-21).
-Nothing has been built for either yet. Read from the pinned crates on 2026-10-21, without a mobile
-build (this machine has the Android SDK but no NDK and no Rust mobile targets; CI has no mobile job):
+Read from the pinned crates on 2026-10-21, then checked by a trial Android build of the two library
+crates (below); the app crate has not been built for either:
 
 - **Certain compile blockers, in this repository's app crate:**
   - `rfd` 0.17.2 has file-dialog backends for Windows, macOS, Linux/BSD and wasm only
@@ -332,11 +332,47 @@ build (this machine has the Android SDK but no NDK and no Rust mobile targets; C
   - The app is a `bin` with `main()`. Slint on Android needs the `backend-android-activity-06`
     feature and an `android_main` entry point in a `cdylib` (`slint-1.18.1/android.rs:5-16`), plus
     packaging (an APK/AAB tool such as `cargo-apk` or `xbuild`).
-- **To verify by a trial build:** `mupdf-sys` 0.8.0 builds MuPDF with `make` for every target except
-  MSVC (`mupdf-sys-0.8.0/build.rs:355-364`), so an Android build needs the NDK's clang through the
-  `cc` crate and GNU make on the host; whether it succeeds unchanged is not known. `patches/mupdf`
-  already leaves `font-kit` out on Android (`Cargo.toml:177`). iOS: Slint's winit backend has iOS code
-  (for example `i-slint-backend-winit-1.18.1/clipboard.rs:117`, a `UIPasteboard` clipboard).
+- **Trial build, 2026-10-21: `pdf-core` and `engine-mupdf` build for Android, and their test
+  binaries link.**
+
+  **Setup:**
+  - Host: the maintainer's Debian mini PC (x86_64, forky/sid, 4 cores, 15 GiB).
+  - Toolchain: Rust stable 1.99.1 (the repository pins `stable`), target `aarch64-linux-android`.
+  - NDK: r28c, API level 26, GNU make from Debian.
+
+  **Environment the build needs** (the NDK's own tools, nothing installed system-wide):
+  - `CC`/`CXX`/`AR_aarch64_linux_android`: the NDK's `aarch64-linux-android26-clang`,
+    `aarch64-linux-android26-clang++` and `llvm-ar`.
+  - `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER`: the same clang.
+  - `LIBCLANG_PATH`: the NDK's `toolchains/llvm/prebuilt/linux-x86_64/lib`. mupdf-sys runs
+    `bindgen` (0.72.1), which needs a host libclang.
+  - `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android`: `--sysroot=<ndk>/toolchains/llvm/prebuilt/linux-x86_64/sysroot -isystem <ndk>/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/19/include`.
+    Without the `-isystem`, bindgen fails on `'stddef.h' file not found`.
+
+  **Results:**
+  - `cargo build -p pdf-core --target aarch64-linux-android`: 1.4 s, no change needed.
+  - `cargo build -p engine-mupdf --target aarch64-linux-android`: **succeeds**, 3 min 56 s. Most of
+    that is MuPDF's C sources compiled by `make`; it is rebuilt each time the build script reruns.
+  - `cargo test -p engine-mupdf -p pdf-core --target aarch64-linux-android --no-run`: **fails to
+    link** without the C++ runtime (`__cxa_throw`, `std::length_error`, ...). Part of MuPDF's
+    bundled third-party code is C++, and mupdf-sys links a C++ library only with its `tesseract`
+    feature, as `stdc++` (`mupdf-sys-0.8.0/make.rs:253-258`); on Android that has to be the NDK's
+    libc++.
+  - With `CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-lc++_static -C link-arg=-lc++abi"`,
+    all **15 test executables link** as AArch64 PIE binaries. Their dynamic dependencies are
+    `libc`, `libm`, `libdl`, `liblog` and `libstdc++`, all system libraries on Android.
+  - **Not run:** no Android device or emulator was attached. Running them needs `adb` and a phone,
+    or an emulator. On an x86_64 emulator that means building `x86_64-linux-android` instead.
+
+  **To do in the mobile plan:**
+  - Make the libc++ link part of the build, not an environment variable: a `build.rs` line in
+    `engine-mupdf` for `target_os = "android"`, or upstream in mupdf-sys.
+  - Put the environment above in a script or a CI job.
+
+  **Already handled:** `patches/mupdf` leaves `font-kit` out on Android (`Cargo.toml:177`).
+
+  **iOS:** Slint's winit backend has iOS code (for example `i-slint-backend-winit-1.18.1/clipboard.rs:117`,
+  a `UIPasteboard` clipboard). No iOS build was tried: it needs a Mac.
 - **Design work, not compile errors:**
   - Android hands the app `content://` URIs, not paths. MuPDF and the search thread open by path,
     and an in-place incremental save (ADR 0007) cannot append to a URI. A cache copy, plus a full
@@ -353,10 +389,10 @@ build (this machine has the Android SDK but no NDK and no Rust mobile targets; C
 A plan of its own when the maintainer starts mobile work:
 
 - **Phase 0:**
-  1. Install the NDK and `aarch64-linux-android`.
-  2. Build `pdf-core` and `engine-mupdf` alone, then the app with `rfd`/`arboard` behind a desktop
-     `cfg`.
-  3. Add an Android CI job.
+  1. Run the library tests on a device or emulator (they already build and link, above).
+  2. Build the app with `rfd`/`arboard` behind a desktop `cfg`, an `android_main` entry point and
+     Slint's `backend-android-activity-06`.
+  3. Add an Android CI job (GitHub's Ubuntu runners ship an NDK).
 - **After that:** design file access and the mobile UI.
 
 ### Alternatives Considered
@@ -366,4 +402,5 @@ A plan of its own when the maintainer starts mobile work:
 
 ### Additional Context
 
-Found while answering the maintainer's question on 2026-10-21; nothing was changed for it.
+Found while answering the maintainer's question on 2026-10-21. The trial build changed nothing in
+this repository: everything it needed was environment variables on the build host.
