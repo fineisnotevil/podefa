@@ -110,6 +110,20 @@ pub enum EditOp {
 }
 
 impl EditOp {
+    /// The name MuPDF's undo journal records the edit under.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::AddMarkup { kind, .. } => match kind {
+                MarkupKind::Highlight => "Highlight",
+                MarkupKind::Underline => "Underline",
+                MarkupKind::StrikeOut => "Strike-out",
+                MarkupKind::Squiggly => "Squiggly",
+            },
+            Self::Delete { .. } => "Delete annotation",
+            Self::SetColour { .. } => "Change colour",
+        }
+    }
+
     /// The page the edit changes.
     pub fn page(&self) -> u32 {
         match self {
@@ -196,9 +210,11 @@ pub fn hit(items: &[AnnotInfo], x: f32, y: f32) -> Option<&AnnotInfo> {
 /// Whether the document has changes the file does not (Plan 0004, §3.3: MuPDF's own flag stays
 /// set after an incremental save, so the app counts its edits instead).
 ///
-/// `position` counts the edits applied since the document was opened and `saved` is the position
-/// the file was last written at. Phase 2's undo moves `position` back and forth, which is why the
-/// saved state is a position and not a flag: undoing back to it makes the document clean again.
+/// `position` counts the edits applied since the document was opened, less the ones undone, and
+/// `saved` is the position the file was last written at. Undo and redo move `position` back and
+/// forth, which is why the saved state is a position and not a flag: undoing back to it makes the
+/// document clean again. A new edit after an undo replaces the history beyond it, so a saved
+/// position in that part can never be reached again (`saved` becomes `None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaveState {
     position: u64,
@@ -222,6 +238,19 @@ impl SaveState {
 
     /// An edit was applied.
     pub fn edited(&mut self) {
+        if self.saved.is_some_and(|saved| saved > self.position) {
+            self.saved = None;
+        }
+        self.position += 1;
+    }
+
+    /// The last edit was undone.
+    pub fn undone(&mut self) {
+        self.position = self.position.saturating_sub(1);
+    }
+
+    /// The last undone edit was redone.
+    pub fn redone(&mut self) {
         self.position += 1;
     }
 
@@ -337,6 +366,45 @@ mod tests {
         assert!(!state.is_dirty());
         // The default (no document) is clean too, so nothing asks to be saved.
         assert!(!SaveState::default().is_dirty());
+    }
+
+    #[test]
+    fn undo_and_redo_move_through_the_saved_position() {
+        let mut state = SaveState::new();
+        state.edited();
+        state.edited();
+        state.saved();
+        state.undone();
+        assert!(state.is_dirty(), "one step before the save");
+        state.redone();
+        assert!(!state.is_dirty(), "back at the save");
+        state.undone();
+        state.undone();
+        assert!(
+            state.is_dirty(),
+            "at the opened document, which the file no longer is"
+        );
+        // Undoing past the opened document stays there.
+        state.undone();
+        state.redone();
+        state.redone();
+        assert!(!state.is_dirty());
+    }
+
+    #[test]
+    fn an_edit_after_undoing_past_the_save_loses_it() {
+        let mut state = SaveState::new();
+        state.edited();
+        state.edited();
+        state.saved();
+        state.undone();
+        state.undone();
+        // A new branch: the saved position (2) is gone for good, even when the count reaches 2.
+        state.edited();
+        state.edited();
+        assert!(state.is_dirty());
+        state.saved();
+        assert!(!state.is_dirty());
     }
 
     #[test]

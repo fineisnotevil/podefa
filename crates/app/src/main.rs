@@ -29,7 +29,7 @@ use pdf_core::{
     TileScheduler, ZOOM_DEFAULT_MILLI, ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli,
     zoom_in_milli, zoom_out_milli,
 };
-use pdf_core::{OutlineItem, SaveError};
+use pdf_core::{HistoryChange, OutlineItem, SaveError};
 use slint::platform::Key;
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel,
@@ -165,6 +165,9 @@ slint::slint! {
         in-out property <[color]> swatches;
         in-out property <[HitView]> annot-sel-rects;
         in-out property <bool> has-annot-selection: false;
+        // Whether Edit > Undo and Redo have anything to do (Plan 0004 Phase 2).
+        in-out property <bool> can-undo: false;
+        in-out property <bool> can-redo: false;
         // Where the viewport sits in the window, for scripted pointer input (bench only).
         out property <length> viewport-abs-x: viewport.absolute-position.x;
         out property <length> viewport-abs-y: viewport.absolute-position.y;
@@ -212,6 +215,8 @@ slint::slint! {
         callback choose_tool(int);
         callback choose_colour(int);
         callback delete_annotation();
+        callback undo();
+        callback redo();
         callback save();
         callback save_as();
         // The pointer moved over the page without a button down, viewport-relative.
@@ -282,6 +287,19 @@ slint::slint! {
             }
             Menu {
                 title: "Edit";
+                MenuItem {
+                    title: "Undo";
+                    shortcut: @keys(Control + Z);
+                    enabled: root.can-undo;
+                    activated => { root.undo(); }
+                }
+                MenuItem {
+                    title: "Redo";
+                    shortcut: @keys(Control + Y);
+                    enabled: root.can-redo;
+                    activated => { root.redo(); }
+                }
+                MenuSeparator {}
                 MenuItem {
                     title: "Copy";
                     shortcut: @keys(Control + C);
@@ -1822,20 +1840,58 @@ impl AppState {
         });
     }
 
-    /// The engine applied an edit, or refused it.
+    /// The engine applied an edit, or refused it. An applied edit is counted when its `History`
+    /// arrives, like an undo or a redo.
     fn edited(&mut self, ui: &MainWindow, generation: u64, result: Result<(), String>) {
         if generation != self.doc_generation {
             return;
         }
-        match result {
-            Ok(()) => {
-                self.save_state.edited();
-                ui.set_dirty(self.save_state.is_dirty());
-            }
-            Err(message) => {
-                ui.set_status_text(SharedString::from(format!("Could not edit: {message}")));
-            }
+        if let Err(message) = result {
+            ui.set_status_text(SharedString::from(format!("Could not edit: {message}")));
         }
+    }
+
+    /// Ctrl+Z: undo the last edit (Plan 0004 Phase 2, ADR 0008).
+    fn undo(&mut self) {
+        if self.editable {
+            let _ = self.cmd_tx.send(EngineCmd::Undo {
+                generation: self.doc_generation,
+            });
+        }
+    }
+
+    /// Ctrl+Y or Ctrl+Shift+Z: redo the last undone edit.
+    fn redo(&mut self) {
+        if self.editable {
+            let _ = self.cmd_tx.send(EngineCmd::Redo {
+                generation: self.doc_generation,
+            });
+        }
+    }
+
+    /// The undo history moved: count the step for the unsaved-changes state, and enable Undo and
+    /// Redo for what is left. A report that moved nothing (after opening or a Save As) is the
+    /// engine's state whatever the generation; a step of a previous document is dropped.
+    fn history(
+        &mut self,
+        ui: &MainWindow,
+        generation: u64,
+        change: HistoryChange,
+        can_undo: bool,
+        can_redo: bool,
+    ) {
+        if change != HistoryChange::None && generation != self.doc_generation {
+            return;
+        }
+        match change {
+            HistoryChange::Edited => self.save_state.edited(),
+            HistoryChange::Undone => self.save_state.undone(),
+            HistoryChange::Redone => self.save_state.redone(),
+            HistoryChange::None => {}
+        }
+        ui.set_dirty(self.has_unsaved_changes());
+        ui.set_can_undo(self.editable && can_undo);
+        ui.set_can_redo(self.editable && can_redo);
     }
 
     /// Marks the selected text: one markup annotation per page of the selection.
@@ -2725,6 +2781,8 @@ impl AppState {
         ui.set_editable(editable);
         self.save_state = SaveState::new();
         ui.set_dirty(false);
+        ui.set_can_undo(false);
+        ui.set_can_redo(false);
         self.saving = false;
         self.after_save = None;
         if !editable {
@@ -3074,6 +3132,8 @@ enum KeyCommand {
     SaveAs,
     Mark(MarkupKind),
     DeleteAnnotation,
+    Undo,
+    Redo,
 }
 
 /// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
@@ -3094,6 +3154,9 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             'c' | 'C' => Some(KeyCommand::Copy),
             's' | 'S' if shift => Some(KeyCommand::SaveAs),
             's' | 'S' => Some(KeyCommand::Save),
+            'z' | 'Z' if shift => Some(KeyCommand::Redo),
+            'z' | 'Z' => Some(KeyCommand::Undo),
+            'y' | 'Y' => Some(KeyCommand::Redo),
             _ => None,
         };
     }
@@ -3407,6 +3470,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 } => {
                     with_state(|state| state.edited(&ui, generation, result));
                 }
+                EngineEvent::History {
+                    generation,
+                    change,
+                    can_undo,
+                    can_redo,
+                } => {
+                    with_state(|state| state.history(&ui, generation, change, can_undo, can_redo));
+                }
                 EngineEvent::Saved { path, result } => {
                     match with_state_ret(|state| state.saved(&ui, path, result)).flatten() {
                         Some(SavedNext::Then(then)) => run_after(&ui, then),
@@ -3545,6 +3616,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
                 KeyCommand::DeleteAnnotation => state.delete_annotation(&ui),
+                KeyCommand::Undo => state.undo(),
+                KeyCommand::Redo => state.redo(),
                 KeyCommand::Open | KeyCommand::SaveAs => {}
             });
             true
@@ -3848,6 +3921,9 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    main_window.on_undo(|| with_state(|state| state.undo()));
+    main_window.on_redo(|| with_state(|state| state.redo()));
+
     {
         let weak = main_window.as_weak();
         main_window.on_delete_annotation(move || {
@@ -4073,6 +4149,10 @@ mod tests {
             key_command("k", false, false),
             Some(KeyCommand::Mark(MarkupKind::StrikeOut))
         );
+        assert_eq!(key_command("z", true, false), Some(KeyCommand::Undo));
+        assert_eq!(key_command("Z", true, true), Some(KeyCommand::Redo));
+        assert_eq!(key_command("y", true, false), Some(KeyCommand::Redo));
+        assert_eq!(key_command("z", false, false), None);
         // With ctrl they are not markup: Ctrl+H, Ctrl+U and Ctrl+K stay free.
         assert_eq!(key_command("h", true, false), None);
         assert_eq!(

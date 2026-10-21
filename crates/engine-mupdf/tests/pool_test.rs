@@ -73,10 +73,15 @@ fn open(handle: &EngineHandle, rx: &Receiver<EngineEvent>, name: &str) -> Vec<Pa
         EngineEvent::Opened { page_sizes, .. } => page_sizes,
         other => panic!("expected Opened, got {other:?}"),
     };
-    // The actor follows every `Opened` with the document's outline (Plan 0003, §4.1).
+    // The actor follows every `Opened` with the document's outline (Plan 0003, §4.1) and where its
+    // undo history stands (Plan 0004 Phase 2).
     match next(rx) {
-        EngineEvent::Outline { .. } => sizes,
+        EngineEvent::Outline { .. } => {}
         other => panic!("expected Outline after Opened, got {other:?}"),
+    }
+    match next(rx) {
+        EngineEvent::History { .. } => sizes,
+        other => panic!("expected History after Outline, got {other:?}"),
     }
 }
 

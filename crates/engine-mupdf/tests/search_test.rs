@@ -78,6 +78,8 @@ fn open_text(pages: usize) -> (EngineHandle, Receiver<EngineEvent>) {
         .expect("actor is alive");
     assert!(matches!(next(&rx), EngineEvent::Opened { .. }));
     assert!(matches!(next(&rx), EngineEvent::Outline { .. }));
+    // Then where the undo history stands (Plan 0004 Phase 2).
+    assert!(matches!(next(&rx), EngineEvent::History { .. }));
     (handle, rx)
 }
 

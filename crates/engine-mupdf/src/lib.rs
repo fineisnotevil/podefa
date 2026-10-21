@@ -20,8 +20,8 @@ use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
 use pdf_core::annot::{AnnotInfo, EditOp};
 use pdf_core::{
-    Bitmap, EngineCmd, EngineEvent, OutlineItem, PageGeometry, PageSize, PdfEngine, PixelFormat,
-    Rect, RequestId, SaveError, TILE_STRIDE_PX, thumb_scale_milli,
+    Bitmap, EngineCmd, EngineEvent, HistoryChange, OutlineItem, PageGeometry, PageSize, PdfEngine,
+    PixelFormat, Rect, RequestId, SaveError, TILE_STRIDE_PX, thumb_scale_milli,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -148,8 +148,10 @@ pub enum MupdfError {
 ///
 /// A PDF is held as a [`PdfDocument`], which can be annotated and saved; any other format MuPDF
 /// opens (images, EPUB, ...) as a plain [`Document`], which is view-only (Plan 0004, §1).
-/// `revisions` counts the edits of each page (Plan 0004, §4.1): every job carries the revision of
-/// the display list it was given, so the app can tell pixels drawn before an edit.
+/// `revisions` counts the changes of each page (Plan 0004, §4.1) - edits, undos and redos: every
+/// job carries the revision of the display list it was given, so the app can tell pixels drawn
+/// before a change. `history` is the page each step of MuPDF's undo journal changed, in journal
+/// order (ADR 0008): the journal knows how to undo a step, this knows which page to redraw.
 pub struct MupdfEngine {
     doc: Option<Doc>,
     path: Option<PathBuf>,
@@ -157,6 +159,7 @@ pub struct MupdfEngine {
     scratch: Option<Pixmap>,
     display_lists: Vec<(u32, Arc<DisplayList>)>,
     revisions: Vec<u32>,
+    history: Vec<u32>,
 }
 
 /// The open document, editable or not.
@@ -204,6 +207,7 @@ impl MupdfEngine {
             scratch: None,
             display_lists: Vec::new(),
             revisions: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -240,21 +244,25 @@ impl MupdfEngine {
             .max(0) as usize;
 
         let doc = if doc.is_pdf() {
-            Doc::Pdf(
-                PdfDocument::try_from(doc).map_err(|source| MupdfError::OpenFailed {
-                    path: path.to_path_buf(),
-                    source,
-                })?,
-            )
+            let mut pdf = PdfDocument::try_from(doc).map_err(|source| MupdfError::OpenFailed {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            // Undo and redo (ADR 0008). Without a journal the document still opens and edits; it
+            // only cannot be undone, which `history_state` reports.
+            let _ = pdf.enable_journal();
+            Doc::Pdf(pdf)
         } else {
             Doc::Plain(doc)
         };
         self.doc = Some(doc);
         self.path = Some(path.to_path_buf());
         self.password = password.map(str::to_owned);
-        // A display list belongs to the document that produced it, and so do the revisions.
+        // A display list belongs to the document that produced it, and so do the revisions and the
+        // history.
         self.display_lists.clear();
         self.revisions = vec![0; count];
+        self.history.clear();
 
         Ok(count)
     }
@@ -486,6 +494,14 @@ impl MupdfEngine {
         }
     }
 
+    fn pdf_mut(&mut self) -> Result<&mut PdfDocument, MupdfError> {
+        match self.doc.as_mut() {
+            Some(Doc::Pdf(pdf)) => Ok(pdf),
+            Some(Doc::Plain(_)) => Err(MupdfError::NotEditable),
+            None => Err(MupdfError::NoDocumentOpen),
+        }
+    }
+
     /// Whether the open document can be annotated and saved.
     pub fn is_editable(&self) -> bool {
         matches!(self.doc, Some(Doc::Pdf(_)))
@@ -508,6 +524,10 @@ impl MupdfEngine {
     /// Applies one edit (Plan 0004, §4.1) and gives the page a new revision, which it returns.
     /// The page's cached display list is dropped, so its next job is drawn from the edited page;
     /// lists already handed to workers keep drawing the old revision, which their jobs say.
+    ///
+    /// The edit is one operation of MuPDF's undo journal (ADR 0008): everything it changes -
+    /// cutting old markup included - is undone by one undo, and an edit that fails is rolled back
+    /// whole (`pdf_abandon_operation`).
     pub fn edit(&mut self, op: &EditOp) -> Result<u32, MupdfError> {
         let page = op.page();
         if page as usize >= self.revisions.len() {
@@ -516,11 +536,78 @@ impl MupdfEngine {
                 total_pages: self.revisions.len(),
             });
         }
-        edit::apply(self.pdf()?, op)?;
+        let pdf = self.pdf()?;
+        let journal = |source| MupdfError::EditFailed { page, source };
+        let before = journal_position(pdf);
+        pdf.begin_operation(op.title()).map_err(journal)?;
+        if let Err(err) = edit::apply(pdf, op) {
+            let _ = pdf.abandon_operation();
+            return Err(err);
+        }
+        pdf.end_operation().map_err(journal)?;
+        // An edit that changed nothing adds no journal step; one that did drops any redo steps.
+        let after = journal_position(pdf);
+        if after > before {
+            self.history.truncate(before);
+            self.history.push(page);
+        }
+        Ok(self.touch(page))
+    }
+
+    /// Undoes the last edit; returns the page it changed with its new revision, or `None` when
+    /// there was nothing to undo.
+    pub fn undo(&mut self) -> Result<Option<(u32, u32)>, MupdfError> {
+        let pdf = self.pdf_mut()?;
+        let position = journal_position(pdf);
+        if position == 0 {
+            return Ok(None);
+        }
+        pdf.undo()
+            .map_err(|e| MupdfError::Backend(format!("undo: {e}")))?;
+        Ok(self
+            .history
+            .get(position - 1)
+            .copied()
+            .map(|page| (page, self.touch(page))))
+    }
+
+    /// Redoes the last undone edit, like [`Self::undo`].
+    pub fn redo(&mut self) -> Result<Option<(u32, u32)>, MupdfError> {
+        let pdf = self.pdf_mut()?;
+        let (position, steps) = pdf.undo_redo_state().unwrap_or((0, 0));
+        if position >= steps {
+            return Ok(None);
+        }
+        pdf.redo()
+            .map_err(|e| MupdfError::Backend(format!("redo: {e}")))?;
+        Ok(self
+            .history
+            .get(position as usize)
+            .copied()
+            .map(|page| (page, self.touch(page))))
+    }
+
+    /// `(can_undo, can_redo)`: both false for a document without a journal.
+    pub fn history_state(&self) -> (bool, bool) {
+        match self.pdf() {
+            Ok(pdf) => {
+                let (position, steps) = pdf.undo_redo_state().unwrap_or((0, 0));
+                (position > 0, position < steps)
+            }
+            Err(_) => (false, false),
+        }
+    }
+
+    /// A page changed: drop its display list and give it a new revision, which is returned.
+    fn touch(&mut self, page: u32) -> u32 {
         self.display_lists.retain(|(cached, _)| *cached != page);
-        let revision = &mut self.revisions[page as usize];
-        *revision += 1;
-        Ok(*revision)
+        match self.revisions.get_mut(page as usize) {
+            Some(revision) => {
+                *revision += 1;
+                *revision
+            }
+            None => 0,
+        }
     }
 
     /// Writes the document (Plan 0004, §3.3 and §4.4) and returns the file and its size.
@@ -603,6 +690,12 @@ impl MupdfEngine {
         self.display_lists.push((page_index, Arc::clone(&list)));
         Ok(list)
     }
+}
+
+/// How many steps of the undo journal are applied (0 without a journal).
+fn journal_position(pdf: &PdfDocument) -> usize {
+    pdf.undo_redo_state()
+        .map_or(0, |(position, _)| position as usize)
 }
 
 fn file_len(path: &Path) -> u64 {
@@ -769,6 +862,7 @@ impl EngineHandle {
                                     let _ = event_tx.send(EngineEvent::Outline {
                                         items: engine.outline(),
                                     });
+                                    Self::history(&event_tx, &engine, 0, HistoryChange::None);
                                 }
                                 Err(err) => {
                                     let _ = event_tx.send(EngineEvent::Error {
@@ -872,11 +966,48 @@ impl EngineHandle {
                                 });
                                 Ok(())
                             });
+                            let applied = result.is_ok();
                             let _ = event_tx.send(EngineEvent::Edited {
                                 edit_id,
                                 generation,
                                 result: result.map_err(|err| err.to_string()),
                             });
+                            if applied {
+                                Self::history(
+                                    &event_tx,
+                                    &engine,
+                                    generation,
+                                    HistoryChange::Edited,
+                                );
+                            }
+                        }
+                        EngineCmd::Undo { generation } | EngineCmd::Redo { generation } => {
+                            let undo = matches!(cmd, EngineCmd::Undo { .. });
+                            let moved = if undo { engine.undo() } else { engine.redo() };
+                            match moved {
+                                Ok(Some((page, revision))) => {
+                                    let items = engine.annotations(page).unwrap_or_default();
+                                    let _ = event_tx.send(EngineEvent::PageChanged {
+                                        generation,
+                                        page,
+                                        revision,
+                                        items,
+                                    });
+                                    let change = if undo {
+                                        HistoryChange::Undone
+                                    } else {
+                                        HistoryChange::Redone
+                                    };
+                                    Self::history(&event_tx, &engine, generation, change);
+                                }
+                                Ok(None) => Self::history(
+                                    &event_tx,
+                                    &engine,
+                                    generation,
+                                    HistoryChange::None,
+                                ),
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
                         }
                         EngineCmd::Save { path } => {
                             let result = engine.save(path.as_deref());
@@ -884,14 +1015,19 @@ impl EngineHandle {
                                 Ok((file, _)) => file.clone(),
                                 Err(_) => path.clone().unwrap_or_default(),
                             };
-                            // After a Save As the search thread reads the new file too.
+                            // After a Save As the search thread reads the new file too, and the
+                            // history starts again with the reopened copy (ADR 0008).
                             if path.is_some() && result.is_ok() {
                                 search.document(saved_to.clone(), engine.password.clone());
                             }
+                            let switched = path.is_some() && result.is_ok();
                             let _ = event_tx.send(EngineEvent::Saved {
                                 path: saved_to,
                                 result: result.map(|(_, bytes)| bytes),
                             });
+                            if switched {
+                                Self::history(&event_tx, &engine, 0, HistoryChange::None);
+                            }
                         }
                         EngineCmd::Cancel { request_id } => pool.cancel(request_id),
                         EngineCmd::Shutdown => break,
@@ -911,6 +1047,22 @@ impl EngineHandle {
         };
 
         (handle, event_rx)
+    }
+
+    /// Reports where the undo history stands.
+    fn history(
+        events: &Sender<EngineEvent>,
+        engine: &MupdfEngine,
+        generation: u64,
+        change: HistoryChange,
+    ) {
+        let (can_undo, can_redo) = engine.history_state();
+        let _ = events.send(EngineEvent::History {
+            generation,
+            change,
+            can_undo,
+            can_redo,
+        });
     }
 
     /// Reports an engine failure to the UI thread.

@@ -2137,11 +2137,27 @@ impl Driver {
                                 ui.get_has_annot_selection()
                             ),
                         );
+                        with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                    }
+                    4 => {
+                        check(
+                            "Ctrl+Z undoes the delete",
+                            format!("annotations={marked} can_redo=true"),
+                            format!("annotations={} can_redo={}", marks(), ui.get_can_redo()),
+                        );
+                        with_modifier(ui, Key::Control, || press(ui, "y".into()));
+                    }
+                    5 => {
+                        check(
+                            "Ctrl+Y redoes it",
+                            format!("annotations={} can_redo=false", marked - 1),
+                            format!("annotations={} can_redo={}", marks(), ui.get_can_redo()),
+                        );
                         if self.cfg.edit_save {
                             ui.invoke_save();
                         }
                     }
-                    4 if self.cfg.edit_save => {
+                    6 if self.cfg.edit_save => {
                         check(
                             "saved",
                             "dirty=false".to_owned(),

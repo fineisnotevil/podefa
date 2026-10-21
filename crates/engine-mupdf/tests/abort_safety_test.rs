@@ -80,6 +80,8 @@ fn cancelling_tiles_inside_a_clip_does_not_end_the_process() {
         panic!("expected Opened");
     };
     assert!(matches!(next(&rx), EngineEvent::Outline { .. }));
+    // Then where the undo history stands (Plan 0004 Phase 2).
+    assert!(matches!(next(&rx), EngineEvent::History { .. }));
     let geometry = PageGeometry::new(0, page_sizes[0].bounds(), 2_000);
 
     // A batch of slow tiles, cancelled while the pool is inside them, several times over.

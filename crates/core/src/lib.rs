@@ -186,6 +186,11 @@ pub enum EngineCmd {
     /// Write the document: `None` appends an incremental update to the open file, `Some(path)`
     /// writes a full copy there and switches to it (Plan 0004, §4.4).
     Save { path: Option<PathBuf> },
+    /// Undo the last edit (Plan 0004 Phase 2): answered with [`EngineEvent::PageChanged`] for the
+    /// page it touched, then [`EngineEvent::History`]. Nothing to undo is not an error.
+    Undo { generation: u64 },
+    /// Redo the last undone edit, answered like [`EngineCmd::Undo`].
+    Redo { generation: u64 },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -318,6 +323,14 @@ pub enum EngineEvent {
         generation: u64,
         result: Result<(), String>,
     },
+    /// The undo history moved or was reset: what happened, and whether undo and redo are possible
+    /// now. Sent after every edit, undo and redo, and when a document is opened or saved as a copy.
+    History {
+        generation: u64,
+        change: HistoryChange,
+        can_undo: bool,
+        can_redo: bool,
+    },
     /// A save finished: the file now holds the document (its size in bytes), or why not. After a
     /// Save As `path` is the new file, which the engine has switched to.
     Saved {
@@ -333,6 +346,19 @@ pub enum EngineEvent {
     TileAborted { request_id: RequestId, ms: u64 },
     /// An error occurred.
     Error { message: String },
+}
+
+/// How the undo history changed (see [`EngineEvent::History`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryChange {
+    /// An edit was added (and any redo steps beyond it dropped).
+    Edited,
+    /// The last edit was undone.
+    Undone,
+    /// The last undone edit was redone.
+    Redone,
+    /// Nothing moved: a report after opening, a Save As, or an undo or redo with nothing to do.
+    None,
 }
 
 /// Why a save did not happen.
