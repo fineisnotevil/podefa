@@ -1107,3 +1107,15 @@ step (`t_edit` counts those two edits too, hence n = 22).
   the edits finish before the next one and no tile is ever late (0 dropped in the other two runs).
 - **Row T**: the save state is unit-tested (`pdf_core::annot`), the runs check `dirty=true` after the
   edits and `dirty=false` after the save; the dialogs are manual checks.
+
+**Re-run after the review** (`8aa20cc`: new markup cuts old markup of the same kind; `e09a2b4`: a
+click clears the selection's highlight), same commands, 2026-10-21:
+
+| Run | `t_edit` min / med / max | n | old-revision tiles dropped | checks |
+| :--- | ---: | ---: | ---: | :--- |
+| drag + save, `select_3p.pdf` | 2 / 3 / 11 ms | 22 | 0 | 5 of 5; `t_save` 1 ms, 17,153 bytes |
+| W, bursts + scroll | 4 / 8 / 14 ms | 22 | 0 | 4 of 4; 40 highlights (100 edits over 40 lines, each line's newest replacing the one before), then 39 |
+
+No late tile arrived in this W run: whether one does depends on how the bursts fall against the
+workers, which is why the earlier runs saw 5 and 2. `--bench-select` with the highlight rows
+checked: 11 of 11 (8 of 11 with the old `show_selection`).

@@ -54,7 +54,11 @@ selection, selects, recolours and deletes annotations, and saves. Four things ha
    `rfd::MessageDialog`, and Yes runs the action once the save succeeded.
 5. **Markup both ways** (question 4): with text selected, a markup button (or H, U, K) marks it; with
    nothing selected the button turns the tool on, and every drag over text marks when it ends. A
-   click without a drag on an annotation selects it.
+   click without a drag on an annotation selects it. **New markup replaces old markup of the same
+   kind where they overlap** (Phase 1 review, option B): the old annotation is cut to the parts of
+   its lines outside the new one, or deleted when nothing is left, in the same edit; other kinds
+   stay stacked, and markup with a comment or with quads that are not upright rectangles is never
+   cut.
 6. **No author unless one is set** (question 5): `author=` in the settings file; nothing personal is
    written otherwise.
 
