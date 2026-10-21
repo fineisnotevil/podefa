@@ -137,6 +137,12 @@ pub struct MupdfEngine {
     display_lists: Vec<(u32, Arc<DisplayList>)>,
 }
 
+/// Whether pages are drawn with their annotations (highlights, notes, stamps, form-field
+/// appearances), as other PDF readers draw them. `false` would draw the page's content stream alone,
+/// which hid every annotation a document had until Plan 0004 §3.1. One constant for the display
+/// lists and the full-page render, so tiles and their reference render cannot disagree.
+const DRAW_ANNOTATIONS: bool = true;
+
 /// Display lists kept per document: the pages near the viewport, plus room for the one the user
 /// just left (Plan 0002, §4.3).
 ///
@@ -344,13 +350,12 @@ impl MupdfEngine {
         let list = if cache {
             self.display_list_for(page_index, &page)?
         } else {
-            Arc::new(
-                page.to_display_list(false)
-                    .map_err(|e| MupdfError::RenderFailed {
-                        page_index: page_index as usize,
-                        source: e,
-                    })?,
-            )
+            Arc::new(page.to_display_list(DRAW_ANNOTATIONS).map_err(|e| {
+                MupdfError::RenderFailed {
+                    page_index: page_index as usize,
+                    source: e,
+                }
+            })?)
         };
         Ok(Prepared {
             geometry: *geometry,
@@ -439,13 +444,12 @@ impl MupdfEngine {
             self.display_lists.push(entry);
             return Ok(list);
         }
-        let list = Arc::new(
-            page.to_display_list(false)
-                .map_err(|e| MupdfError::RenderFailed {
-                    page_index: page_index as usize,
-                    source: e,
-                })?,
-        );
+        let list = Arc::new(page.to_display_list(DRAW_ANNOTATIONS).map_err(|e| {
+            MupdfError::RenderFailed {
+                page_index: page_index as usize,
+                source: e,
+            }
+        })?);
         if self.display_lists.len() >= DISPLAY_LIST_CACHE_PAGES {
             self.display_lists.remove(0);
         }
@@ -542,12 +546,12 @@ impl PdfEngine for MupdfEngine {
         let cs = Colorspace::device_rgb();
         // alpha = false produces 3 channels: opaque RGB, cleared to white (the page's paper), so
         // no byte is spent on a channel that would be 255 everywhere.
-        let pixmap =
-            page.to_pixmap(&ctm, &cs, false, false)
-                .map_err(|e| MupdfError::RenderFailed {
-                    page_index,
-                    source: e,
-                })?;
+        let pixmap = page
+            .to_pixmap(&ctm, &cs, false, DRAW_ANNOTATIONS)
+            .map_err(|e| MupdfError::RenderFailed {
+                page_index,
+                source: e,
+            })?;
 
         let width = pixmap.width();
         let height = pixmap.height();
