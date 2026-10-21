@@ -51,7 +51,7 @@ messense/mupdf-rs#267 proposed it and was closed unmerged.
    - Undoing back to the saved position is clean again.
    - A new edit after undoing past the save makes that position unreachable.
    - Edit > Undo is Ctrl+Z; Redo is Ctrl+Y or Ctrl+Shift+Z.
-6. **An upstream pull request** adds the same wrappers to mupdf-sys and mupdf-rs. When a release
+6. **An upstream pull request** adds the same wrappers to mupdf-sys and mupdf-rs (messense/mupdf-rs#273). When a release
    carries them, `journal/`, `build.rs` and the pin go.
 
 ## Consequences
