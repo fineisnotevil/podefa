@@ -224,6 +224,45 @@ pub fn select(
     (pages, text)
 }
 
+/// How far outside a line's box, in points, a pointer still counts as on the text: enough to
+/// forgive a press just above a lowercase word or between two characters, little enough that
+/// margins and gaps between paragraphs are not text.
+pub const TEXT_HIT_PAD_PT: f32 = 3.0;
+
+/// One box per line, covering its characters: what the app hit-tests the pointer against to know
+/// whether it is over text (Plan 0003 Phase 4 review).
+pub fn line_boxes(chars: &[SelChar]) -> Vec<Rect> {
+    let mut boxes: Vec<Rect> = Vec::new();
+    let mut last_line = None;
+    for c in chars {
+        if c.ch.is_whitespace() && last_line != Some(c.line) {
+            // A line that starts with spaces only begins at its first visible character.
+            continue;
+        }
+        if last_line != Some(c.line) {
+            boxes.push(c.rect);
+            last_line = Some(c.line);
+        } else if let Some(r) = boxes.last_mut() {
+            let x0 = r.x.min(c.rect.x);
+            let y0 = r.y.min(c.rect.y);
+            let x1 = (r.x + r.width).max(c.rect.x + c.rect.width);
+            let y1 = (r.y + r.height).max(c.rect.y + c.rect.height);
+            *r = Rect::new(x0, y0, x1 - x0, y1 - y0);
+        }
+    }
+    boxes
+}
+
+/// Whether a page-space point is on a line of text, within [`TEXT_HIT_PAD_PT`] of its box.
+pub fn on_text(lines: &[Rect], x: f32, y: f32) -> bool {
+    lines.iter().any(|r| {
+        x >= r.x - TEXT_HIT_PAD_PT
+            && x <= r.x + r.width + TEXT_HIT_PAD_PT
+            && y >= r.y - TEXT_HIT_PAD_PT
+            && y <= r.y + r.height + TEXT_HIT_PAD_PT
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +372,27 @@ mod tests {
             |p| pages[p as usize].clone(),
         );
         assert_eq!(back, text);
+    }
+
+    #[test]
+    fn a_pointer_is_on_text_only_near_a_line() {
+        // Two lines: "hello world" at x 50..160, y 100..112, and "ab" at y 120..132.
+        let chars = page(&["hello world", "ab"]);
+        let lines = line_boxes(&chars);
+        assert_eq!(
+            lines,
+            vec![
+                Rect::new(50.0, 100.0, 110.0, 12.0),
+                Rect::new(50.0, 120.0, 20.0, 12.0)
+            ]
+        );
+        assert!(on_text(&lines, 55.0, 105.0), "inside a word");
+        assert!(on_text(&lines, 105.0, 105.0), "on the space between words");
+        assert!(on_text(&lines, 48.0, 99.0), "within the pad");
+        assert!(!on_text(&lines, 300.0, 105.0), "far right of the line");
+        assert!(!on_text(&lines, 100.0, 125.0), "right of the short line");
+        assert!(!on_text(&lines, 55.0, 400.0), "below the text");
+        assert!(!on_text(&[], 55.0, 105.0), "a page without text");
     }
 
     #[test]

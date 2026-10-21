@@ -2616,6 +2616,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 } => {
                     with_state(|state| state.apply_selection(&ui, generation, pages, text));
                 }
+                // The hover and click hit-test arrives with the next commit.
+                EngineEvent::TextLines { .. } => {}
                 EngineEvent::Outline { items } => {
                     with_state(|state| state.set_outline(items));
                 }

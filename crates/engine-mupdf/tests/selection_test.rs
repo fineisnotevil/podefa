@@ -156,6 +156,24 @@ fn words_and_lines_snap_and_a_drag_inside_a_word_selects_part_of_it() {
 }
 
 #[test]
+fn a_page_reports_one_box_per_text_line() {
+    let (handle, rx) = open(1);
+    handle.send(EngineCmd::TextLines { page: 0 }).expect("send");
+    let lines = loop {
+        if let EngineEvent::TextLines { page: 0, lines } = next(&rx) {
+            break lines;
+        }
+    };
+    assert_eq!(lines.len(), LINES, "one box per line of the page");
+    // The first line starts at the text's left edge (54 pt) and sits just above its baseline (42 pt).
+    let first = lines[0];
+    assert!((first.x - 54.0).abs() < 1.0, "{first:?}");
+    assert!(first.y < 42.0 && first.y + first.height > 39.0, "{first:?}");
+    // Lines go down the page 12 pt apart.
+    assert!((lines[1].y - first.y - 12.0).abs() < 0.5, "{:?}", lines[1]);
+}
+
+#[test]
 fn a_selection_is_answered_while_a_long_search_runs() {
     // Selection is served between two pages of a search, not after it.
     let (handle, rx) = open(400);

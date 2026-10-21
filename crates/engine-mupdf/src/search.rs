@@ -52,6 +52,9 @@ enum SearchCmd {
         mode: SelectMode,
         generation: u64,
     },
+    Lines {
+        page: u32,
+    },
 }
 
 /// Pages whose character lists are kept for selection: a drag recomputes on every move.
@@ -110,6 +113,13 @@ impl SearchThread {
                 mode,
                 generation,
             });
+        }
+    }
+
+    /// Asks for a page's text line boxes; answered ahead of a running search.
+    pub(crate) fn text_lines(&self, page: u32) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(SearchCmd::Lines { page });
         }
     }
 
@@ -204,7 +214,14 @@ impl Searcher {
                 }
             }
             select @ SearchCmd::Select { .. } => self.select_latest(select),
+            SearchCmd::Lines { page } => self.send_lines(page),
         }
+    }
+
+    /// A page's text line boxes, from the same character cache selection uses.
+    fn send_lines(&mut self, page: u32) {
+        let lines = select::line_boxes(&self.page_chars(page));
+        let _ = self.events.send(EngineEvent::TextLines { page, lines });
     }
 
     /// Serves a selection, skipping to the newest one already waiting: during a drag only the
@@ -213,6 +230,7 @@ impl Searcher {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
                 newer @ SearchCmd::Select { .. } => latest = newer,
+                SearchCmd::Lines { page } => self.send_lines(page),
                 other => self.pending.push_back(other),
             }
         }
@@ -272,6 +290,7 @@ impl Searcher {
             while let Ok(cmd) = self.rx.try_recv() {
                 match cmd {
                     select @ SearchCmd::Select { .. } => self.select_latest(select),
+                    SearchCmd::Lines { page } => self.send_lines(page),
                     other => self.pending.push_back(other),
                 }
             }
