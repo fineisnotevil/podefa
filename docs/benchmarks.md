@@ -1184,3 +1184,46 @@ same build without a change.
 The first run of `--bench-note` placed the note on line 45 (579 pt). That is below the viewport of
 the default 900x700 window, so the scripted click never reached the page: 0 of 5. The run now uses
 line 30.
+
+### 10.6 Phase 4: ink (rows V, X)
+
+Row V's engine half is a test (`crates/engine-mupdf/tests/ink_test.rs`): a 2000-point wave with
+sub-point jitter is simplified at 0.5 pt (to under a quarter of its points), committed, saved in
+place, and its ink list read back by a separate `PdfDocument` equals the simplified points within
+0.01 pt. The line width reads back as set. Recolour, delete and undo keep the stroke.
+
+Through a real window, release build of `83fff9e`, 2026-10-22, the §1 machine, viewport 884x612
+logical, scale factor 1:
+
+```powershell
+targeteleasepp.exe target	mp\ink_bench.pdf --bench-ink --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+On a copy of `select_3p.pdf`, a 2000-point stroke drawn with pointer events:
+
+- `ink_rebuild_ms` median **0.184**, max **0.570** over 2000 moves (`ink_points` = 2000). **Pass**
+  (<= 4 ms).
+- 4 of 4 checks: the committed stroke equals the simplified points the app sent and the live path
+  is gone; Ctrl+Z removes it; Ctrl+Y brings it back; a click on the line selects it, one 100 pt
+  away inside its bounds does not.
+
+Row X, same build, one run each:
+
+```powershell
+targeteleasepp.exe target	mp\mem_on.pdf --bench-edit 1000 --bench-edit-burst 10 --bench-step-ms 50 --bench-settle-ms 2000
+$env:FA_PDF_NO_JOURNAL=1; targeteleasepp.exe target	mp\mem_off.pdf --bench-edit 1000 --bench-edit-burst 10 --bench-step-ms 50 --bench-settle-ms 2000
+```
+
+| Journal | n = 0 | n = 100 | n = 1000 |
+| :--- | ---: | ---: | ---: |
+| on | 149.1 MiB | 156.0 MiB | 160.9 MiB |
+| off | 152.1 MiB | 157.8 MiB | 163.4 MiB |
+
+The edits cycle over 40 lines, so each highlight after the 40th replaces one (Plan 0004 Phase 1
+review, option B) and the page keeps 40 annotations. 1000 edits cost about 12 MiB of working set
+either way; the journal's share is smaller than the difference between two runs. Without the
+journal the edit phase's "Ctrl+Z undoes the delete" check fails, as it must. `t_edit` median was
+10 ms in both runs, under load of 10 edits per 50 ms tick.
+
+`--bench-note` (5 of 5), `--bench-select` (11 of 11) and `--bench-edit 20` (6 of 6, `t_edit` median
+3 ms) were re-run on the same build without a change.
