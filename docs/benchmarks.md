@@ -1196,7 +1196,7 @@ Through a real window, release build of `83fff9e`, 2026-10-22, the §1 machine, 
 logical, scale factor 1:
 
 ```powershell
-targeteleasepp.exe target	mp\ink_bench.pdf --bench-ink --bench-step-ms 400 --bench-settle-ms 1500
+target\release\app.exe target\tmp\ink_bench.pdf --bench-ink --bench-step-ms 400 --bench-settle-ms 1500
 ```
 
 On a copy of `select_3p.pdf`, a 2000-point stroke drawn with pointer events:
@@ -1210,8 +1210,8 @@ On a copy of `select_3p.pdf`, a 2000-point stroke drawn with pointer events:
 Row X, same build, one run each:
 
 ```powershell
-targeteleasepp.exe target	mp\mem_on.pdf --bench-edit 1000 --bench-edit-burst 10 --bench-step-ms 50 --bench-settle-ms 2000
-$env:FA_PDF_NO_JOURNAL=1; targeteleasepp.exe target	mp\mem_off.pdf --bench-edit 1000 --bench-edit-burst 10 --bench-step-ms 50 --bench-settle-ms 2000
+target\release\app.exe target\tmp\mem_on.pdf --bench-edit 1000 --bench-edit-burst 10 --bench-step-ms 50 --bench-settle-ms 2000
+$env:FA_PDF_NO_JOURNAL=1; target\release\app.exe target\tmp\mem_off.pdf --bench-edit 1000 --bench-edit-burst 10 --bench-step-ms 50 --bench-settle-ms 2000
 ```
 
 | Journal | n = 0 | n = 100 | n = 1000 |
