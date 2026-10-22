@@ -134,6 +134,11 @@ pub struct Cfg {
     /// input path, report `ink_rebuild_ms`, check the committed stroke against the simplified
     /// points, undo and redo it and select it by a click (Plan 0004 Phase 4, row V).
     pub ink: bool,
+    /// `--bench-pages`: rotate, delete, duplicate, move (by the strip and by dragging a thumbnail)
+    /// and insert a blank page through the window, undo each, and check the page order after every
+    /// step; reports `t_restructure` (Plan 0005 Phase 1, rows AA and AB). Needs a document whose
+    /// pages tell themselves apart by height, as `pages_test.rs` writes (`pages_bench_*.pdf`).
+    pub pages: bool,
 }
 
 impl Default for Cfg {
@@ -167,6 +172,7 @@ impl Default for Cfg {
             edit_burst: 0,
             note: false,
             ink: false,
+            pages: false,
         }
     }
 }
@@ -187,6 +193,7 @@ impl Cfg {
             && self.edits == 0
             && !self.note
             && !self.ink
+            && !self.pages
     }
 }
 
@@ -288,6 +295,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             "--bench-ink" => {
                 cfg.ink = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-pages" => {
+                cfg.pages = number.is_none_or(|on| on != 0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-edit-burst" => {
@@ -639,6 +650,12 @@ pub struct Trace {
     /// the app committed, simplified (row V).
     ink_rebuild_us: Vec<(usize, u128)>,
     last_ink: Option<Vec<(f32, f32)>>,
+    /// `t_restructure` (Plan 0005, benchmarks §11.2): when the last structural edit was sent, its
+    /// samples, and how long the app took to rebuild its layout on each answer.
+    restructure_started: Option<Instant>,
+    restructure_ms: Vec<u128>,
+    rebuild_us: Vec<u128>,
+    restructure_timed: bool,
 }
 
 impl Trace {
@@ -675,6 +692,50 @@ impl Trace {
             edit_ws: Vec::new(),
             ink_rebuild_us: Vec::new(),
             last_ink: None,
+            restructure_started: None,
+            restructure_ms: Vec::new(),
+            rebuild_us: Vec::new(),
+            restructure_timed: true,
+        }
+    }
+
+    /// A structural edit was sent: `t_restructure` starts.
+    pub fn restructure_sent(&mut self) {
+        if self.on && self.restructure_timed {
+            self.restructure_started = Some(Instant::now());
+        }
+    }
+
+    /// Whether structural edits are timed: not in a burst, where each waits for the ones before.
+    pub fn time_restructures(&mut self, on: bool) {
+        self.restructure_timed = on;
+        if !on {
+            self.restructure_started = None;
+        }
+    }
+
+    /// Layout rebuilds so far (one per `Restructured` answer).
+    pub fn rebuilds(&self) -> usize {
+        self.rebuild_us.len()
+    }
+
+    /// The app rebuilt its layout for a structural change in `took`.
+    pub fn restructured(&mut self, took: Duration) {
+        if self.on {
+            self.rebuild_us.push(took.as_micros());
+        }
+    }
+
+    /// A tile landed: once every visible tile of the new layout is there, `t_restructure` ends.
+    pub fn restructure_tile(&mut self, sched: &TileScheduler, visible: &[TileKey]) {
+        if !self.on || holes(sched, visible) > 0 {
+            return;
+        }
+        if let Some(started) = self.restructure_started.take() {
+            let ms = started.elapsed().as_millis();
+            self.restructure_ms.push(ms);
+            let t = self.t_ms();
+            self.print(format_args!("restructure t={t}ms t_restructure={ms}"));
         }
     }
 
@@ -686,6 +747,15 @@ impl Trace {
         let ws = process_memory().map_or(0, |mem| mem.ws);
         self.edit_ws.push((n, ws));
         println!("[bench] ws_after_edits n={n} ws={}", mem_str(Some(ws)));
+    }
+
+    /// The working set after `n` structural edits (row AG).
+    pub fn pages_memory(&mut self, n: u32) {
+        if !self.on {
+            return;
+        }
+        let ws = process_memory().map_or(0, |mem| mem.ws);
+        println!("[bench] ws_after_page_edits n={n} ws={}", mem_str(Some(ws)));
     }
 
     /// The live ink path was rebuilt for a stroke of `points` points.
@@ -1196,6 +1266,15 @@ impl Trace {
         for (ms, bytes) in &self.saves {
             println!("[bench] t_save_ms   {ms} ({bytes} bytes)");
         }
+        if !self.restructure_ms.is_empty() {
+            let (r_min, r_med, r_max) = spread(&self.restructure_ms);
+            let (b_min, b_med, b_max) = spread(&self.rebuild_us);
+            println!(
+                "[bench] t_restructure_ms min={r_min} med={r_med} max={r_max} n={} \
+                 (layout rebuild us min={b_min} med={b_med} max={b_max})",
+                self.restructure_ms.len()
+            );
+        }
         if !self.edit_ws.is_empty() {
             let journal = if env::var_os("FA_PDF_NO_JOURNAL").is_some() {
                 "off"
@@ -1417,6 +1496,8 @@ enum Phase {
     Note,
     /// An ink stroke drawn, checked, undone, redone and selected (Plan 0004 Phase 4).
     Ink,
+    /// Page operations through the sidebar, each undone (Plan 0005 Phase 1).
+    Pages,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1437,6 +1518,7 @@ struct Pending {
     edit: bool,
     note: bool,
     ink: bool,
+    pages: bool,
 }
 
 impl Pending {
@@ -1456,6 +1538,7 @@ impl Pending {
             edit: cfg.edits > 0,
             note: cfg.note,
             ink: cfg.ink,
+            pages: cfg.pages,
         }
     }
 
@@ -1475,6 +1558,7 @@ impl Pending {
             (&mut self.edit, Phase::Edit),
             (&mut self.note, Phase::Note),
             (&mut self.ink, Phase::Ink),
+            (&mut self.pages, Phase::Pages),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1512,6 +1596,9 @@ struct Driver {
     /// The edit phase waits until this moment, then samples the working set after this many
     /// edits (`ws_after_edits_n`: 2 s after the n-th edit).
     edit_hold: Option<(Instant, u32)>,
+    /// The page count `--bench-pages` started from, and the layout rebuilds its burst waits for.
+    pages_base: u32,
+    pages_rebuilds: usize,
 }
 
 /// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
@@ -1553,6 +1640,45 @@ fn select_drag(ui: &MainWindow, from: (f32, usize), to: (f32, usize)) {
         position: b,
         button: slint::platform::PointerEventButton::Left,
     });
+}
+
+/// The page order the app shows, as the bench document encodes it: each page of
+/// `pages_bench_*.pdf` is 800 + its number points tall, so its size names it; `r` marks a page
+/// turned sideways.
+fn page_order() -> String {
+    let mut pages = Vec::new();
+    with_state(|state| {
+        pages = state
+            .page_sizes
+            .iter()
+            .map(|size| {
+                let (long, turned) = if size.height >= size.width {
+                    (size.height, false)
+                } else {
+                    (size.width, true)
+                };
+                let page = (long.round() as i64 - 800).to_string();
+                if turned { page + "r" } else { page }
+            })
+            .collect();
+    });
+    order_str(pages.len(), pages)
+}
+
+/// A page order as the checks compare it: the count and the first eight pages.
+fn order_str(count: usize, pages: Vec<String>) -> String {
+    let head: Vec<String> = pages.into_iter().take(8).collect();
+    format!("n={count} [{}]", head.join(","))
+}
+
+/// A point of a thumbnail row (`frac` of the way down it), as a window position.
+fn thumb_point(ui: &MainWindow, row: usize, frac: f32) -> LogicalPosition {
+    LogicalPosition::new(
+        ui.get_thumb_list_x() + 90.0,
+        ui.get_thumb_list_y()
+            + ui.get_thumb_scroll_y()
+            + (row as f32 + frac) * crate::THUMB_ROW_LOGICAL_PX,
+    )
 }
 
 /// One left click at a window position.
@@ -1855,6 +1981,7 @@ impl Driver {
             Phase::Edit => "edit",
             Phase::Note => "note",
             Phase::Ink => "ink",
+            Phase::Pages => "pages",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -2226,6 +2353,166 @@ impl Driver {
                         return false;
                     }
                 }
+                self.step += 1;
+                false
+            }
+            Phase::Pages => {
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                let undo = || with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                let rebuilds = || {
+                    let mut n = 0;
+                    with_state(|state| n = state.bench.rebuilds());
+                    n
+                };
+                // The previous step's expectation, checked now that its answer had a tick.
+                if let Some((name, expected)) = self.nav_expect.take() {
+                    check(name, expected, page_order());
+                }
+                // Every step starts from the document as opened (the step before it is undone).
+                if self.step == 0 {
+                    self.pages_base = ui.get_total_pages() as u32;
+                }
+                let ident = |pages: Vec<String>| order_str(pages.len(), pages);
+                let all: Vec<String> = (0..self.pages_base).map(|p| p.to_string()).collect();
+                let with = |f: &dyn Fn(&mut Vec<String>)| {
+                    let mut v = all.clone();
+                    f(&mut v);
+                    v
+                };
+                let (name, expected): (&'static str, Vec<String>) = match self.step {
+                    0 => {
+                        ui.set_sidebar_visible(true);
+                        ui.set_sidebar_tab(0);
+                        ui.invoke_sidebar_tab_changed();
+                        ("opened", all.clone())
+                    }
+                    1 => {
+                        ui.invoke_thumb_clicked(0, false, false);
+                        ui.invoke_page_op(1);
+                        ("rotate page 1 right", with(&|v| v[0] = "0r".into()))
+                    }
+                    2 => {
+                        undo();
+                        ("undo the rotation", all.clone())
+                    }
+                    3 => {
+                        ui.invoke_thumb_clicked(2, false, false);
+                        ui.invoke_thumb_clicked(4, false, true);
+                        ui.invoke_page_op(3);
+                        (
+                            "delete pages 3-5",
+                            with(&|v| {
+                                v.drain(2..5);
+                            }),
+                        )
+                    }
+                    4 => {
+                        undo();
+                        ("undo the delete", all.clone())
+                    }
+                    5 => {
+                        ui.invoke_thumb_clicked(1, false, false);
+                        ui.invoke_page_op(2);
+                        ("duplicate page 2", with(&|v| v.insert(2, "1".into())))
+                    }
+                    6 => {
+                        undo();
+                        ("undo the duplicate", all.clone())
+                    }
+                    7 => {
+                        ui.invoke_thumb_clicked(0, false, false);
+                        ui.invoke_page_op(5);
+                        ("move page 1 later", with(&|v| v.swap(0, 1)))
+                    }
+                    8 => {
+                        undo();
+                        ("undo the move", all.clone())
+                    }
+                    9 => {
+                        ui.invoke_thumb_clicked(0, false, false);
+                        ui.invoke_page_op(6);
+                        // As tall as the page it follows, so it reads as that page.
+                        (
+                            "insert a blank page after 1",
+                            with(&|v| v.insert(1, "0".into())),
+                        )
+                    }
+                    10 => {
+                        undo();
+                        ("undo the blank page", all.clone())
+                    }
+                    11 => {
+                        // Drag thumbnail 1 into the lower half of thumbnail 2 with the mouse (two
+                        // rows fit the default window).
+                        let from = thumb_point(ui, 0, 0.5);
+                        let to = thumb_point(ui, 1, 0.8);
+                        let window = ui.window();
+                        window.dispatch_event(WindowEvent::PointerMoved { position: from });
+                        window.dispatch_event(WindowEvent::PointerPressed {
+                            position: from,
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                        for k in 1..=20 {
+                            let f = k as f32 / 20.0;
+                            let position = LogicalPosition::new(
+                                from.x + (to.x - from.x) * f,
+                                from.y + (to.y - from.y) * f,
+                            );
+                            window.dispatch_event(WindowEvent::PointerMoved { position });
+                        }
+                        window.dispatch_event(WindowEvent::PointerReleased {
+                            position: to,
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                        ("drag page 1 after page 2", with(&|v| v.swap(0, 1)))
+                    }
+                    12 => {
+                        undo();
+                        ("undo the drag", all.clone())
+                    }
+                    // Row AG: the working set before and 2 s after 100 structural edits (each turns
+                    // page 1, so the hundredth leaves it as it was). The burst is not timed: its
+                    // edits queue behind each other.
+                    13 => {
+                        with_state(|state| {
+                            state.bench.pages_memory(0);
+                            state.bench.time_restructures(false);
+                        });
+                        ui.invoke_thumb_clicked(0, false, false);
+                        for _ in 0..100 {
+                            ui.invoke_page_op(1);
+                        }
+                        self.pages_rebuilds = rebuilds() + 100;
+                        self.step += 1;
+                        return false;
+                    }
+                    14 => {
+                        // Every answer in, then the 2 s.
+                        if rebuilds() < self.pages_rebuilds {
+                            return false;
+                        }
+                        self.edit_hold = Some((Instant::now() + Duration::from_secs(2), 100));
+                        ("100 rotations", all.clone())
+                    }
+                    15 => {
+                        if let Some((until, n)) = self.edit_hold {
+                            if Instant::now() < until {
+                                return false;
+                            }
+                            self.edit_hold = None;
+                            with_state(|state| state.bench.pages_memory(n));
+                        }
+                        self.settle();
+                        return false;
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                };
+                self.nav_expect = Some((name, ident(expected)));
                 self.step += 1;
                 false
             }
@@ -2750,6 +3037,8 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             nav_expect: None,
             searches_before: 0,
             edit_hold: None,
+            pages_base: 0,
+            pages_rebuilds: 0,
         });
     });
 

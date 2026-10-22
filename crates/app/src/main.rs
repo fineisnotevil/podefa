@@ -23,6 +23,7 @@ use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
 };
+use pdf_core::pages::{PageMap, PageOp, follow};
 use pdf_core::search::{SearchHit, SearchResults};
 use pdf_core::select::{PagePoint, PageSelection, SelectMode};
 use pdf_core::settings::{Settings, Theme};
@@ -86,6 +87,8 @@ slint::slint! {
         has-image: bool,
         label: string,
         current: bool,
+        // Chosen for a page operation (Plan 0005 Phase 1).
+        selected: bool,
     }
 
     // One visible row of the outline tree: collapsed children are not in the model at all.
@@ -145,6 +148,15 @@ slint::slint! {
         in-out property <[OutlineRow]> outline-rows;
         // The thumbnail list's scroll position, bound both ways like the viewport's.
         in-out property <length> thumb-scroll-y: 0px;
+        // Dragging thumbnails to reorder pages: the payload (opaque, Rust knows what moves), and
+        // the row the drop would land at, before or after it.
+        in-out property <data-transfer> page-drag-data;
+        in-out property <int> drop-row: -1;
+        in-out property <bool> drop-after: false;
+        in-out property <int> pages-chosen: 0;
+        // Where the thumbnail list is in the window, for the bench harness's drags.
+        in-out property <length> thumb-list-x: 0px;
+        in-out property <length> thumb-list-y: 0px;
 
         // The find bar (Plan 0003, §4.4).
         in-out property <bool> find-visible: false;
@@ -255,7 +267,13 @@ slint::slint! {
         callback toggle_sidebar();
         callback sidebar_tab_changed();
         callback thumbs_moved();
-        callback thumb_clicked(int);
+        callback thumb_clicked(int, bool, bool);
+        // Page operations (Plan 0005 Phase 1) on the chosen thumbnails, or the current page:
+        // 0 rotate left, 1 rotate right, 2 duplicate, 3 delete, 4 move earlier, 5 move later,
+        // 6 insert a blank page after.
+        callback page_op(int);
+        callback thumb_drag_started(int);
+        callback thumb_dropped(int, bool);
         callback outline_clicked(int);
         callback outline_toggled(int);
         callback open_file();
@@ -338,6 +356,47 @@ slint::slint! {
                     title: "Delete Annotation";
                     enabled: root.has-annot-selection;
                     activated => { root.delete_annotation(); }
+                }
+            }
+            Menu {
+                title: "Pages";
+                MenuItem {
+                    title: "Rotate Left";
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.page_op(0); }
+                }
+                MenuItem {
+                    title: "Rotate Right";
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.page_op(1); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Duplicate";
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.page_op(2); }
+                }
+                MenuItem {
+                    title: "Delete Pages";
+                    enabled: root.editable && root.total_pages > 1;
+                    activated => { root.page_op(3); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Move Earlier";
+                    enabled: root.editable && root.total_pages > 1;
+                    activated => { root.page_op(4); }
+                }
+                MenuItem {
+                    title: "Move Later";
+                    enabled: root.editable && root.total_pages > 1;
+                    activated => { root.page_op(5); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Insert Blank Page";
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.page_op(6); }
                 }
             }
             Menu {
@@ -623,17 +682,101 @@ slint::slint! {
                             clicked => { root.sidebar-tab = 1; root.sidebar_tab_changed(); }
                         }
                     }
+                    // Page operations (Plan 0005 Phase 1): on the chosen thumbnails, or on the
+                    // current page when none is chosen.
+                    if root.sidebar-tab == 0 && root.editable : VerticalLayout {
+                        spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 4px;
+                            height: 28px;
+                            Button { text: "Rotate L"; clicked => { root.page_op(0); } }
+                            Button { text: "Rotate R"; clicked => { root.page_op(1); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 4px;
+                            height: 28px;
+                            Button { text: "Duplicate"; clicked => { root.page_op(2); } }
+                            Button {
+                                text: "Delete";
+                                enabled: root.total_pages > 1;
+                                clicked => { root.page_op(3); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 4px;
+                            height: 28px;
+                            Button { text: "Up"; clicked => { root.page_op(4); } }
+                            Button { text: "Down"; clicked => { root.page_op(5); } }
+                            Button { text: "Blank"; clicked => { root.page_op(6); } }
+                        }
+                        Text {
+                            text: root.pages-chosen > 0 ? root.pages-chosen + " chosen (Ctrl/Shift+click)"
+                                : "Current page (Ctrl/Shift+click to choose)";
+                            font-size: 11px;
+                            color: Palette.foreground;
+                            opacity: 0.6;
+                            overflow: elide;
+                        }
+                    }
                     if root.sidebar-tab == 0 : ListView {
                         vertical-stretch: 1;
                         content-y <=> root.thumb-scroll-y;
+                        changed absolute-position => {
+                            root.thumb-list-x = self.absolute-position.x;
+                            root.thumb-list-y = self.absolute-position.y;
+                        }
+                        init => {
+                            root.thumb-list-x = self.absolute-position.x;
+                            root.thumb-list-y = self.absolute-position.y;
+                        }
                         changed content-y => { root.thumbs_moved(); }
                         for row[index] in root.thumbs : Rectangle {
                             // Fixed height: Rust derives the rows in view from the scroll
                             // position alone (THUMB_ROW_LOGICAL_PX).
                             height: 232px;
-                            background: row.current ? Palette.selection-background : transparent;
-                            TouchArea {
-                                clicked => { root.thumb_clicked(index); }
+                            background: row.selected ? Palette.accent-background.with-alpha(0.35)
+                                : row.current ? Palette.selection-background : transparent;
+                            // Dragging a thumbnail moves its pages; the drop lands before or after
+                            // the row under the pointer, which a line shows. The click area is the
+                            // drag area's child, so a click still reaches it and a drag starts
+                            // past the drag threshold.
+                            DragArea {
+                                enabled: root.editable;
+                                allow-move: true;
+                                data: root.page-drag-data;
+                                changed dragging => {
+                                    if (self.dragging) { root.thumb_drag_started(index); }
+                                }
+                                drag-finished(action) => { root.drop-row = -1; }
+                                DropArea {
+                                    enabled: root.editable;
+                                    can-drop(event) => {
+                                        root.drop-row = index;
+                                        root.drop-after = event.position.y > self.height / 2;
+                                        return DragAction.move;
+                                    }
+                                    dropped(event) => {
+                                        root.drop-row = -1;
+                                        root.thumb_dropped(index, event.position.y > self.height / 2);
+                                        return DragAction.move;
+                                    }
+                                    TouchArea {
+                                        property <bool> ctrl;
+                                        property <bool> shift;
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.down) {
+                                                self.ctrl = event.modifiers.control;
+                                                self.shift = event.modifiers.shift;
+                                            }
+                                        }
+                                        clicked => { root.thumb_clicked(index, self.ctrl, self.shift); }
+                                    }
+                                }
+                            }
+                            if root.drop-row == index : Rectangle {
+                                y: root.drop-after ? parent.height - 3px : 0px;
+                                height: 3px;
+                                background: Palette.accent-background;
                             }
                             VerticalLayout {
                                 padding: 6px;
@@ -1256,6 +1399,14 @@ struct AppState {
     ink_commands: String,
     /// The page whose committed stroke is still drawn live, until its new tiles are all in.
     ink_shown: Option<u32>,
+    /// Pages chosen in the thumbnails for a page operation (Plan 0005 Phase 1), the row a Shift+click
+    /// range starts from, and the pages a thumbnail drag is moving.
+    page_sel: std::collections::BTreeSet<u32>,
+    page_sel_anchor: Option<u32>,
+    drag_pages: Vec<u32>,
+    /// Counts layouts: opens and structural edits. Text lines and annotations are asked for with it,
+    /// so an answer about a page index from before a structural edit is dropped.
+    layout_generation: u64,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -1617,7 +1768,7 @@ impl AppState {
     /// A page's text line boxes arrived; one about a previous document, or a page that has left
     /// the view since, is dropped.
     fn apply_text_lines(&mut self, page: u32, generation: u64, lines: Vec<pdf_core::Rect>) {
-        if generation == self.doc_generation && self.lines_pending.remove(&page) {
+        if generation == self.layout_generation && self.lines_pending.remove(&page) {
             self.text_lines.insert(page, lines);
         }
     }
@@ -2268,10 +2419,230 @@ impl AppState {
         generation: u64,
         items: Vec<AnnotInfo>,
     ) {
-        if generation == self.doc_generation && self.annots_pending.remove(&page) {
+        if generation == self.layout_generation && self.annots_pending.remove(&page) {
             self.annots.insert(page, items);
             self.update_annot_selection(ui);
         }
+    }
+
+    /// The pages changed (Plan 0005, §4.1): the layout is rebuilt from the new sizes, the reader
+    /// stays on their page wherever it went, and what is kept per page - base layers, thumbnails,
+    /// text lines, annotations, the chosen pages - follows `map`; the rest is asked for again. Tiles
+    /// are dropped: their places in the canvas changed with the layout.
+    fn restructured(
+        &mut self,
+        ui: &MainWindow,
+        generation: u64,
+        page_sizes: Vec<PageSize>,
+        revision: u32,
+        map: PageMap,
+    ) {
+        if generation != self.doc_generation || page_sizes.len() != map.len() {
+            return;
+        }
+        let started = Instant::now();
+        let old_count = self.page_sizes.len() as u32;
+        // Where the reader was: a page and how far down it, which the new layout keeps.
+        let (_, view_h) = self.view_size(ui);
+        let reading = self.current_page(ui) as u32;
+        let into = self
+            .layout
+            .slot(reading as usize)
+            .map_or(0.0, |slot| self.pos.1 - slot.y as f64);
+        let left = self.pos.0;
+
+        // Whatever is open on the old pages ends.
+        self.finish_ink(ui, false);
+        self.note_cancel(ui);
+        self.note_drag = None;
+        self.select_annotation(ui, None);
+        self.clear_selection(ui);
+        self.cancel_search();
+
+        // Per-page state follows the map; what has no old page is asked for again.
+        self.text_lines = remap(&map, &self.text_lines);
+        self.annots = remap(&map, &self.annots);
+        self.layout_generation += 1;
+        self.lines_pending.clear();
+        self.annots_pending.clear();
+        let bases = remap(&map, &self.bases);
+        let thumbs: Vec<Option<Image>> = map
+            .iter()
+            .map(|from| {
+                let from = (*from)?;
+                self.thumb_cache.contains_key(&from).then_some(())?;
+                self.thumbs_model
+                    .row_data(from as usize)
+                    .filter(|row| row.has_image)
+                    .map(|row| row.image)
+            })
+            .collect();
+        let same_count = map.len() as u32 == old_count;
+        self.page_sel = map
+            .iter()
+            .enumerate()
+            .filter(|(new, from)| match from {
+                Some(from) => self.page_sel.contains(from),
+                // A turned page keeps its place, and its choice.
+                None => same_count && self.page_sel.contains(&(*new as u32)),
+            })
+            .map(|(new, _)| new as u32)
+            .collect();
+        self.page_sel_anchor = None;
+
+        self.page_sizes = page_sizes;
+        let count = self.page_sizes.len();
+        self.page_revs = (0..count as u32).map(|page| (page, revision)).collect();
+        self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
+        ui.set_total_pages(count as i32);
+        self.reset_thumbs(count);
+        for (page, image) in thumbs.into_iter().enumerate() {
+            if let Some(image) = image
+                && let Some(mut row) = self.thumbs_model.row_data(page)
+            {
+                row.image = image;
+                row.has_image = true;
+                self.thumbs_model.set_row_data(page, row);
+                self.thumb_tick += 1;
+                self.thumb_cache.insert(page as u32, self.thumb_tick);
+            }
+        }
+        self.show_page_sel(ui);
+
+        self.begin_epoch();
+        self.release_all(ui);
+        self.bases = bases;
+        self.base_pending.clear();
+        let page = follow(&map, reading).min(count.saturating_sub(1) as u32);
+        let top = self
+            .layout
+            .slot(page as usize)
+            .map_or(0.0, |slot| slot.y as f64);
+        let height = self
+            .layout
+            .slot(page as usize)
+            .map_or(0.0, |slot| slot.h as f64);
+        self.pos = (left, top + into.clamp(-view_h, height.max(0.0)));
+        self.clamp_pos(ui);
+        self.reanchor(ui);
+        self.refresh(ui);
+        self.pump_thumbs(ui);
+        self.bench.restructured(started.elapsed());
+        // A search that was showing runs again over the new pages.
+        let query = self.search_query.clone();
+        if !query.is_empty() && ui.get_find_visible() {
+            self.start_search(ui, &query);
+        }
+    }
+
+    /// The pages a page operation acts on: the chosen thumbnails, or the current page.
+    fn page_targets(&self, ui: &MainWindow) -> Vec<u32> {
+        if self.page_sel.is_empty() {
+            vec![self.current_page(ui) as u32]
+        } else {
+            self.page_sel.iter().copied().collect()
+        }
+    }
+
+    /// A page operation from the sidebar strip or the Pages menu (Plan 0005 Phase 1).
+    fn page_op(&mut self, ui: &MainWindow, which: i32) {
+        if !self.editable || self.page_sizes.is_empty() {
+            return;
+        }
+        let pages = self.page_targets(ui);
+        let count = self.page_sizes.len() as u32;
+        let (first, last) = (
+            pages.first().copied().unwrap_or(0),
+            pages.last().copied().unwrap_or(0),
+        );
+        let op = match which {
+            0 | 1 => PageOp::Rotate {
+                pages,
+                quarter_turns: if which == 0 { -1 } else { 1 },
+            },
+            2 => PageOp::Duplicate { pages },
+            3 => PageOp::Delete { pages },
+            4 if first > 0 => PageOp::Move {
+                pages,
+                before: first - 1,
+            },
+            // Past the page after the last one: that page and the moved ones change places.
+            5 if last + 1 < count => PageOp::Move {
+                pages,
+                before: (last + 2).min(count),
+            },
+            6 => {
+                // As large as the page it follows.
+                let size = self.page_sizes[last as usize];
+                PageOp::InsertBlank {
+                    at: last + 1,
+                    width: size.width,
+                    height: size.height,
+                }
+            }
+            _ => return,
+        };
+        self.send_edit(EditOp::Pages(op));
+    }
+
+    /// A click on a thumbnail: alone it goes to the page and chooses it; Ctrl adds or removes it,
+    /// Shift chooses the run from the last click.
+    fn thumb_clicked(&mut self, ui: &MainWindow, row: u32, ctrl: bool, shift: bool) {
+        if shift && let Some(anchor) = self.page_sel_anchor {
+            let (from, to) = (anchor.min(row), anchor.max(row));
+            if !ctrl {
+                self.page_sel.clear();
+            }
+            self.page_sel.extend(from..=to);
+        } else if ctrl {
+            if !self.page_sel.remove(&row) {
+                self.page_sel.insert(row);
+            }
+            self.page_sel_anchor = Some(row);
+        } else {
+            self.page_sel.clear();
+            self.page_sel.insert(row);
+            self.page_sel_anchor = Some(row);
+            self.go_to_page(ui, row as usize);
+        }
+        self.show_page_sel(ui);
+    }
+
+    /// Marks the chosen thumbnails.
+    fn show_page_sel(&mut self, ui: &MainWindow) {
+        for row in 0..self.thumbs_model.row_count() {
+            let chosen = self.page_sel.contains(&(row as u32));
+            if let Some(mut data) = self.thumbs_model.row_data(row)
+                && data.selected != chosen
+            {
+                data.selected = chosen;
+                self.thumbs_model.set_row_data(row, data);
+            }
+        }
+        ui.set_pages_chosen(self.page_sel.len() as i32);
+    }
+
+    /// A thumbnail drag began: it moves the chosen pages when it started on one of them, else
+    /// that page alone.
+    fn thumb_drag_started(&mut self, ui: &MainWindow, row: u32) {
+        if !self.page_sel.contains(&row) {
+            self.page_sel.clear();
+            self.page_sel.insert(row);
+            self.page_sel_anchor = Some(row);
+            self.show_page_sel(ui);
+        }
+        self.drag_pages = self.page_sel.iter().copied().collect();
+    }
+
+    /// The drag ended on a row: the pages go before it, or after it.
+    fn thumb_dropped(&mut self, row: u32, after: bool) {
+        let pages = std::mem::take(&mut self.drag_pages);
+        if pages.is_empty() || !self.editable {
+            return;
+        }
+        let count = self.page_sizes.len() as u32;
+        let before = if after { row + 1 } else { row }.min(count);
+        self.send_edit(EditOp::Pages(PageOp::Move { pages, before }));
     }
 
     fn page_revision(&self, page: u32) -> u32 {
@@ -2325,7 +2696,11 @@ impl AppState {
             return;
         }
         self.next_edit_id += 1;
-        self.bench.edit_sent(op.page());
+        if matches!(op, EditOp::Pages(_)) {
+            self.bench.restructure_sent();
+        } else {
+            self.bench.edit_sent(op.page());
+        }
         let _ = self.cmd_tx.send(EngineCmd::Edit {
             op,
             edit_id: self.next_edit_id,
@@ -2593,6 +2968,7 @@ impl AppState {
                 has_image: false,
                 label: SharedString::from((page + 1).to_string()),
                 current: false,
+                selected: false,
             })
             .collect();
         self.thumbs_model.set_vec(rows);
@@ -2917,7 +3293,7 @@ impl AppState {
             if !self.text_lines.contains_key(&page) && self.lines_pending.insert(page) {
                 let _ = self.cmd_tx.send(EngineCmd::TextLines {
                     page,
-                    generation: self.doc_generation,
+                    generation: self.layout_generation,
                 });
             }
         }
@@ -2932,7 +3308,7 @@ impl AppState {
                 if !self.annots.contains_key(&page) && self.annots_pending.insert(page) {
                     let _ = self.cmd_tx.send(EngineCmd::Annotations {
                         page,
-                        generation: self.doc_generation,
+                        generation: self.layout_generation,
                     });
                 }
             }
@@ -3112,6 +3488,7 @@ impl AppState {
         ui.set_is_loading(false);
         let visible = self.visible(ui);
         self.bench.tile(&self.scheduler, &visible);
+        self.bench.restructure_tile(&self.scheduler, &visible);
         let stale = self.scheduler.stale_visible(key.page);
         self.bench.tile_after_edit(key.page, stale);
         if stale == 0 {
@@ -3289,6 +3666,10 @@ impl AppState {
     /// A document was opened: forget everything and show the top of page 1 at 100%.
     fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>, editable: bool) {
         self.page_sizes = page_sizes;
+        self.layout_generation += 1;
+        self.page_sel.clear();
+        self.page_sel_anchor = None;
+        ui.set_pages_chosen(0);
         // The engine's revisions start again with the document, and so does the save state.
         self.page_revs.clear();
         self.editable = editable;
@@ -3400,6 +3781,15 @@ thread_local! {
     /// it explicitly after the event loop: on X11 that drop hands the copied text to the clipboard
     /// manager, and Rust does not promise to run the main thread's thread-local destructors.
     static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
+}
+
+/// Per-page entries moved to the pages they went to (Plan 0005, §4.1); a page `map` gives no old
+/// page has none.
+fn remap<T: Clone>(map: &[Option<u32>], old: &HashMap<u32, T>) -> HashMap<u32, T> {
+    map.iter()
+        .enumerate()
+        .filter_map(|(new, from)| Some((new as u32, old.get(&(*from)?)?.clone())))
+        .collect()
 }
 
 /// Runs `f` with the programmatic-update guard raised.
@@ -3863,6 +4253,10 @@ fn main() -> Result<(), slint::PlatformError> {
             ink_shown: None,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
+            page_sel: std::collections::BTreeSet::new(),
+            page_sel_anchor: None,
+            drag_pages: Vec::new(),
+            layout_generation: 0,
             bench: bench::Trace::new(trace_on),
         });
     });
@@ -3991,6 +4385,16 @@ fn main() -> Result<(), slint::PlatformError> {
                     items,
                 } => {
                     with_state(|state| state.page_changed(&ui, generation, page, revision, items));
+                }
+                EngineEvent::Restructured {
+                    generation,
+                    page_sizes,
+                    revision,
+                    map,
+                } => {
+                    with_state(|state| {
+                        state.restructured(&ui, generation, page_sizes, revision, map)
+                    });
                 }
                 EngineEvent::Edited {
                     generation, result, ..
@@ -4267,14 +4671,43 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let weak = main_window.as_weak();
-        main_window.on_thumb_clicked(move |row| {
+        main_window.on_thumb_clicked(move |row, ctrl, shift| {
             if let Some(ui) = weak.upgrade()
-                && let Ok(page) = usize::try_from(row)
+                && let Ok(row) = u32::try_from(row)
             {
-                with_state(|state| state.go_to_page(&ui, page));
+                with_state(|state| state.thumb_clicked(&ui, row, ctrl, shift));
             }
         });
     }
+    {
+        let weak = main_window.as_weak();
+        main_window.on_page_op(move |which| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.page_op(&ui, which));
+            }
+        });
+    }
+    {
+        let weak = main_window.as_weak();
+        main_window.on_thumb_drag_started(move |row| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(row) = u32::try_from(row)
+            {
+                with_state(|state| state.thumb_drag_started(&ui, row));
+            }
+        });
+    }
+    main_window.on_thumb_dropped(move |row, after| {
+        if let Ok(row) = u32::try_from(row) {
+            with_state(|state| state.thumb_dropped(row, after));
+        }
+    });
+    // The drag's payload: application data only, since the app itself knows which pages move. A
+    // payload with text would be handed to the platform's drag and drop, whose drops the winit
+    // backend never delivers back (Plan 0003 §3.2); with none, Slint runs the drag in the window.
+    let mut page_drag = slint::DataTransfer::default();
+    page_drag.set_user_data(Rc::new(()));
+    main_window.set_page_drag_data(page_drag);
 
     {
         let weak = main_window.as_weak();
