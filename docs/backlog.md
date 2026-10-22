@@ -417,3 +417,49 @@ A plan of its own when the maintainer starts mobile work:
 
 Found while answering the maintainer's question on 2026-10-21. The trial build changed nothing in
 this repository: everything it needed was environment variables on the build host.
+
+---
+
+## 10. Move to the mupdf-rs release that has our upstream changes
+
+**Labels:** `dependencies`, `upstream`
+
+### Problem Statement
+
+Three upstream changes are on mupdf-rs `main` but in no release:
+
+- `ffaf28f5`: devices closed inside `fz_try`, messense/mupdf-rs#249.
+- `cb732cb3`: `TextPage::copy_selection` and `copy_rectangle`, #272.
+- `7aa360d3`: the PDF undo journal, #273.
+
+The last two were merged on 2026-10-22. crates.io still has 0.8.0 (2026-06-22), and `main` is 17
+commits past it. Until a release, fa-pdf carries:
+
+- `patches/mupdf` with the MSVC fix;
+- the journal shim with its 968 KiB of copied MuPDF headers (ADR 0008);
+- `MID_RASTER_ABORT = false` (item 7);
+- its own selection text (ADR 0006).
+
+### Proposed Solution
+
+When a release after 0.8.0 is published:
+
+1. Depend on it and drop `patches/mupdf` (journal, `build.rs`, the headers, the `=0.8.0` pin) and
+   the `[patch.crates-io]` entry.
+2. Set `MID_RASTER_ABORT = true` and check `abort_safety_test.rs` and `dense_vector.pdf` (item 7).
+3. Decide whether to take MuPDF's `copy_selection` for the copied text (ADR 0006).
+4. Adapt to the API changes between 0.8.0 and the release. Known so far:
+   - `from_bytes` was renamed `from_copied_bytes` (#259);
+   - contexts are per thread family (#263, #264), which the render pool's threads depend on.
+5. Run the whole suite, the bench gates and the Android tests again.
+
+### Alternatives Considered
+
+- *Depend on `main` by git revision now*: the shim, the patch and the abort switch could go today.
+  Against:
+  - `deny.toml` must allow a git source;
+  - every clean build fetches mupdf-rs with MuPDF's submodules;
+  - dependabot does not follow a git revision;
+  - it takes 17 unreleased commits, including the context changes, at once.
+
+  Offered to the maintainer on 2026-10-22.

@@ -35,7 +35,8 @@ v0.1 copies selected text. Three things had to be decided:
    text in reading order, extracted on the search thread (ADR 0005). A selection is the run of
    characters between two boundaries; its highlight (one rectangle per line) and its text come from
    the same characters, so they cannot disagree. A pull request to mupdf-rs adds a guarded
-   `TextPage::copy_selection` / `copy_rectangle` (messense/mupdf-rs#272, opened 2026-10-20); if it
+   `TextPage::copy_selection` / `copy_rectangle` (messense/mupdf-rs#272, opened 2026-10-20, merged into mupdf-rs `main` as `cb732cb3` on
+   2026-10-22; no release carries it yet); if it
    is merged and released, the app can switch to MuPDF's own selection text.
 3. **A mouse drag selects; touch pans.** The `Flickable`'s `mouse-drag-pan-enabled` is off, so a mouse
    drag selects text (double-click: a word, triple-click: a line, Shift+click: extend), while touch
