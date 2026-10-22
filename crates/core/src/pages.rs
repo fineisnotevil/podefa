@@ -51,6 +51,17 @@ pub enum PageOp {
         at: u32,
         source_pages: u32,
     },
+    /// Sets the pages' crop box to `rect`, in each page's visible space as it is before the edit
+    /// (points from the top left, `[x0, y0, x1, y1]`), clipped to the page (Phase 3).
+    Crop {
+        pages: Vec<u32>,
+        rect: [f32; 4],
+    },
+    /// Writes a watermark or page numbers into the pages' content (Phase 3).
+    Stamp {
+        pages: Vec<u32>,
+        stamp: crate::stamp::Stamp,
+    },
 }
 
 /// Why a structural edit cannot be applied.
@@ -64,6 +75,12 @@ pub enum PageOpError {
     WouldBeEmpty,
     #[error("the page size {width}x{height} pt is not usable")]
     BadSize { width: f32, height: f32 },
+    #[error("the crop area is not on page {}", page + 1)]
+    CropOutside { page: u32 },
+    #[error(transparent)]
+    Stamp(#[from] crate::stamp::StampError),
+    #[error("the font has no letter \"{0}\"")]
+    MissingGlyph(char),
 }
 
 impl PageOp {
@@ -73,7 +90,9 @@ impl PageOp {
             Self::Rotate { pages, .. }
             | Self::Delete { pages }
             | Self::Duplicate { pages }
-            | Self::Move { pages, .. } => pages.iter().copied().min().unwrap_or(0),
+            | Self::Move { pages, .. }
+            | Self::Crop { pages, .. }
+            | Self::Stamp { pages, .. } => pages.iter().copied().min().unwrap_or(0),
             Self::InsertBlank { at, .. } | Self::InsertFrom { at, .. } => *at,
         }
     }
@@ -87,6 +106,12 @@ impl PageOp {
             Self::Move { .. } => "Move pages",
             Self::InsertBlank { .. } => "Insert blank page",
             Self::InsertFrom { .. } => "Insert pages from file",
+            Self::Crop { .. } => "Crop pages",
+            Self::Stamp {
+                stamp: crate::stamp::Stamp::Watermark { .. },
+                ..
+            } => "Add watermark",
+            Self::Stamp { .. } => "Add page numbers",
         }
     }
 }
@@ -193,7 +218,28 @@ pub fn plan(op: &PageOp, count: u32) -> Result<PageMap, PageOpError> {
             map.splice(at..at, std::iter::repeat_n(None, *source_pages as usize));
             Ok(map)
         }
+        // Same pages, new pixels on the chosen ones.
+        PageOp::Crop { pages, rect } => {
+            if !rect.iter().all(|v| v.is_finite()) {
+                return Err(PageOpError::CropOutside {
+                    page: pages.first().copied().unwrap_or(0),
+                });
+            }
+            changed(pages, count)
+        }
+        PageOp::Stamp { pages, stamp } => {
+            stamp.check()?;
+            changed(pages, count)
+        }
     }
+}
+
+/// Every page stays where it is; the chosen ones look different.
+fn changed(pages: &[u32], count: u32) -> Result<PageMap, PageOpError> {
+    let chosen = chosen(pages, count)?;
+    Ok((0..count)
+        .map(|p| chosen.binary_search(&p).is_err().then_some(p))
+        .collect())
 }
 
 /// The map that leads back: for each page before the edit, its index after it (the first, for a
@@ -326,6 +372,41 @@ mod tests {
             source_pages: 0,
         };
         assert_eq!(plan(&empty, 3), Err(PageOpError::NoPages));
+    }
+
+    #[test]
+    fn crop_and_stamps_change_the_chosen_pages_in_place() {
+        let crop = PageOp::Crop {
+            pages: vec![2, 0],
+            rect: [10.0, 10.0, 100.0, 100.0],
+        };
+        assert_eq!(ids(&plan(&crop, 4).unwrap()), [-1, 1, -1, 3]);
+        let stamp = PageOp::Stamp {
+            pages: vec![1],
+            stamp: crate::stamp::Stamp::PageNumbers {
+                format: "{n}".to_owned(),
+                first: 1,
+                corner: crate::stamp::Corner::BottomCentre,
+                size: 10.0,
+                colour: crate::annot::Colour::new(0.0, 0.0, 0.0),
+            },
+        };
+        assert_eq!(ids(&plan(&stamp, 3).unwrap()), [0, -1, 2]);
+        assert_eq!(stamp.title(), "Add page numbers");
+        let unnumbered = PageOp::Stamp {
+            pages: vec![1],
+            stamp: crate::stamp::Stamp::PageNumbers {
+                format: "page".to_owned(),
+                first: 1,
+                corner: crate::stamp::Corner::BottomCentre,
+                size: 10.0,
+                colour: crate::annot::Colour::new(0.0, 0.0, 0.0),
+            },
+        };
+        assert_eq!(
+            plan(&unnumbered, 3),
+            Err(PageOpError::Stamp(crate::stamp::StampError::NoNumber))
+        );
     }
 
     #[test]

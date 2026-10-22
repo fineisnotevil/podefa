@@ -25,6 +25,7 @@ pub mod scheduler;
 pub mod search;
 pub mod select;
 pub mod settings;
+pub mod stamp;
 pub mod tiling;
 pub mod tools;
 
