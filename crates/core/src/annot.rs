@@ -86,6 +86,67 @@ pub struct AnnotInfo {
     pub colour: Option<Colour>,
     /// Its text (`/Contents`): what a note says, or a comment left on any other annotation.
     pub contents: Option<String>,
+    /// For ink, its strokes as page points: a click selects it only near a line it draws, not
+    /// anywhere in its bounds.
+    pub strokes: Vec<Vec<(f32, f32)>>,
+}
+
+/// The line widths the Ink tool offers, in points (Plan 0004 Phase 4); the second is the default.
+pub const INK_WIDTHS: [f32; 3] = [1.0, 2.0, 4.0];
+
+/// How far a simplified stroke may stray from the drawn one, in points (Plan 0004, §4.2).
+pub const INK_SIMPLIFY_PT: f32 = 0.5;
+
+/// The distance from a point to the segment `a`-`b`.
+fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
+    ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
+}
+
+/// Simplifies a drawn stroke (Ramer-Douglas-Peucker): keeps its first and last points and every
+/// point that lies further than `tolerance` from the line the kept points around it would draw.
+/// Repeated points go first, so a pointer that rested does not leave a cluster behind.
+pub fn simplify(points: &[(f32, f32)], tolerance: f32) -> Vec<(f32, f32)> {
+    let mut unique: Vec<(f32, f32)> = Vec::with_capacity(points.len());
+    for &p in points {
+        if unique.last() != Some(&p) {
+            unique.push(p);
+        }
+    }
+    if unique.len() <= 2 {
+        return unique;
+    }
+    let mut keep = vec![false; unique.len()];
+    keep[0] = true;
+    keep[unique.len() - 1] = true;
+    // An explicit stack instead of recursion: a long stroke must not exhaust the UI thread's stack.
+    let mut spans = vec![(0, unique.len() - 1)];
+    while let Some((first, last)) = spans.pop() {
+        let mut far = (0.0, 0);
+        for i in first + 1..last {
+            let d = segment_distance(unique[i], unique[first], unique[last]);
+            if d > far.0 {
+                far = (d, i);
+            }
+        }
+        if far.0 > tolerance {
+            keep[far.1] = true;
+            spans.push((first, far.1));
+            spans.push((far.1, last));
+        }
+    }
+    unique
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(p, kept)| kept.then_some(p))
+        .collect()
 }
 
 /// The size of a sticky note's icon, in points (Plan 0004 Phase 3): MuPDF gives every `Text`
@@ -146,6 +207,15 @@ pub enum EditOp {
         id: u32,
         rect: Rect,
     },
+    /// Draws free-hand strokes (PDF `Ink` annotation), each a list of page points.
+    AddInk {
+        page: u32,
+        strokes: Vec<Vec<(f32, f32)>>,
+        colour: Colour,
+        /// The line width in points.
+        width: f32,
+        author: Option<String>,
+    },
 }
 
 impl EditOp {
@@ -163,6 +233,7 @@ impl EditOp {
             Self::AddNote { .. } => "Add note",
             Self::SetContents { .. } => "Edit note",
             Self::MoveNote { .. } => "Move note",
+            Self::AddInk { .. } => "Ink",
         }
     }
 
@@ -174,7 +245,8 @@ impl EditOp {
             | Self::SetColour { page, .. }
             | Self::AddNote { page, .. }
             | Self::SetContents { page, .. }
-            | Self::MoveNote { page, .. } => *page,
+            | Self::MoveNote { page, .. }
+            | Self::AddInk { page, .. } => *page,
         }
     }
 }
@@ -238,11 +310,23 @@ fn contains(rect: &Rect, x: f32, y: f32, pad: f32) -> bool {
         && y <= rect.y + rect.height + pad
 }
 
-/// The annotation under a page point: text markup by its line rectangles, anything else by its
-/// bounds. Annotations later in the list are drawn on top, so the last match wins.
+/// How far from an ink stroke's line a click still selects it, in points: a thin line needs more
+/// room than [`ANNOT_HIT_PAD_PT`] to be hit at all.
+pub const INK_HIT_PT: f32 = 4.0;
+
+/// The annotation under a page point: text markup by its line rectangles, ink near its strokes,
+/// anything else by its bounds. Annotations later in the list are drawn on top, so the last match
+/// wins.
 pub fn hit(items: &[AnnotInfo], x: f32, y: f32) -> Option<&AnnotInfo> {
     items.iter().rev().find(|item| {
-        if item.quads.is_empty() {
+        if !item.strokes.is_empty() {
+            item.strokes.iter().any(|stroke| match stroke.as_slice() {
+                [only] => segment_distance((x, y), *only, *only) <= INK_HIT_PT,
+                points => points
+                    .windows(2)
+                    .any(|w| segment_distance((x, y), w[0], w[1]) <= INK_HIT_PT),
+            })
+        } else if item.quads.is_empty() {
             contains(&item.rect, x, y, ANNOT_HIT_PAD_PT)
         } else {
             item.quads
@@ -326,6 +410,7 @@ mod tests {
             quads,
             colour: None,
             contents: None,
+            strokes: Vec::new(),
         }
     }
 
@@ -508,8 +593,84 @@ mod tests {
                 id: 1,
                 rect: Rect::default(),
             },
+            EditOp::AddInk {
+                page: 9,
+                strokes: vec![vec![(0.0, 0.0), (1.0, 1.0)]],
+                colour,
+                width: INK_WIDTHS[1],
+                author: None,
+            },
         ];
         let pages: Vec<u32> = ops.iter().map(EditOp::page).collect();
-        assert_eq!(pages, [3, 4, 5, 6, 7, 8]);
+        assert_eq!(pages, [3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn simplify_keeps_corners_and_drops_points_on_a_line() {
+        // A straight run with jitter well under the tolerance, then a right-angle turn.
+        let mut points: Vec<(f32, f32)> = (0..=100)
+            .map(|i| (i as f32, if i % 2 == 0 { 0.0 } else { 0.2 }))
+            .collect();
+        points.extend((1..=50).map(|i| (100.0, i as f32)));
+        let simple = simplify(&points, INK_SIMPLIFY_PT);
+        assert_eq!(simple, [(0.0, 0.0), (100.0, 0.0), (100.0, 50.0)]);
+        // Every dropped point lies within the tolerance of the simplified line.
+        for p in &points {
+            let near = simple
+                .windows(2)
+                .any(|w| segment_distance(*p, w[0], w[1]) <= INK_SIMPLIFY_PT);
+            assert!(near, "{p:?} strays from the simplified line");
+        }
+    }
+
+    #[test]
+    fn simplify_keeps_a_deviation_above_the_tolerance() {
+        let points = [(0.0, 0.0), (5.0, 0.6), (10.0, 0.0)];
+        assert_eq!(simplify(&points, INK_SIMPLIFY_PT), points);
+        let flat = [(0.0, 0.0), (5.0, 0.4), (10.0, 0.0)];
+        assert_eq!(simplify(&flat, INK_SIMPLIFY_PT), [(0.0, 0.0), (10.0, 0.0)]);
+    }
+
+    #[test]
+    fn simplify_drops_repeats_and_keeps_short_strokes() {
+        assert_eq!(simplify(&[], INK_SIMPLIFY_PT), []);
+        assert_eq!(
+            simplify(&[(1.0, 1.0), (1.0, 1.0), (1.0, 1.0)], INK_SIMPLIFY_PT),
+            [(1.0, 1.0)]
+        );
+        assert_eq!(
+            simplify(&[(1.0, 1.0), (1.0, 1.0), (2.0, 3.0)], INK_SIMPLIFY_PT),
+            [(1.0, 1.0), (2.0, 3.0)]
+        );
+    }
+
+    #[test]
+    fn simplify_handles_a_long_stroke() {
+        // 20 000 points on a spiral: no recursion to overflow, and the result stays close.
+        let points: Vec<(f32, f32)> = (0..20_000)
+            .map(|i| {
+                let t = i as f32 * 0.01;
+                (300.0 + t * t.cos(), 400.0 + t * t.sin())
+            })
+            .collect();
+        let simple = simplify(&points, INK_SIMPLIFY_PT);
+        assert!(simple.len() < points.len() / 4, "{}", simple.len());
+        assert_eq!(simple.first(), points.first());
+        assert_eq!(simple.last(), points.last());
+    }
+
+    #[test]
+    fn ink_is_hit_near_its_line_only() {
+        let mut ink = info(9, Rect::new(0.0, 0.0, 100.0, 100.0), Vec::new());
+        ink.kind = AnnotKind::Ink;
+        // A diagonal across its bounds.
+        ink.strokes = vec![vec![(0.0, 0.0), (100.0, 100.0)]];
+        let items = [ink];
+        assert_eq!(hit(&items, 50.0, 52.0).map(|i| i.id), Some(9));
+        assert_eq!(
+            hit(&items, 90.0, 10.0),
+            None,
+            "inside the bounds, far from the line"
+        );
     }
 }

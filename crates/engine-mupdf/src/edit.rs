@@ -11,7 +11,7 @@
 use crate::MupdfError;
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage};
-use mupdf::{Quad, Rect as MuRect};
+use mupdf::{Point, Quad, Rect as MuRect};
 use pdf_core::Rect;
 use pdf_core::annot::{AnnotInfo, AnnotKind, Colour, EditOp, MarkupKind, cut};
 
@@ -110,6 +110,18 @@ fn describe(annot: &PdfAnnotation) -> Option<AnnotInfo> {
         .flatten()
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
+    let strokes = match kind {
+        AnnotKind::Ink => annot
+            .ink_list()
+            .map(|strokes| {
+                strokes
+                    .iter()
+                    .map(|stroke| stroke.iter().map(|p| (p.x, p.y)).collect())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     Some(AnnotInfo {
         id,
         kind,
@@ -117,6 +129,7 @@ fn describe(annot: &PdfAnnotation) -> Option<AnnotInfo> {
         quads,
         colour,
         contents,
+        strokes,
     })
 }
 
@@ -283,6 +296,26 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
                 find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;
             annot.set_rect(to_mu(rect)).map_err(fail)?;
             annot.set_popup(popup_beside(rect)).map_err(fail)?;
+            annot.update().map_err(fail)?;
+        }
+        EditOp::AddInk {
+            strokes,
+            colour,
+            width,
+            author,
+            ..
+        } => {
+            let strokes = strokes
+                .iter()
+                .map(|stroke| stroke.iter().map(|&(x, y)| Point::new(x, y)));
+            let mut annot = pdf_page.add_ink_annotation(strokes).map_err(fail)?;
+            annot
+                .set_color(to_annotation_colour(*colour))
+                .map_err(fail)?;
+            annot.set_border_width(*width).map_err(fail)?;
+            if let Some(author) = author.as_deref().filter(|a| !a.is_empty()) {
+                annot.set_author(author).map_err(fail)?;
+            }
             annot.update().map_err(fail)?;
         }
         EditOp::SetColour { id, colour, .. } => {
