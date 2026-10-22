@@ -375,6 +375,11 @@ crates (below); the app crate has not been built for either:
       `CARGO_TARGET_TMPDIR` instead of `target/tmp`.
     - Notable: `edit_test` includes the in-place incremental save, which therefore works on
       Android's file system as well. `abort_safety_test` took 19 s on the phone.
+  - **Run again on the same phone, 2026-10-22, at `817113a` (Plan 0004 Phases 2-4): 152 of 152
+    tests pass** in 18 test executables, the same method.
+    - New since the first run: `undo_test` 5 (the journal shim on Android), `note_test` 3,
+      `ink_test` 2, and 8 more `pdf_core` unit tests (90).
+    - The 7 ignored measurement tests were not run. `abort_safety_test` took 18 s.
 
   **To do in the mobile plan:**
   - Make the libc++ link part of the build, not an environment variable: a `build.rs` line in
