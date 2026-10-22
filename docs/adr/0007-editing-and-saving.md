@@ -43,7 +43,13 @@ selection, selects, recolours and deletes annotations, and saves. Four things ha
    stay as they are, which keeps existing signatures valid. MuPDF writes one section with every
    change since the open after those bytes, truncating whatever an earlier save of the same session
    appended (`pdf-write.c`, `ensure_initial_incremental_contents`), so the file is always the opened
-   bytes plus one section. A file MuPDF repaired at open cannot take an incremental update: Save
+   bytes plus one section. That section's `/Prev` must name the file's own cross-reference
+   section; MuPDF 1.27.2 names the previous save's section instead (`writexref` moves
+   `doc->startxref` to each section it writes), which the next save overwrites, so from the second
+   save in a session the file lost pages for every reader (found 2026-10-22 on a maintainer's
+   file that then opened with none). The engine puts the offset the file was opened with back
+   before each incremental save, through the `fz_try` shim of ADR 0008
+   (`fa_pdf_set_startxref`), and does not save in place without it. A file MuPDF repaired at open cannot take an incremental update: Save
    answers `SaveError::NeedsSaveAs` and the app asks where to write a copy. Save As writes a full
    copy and reopens it in the actor and the search thread; the pages keep their revisions. A Save As
    naming the open file is saved incrementally instead, because a full rewrite would destroy the file

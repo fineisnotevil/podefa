@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Saving in place more than once in a session broke the file.** From the second Ctrl+S, the new section's `/Prev` pointed at the previous save's cross-reference table, which that save had just overwritten (MuPDF 1.27.2's incremental writer moves its notion of the file's table to each section it writes). Readers then lost pages; one file opened with none. Each in-place save now names the file's own table. A document with no readable pages is now refused with a message instead of opening empty.
+
 ### Changed
 - **Unembedded standard fonts load at once:** MuPDF's built-in copies of the 14 standard PDF fonts are used before a system font search, which cost 1.2-1.7 s per font on Windows (a document's first page, a duplicated page). Incremental saves compress the streams they add.
 

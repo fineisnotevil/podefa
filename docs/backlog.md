@@ -441,7 +441,10 @@ The last two were merged on 2026-10-22. crates.io still has 0.8.0 (2026-06-22), 
 commits past it. Until a release, fa-pdf carries:
 
 - `patches/mupdf` with the MSVC fix;
-- the journal shim with its 968 KiB of copied MuPDF headers (ADR 0008);
+- the journal shim with its 968 KiB of copied MuPDF headers (ADR 0008), which also carries
+  `fa_pdf_startxref` / `fa_pdf_set_startxref` for repeated incremental saves (ADR 0007). That one
+  stays until MuPDF itself keeps `/Prev` on the file's own section across incremental saves of one
+  document; it is to be reported to Artifex (MuPDF 1.27.2, `pdf-write.c`, `writexref`);
 - `MID_RASTER_ABORT = false` (item 7);
 - its own selection text (ADR 0006).
 
