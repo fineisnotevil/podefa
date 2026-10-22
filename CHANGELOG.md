@@ -12,7 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Unembedded standard fonts load at once:** MuPDF's built-in copies of the 14 standard PDF fonts are used before a system font search, which cost 1.2-1.7 s per font on Windows (a document's first page, a duplicated page). Incremental saves compress the streams they add.
+
 ### Added
+- **Organize pages** (Plan 0005 Phase 1): choose thumbnails with a click, Ctrl+click and Shift+click, then rotate, duplicate, delete, move (strip buttons, the Pages menu, or by dragging a thumbnail) and insert a blank page. Each is one undo step; the view stays on the page you were reading. `--bench-pages` checks every operation through the window and reports `t_restructure`.
 - **Ink** (Plan 0004 Phase 4): an Ink tool (I) draws free-hand lines with the mouse, a pen or a finger (touch does not pan while it is active), in the chosen colour and one of three widths. The line shows live while drawing and is simplified (0.5 pt) into one PDF `Ink` annotation per stroke; a click selects ink only on its line. Recolour, Delete and undo work as for markup. `--bench-ink` checks it through the window and reports `ink_rebuild_ms`; the edit phase reports `ws_after_edits_n`, and `FA_PDF_NO_JOURNAL` turns the undo journal off for that comparison.
 - **Sticky notes** (Plan 0004 Phase 3): a Note tool (N) places a note where you click and opens an editor beside it (Ctrl+Enter or Save keeps the text, Esc or Cancel drops it). A double-click edits a note's text, dragging moves it on its page, and resting the pointer on it shows its text. Notes are PDF `Text` annotations with MuPDF's 16 pt icon and their popup beside the icon; each change is one undo step, and their text, non-ASCII included, survives saving byte for byte. `--bench-note` checks it through the window.
 - **Undo and redo** (Plan 0004 Phase 2): Edit > Undo (Ctrl+Z) and Redo (Ctrl+Y, Ctrl+Shift+Z) for every edit, through MuPDF's own undo journal; an edit is one step, cutting old markup included. Undoing back to the last save makes the document clean again. `patches/mupdf` wraps the journal in `fz_try` (`journal/journal.c`, compiled against a copy of MuPDF 1.27.2's headers that MuPDF checks at run time; mupdf-sys pinned to `=0.8.0`) until a mupdf-rs release does (ADR 0008).

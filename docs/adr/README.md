@@ -26,3 +26,4 @@ Each ADR follows a standardized format:
 - [0006: Clipboard and Text Selection](0006-clipboard-and-selection.md)
 - [0007: Editing Annotations and Saving](0007-editing-and-saving.md)
 - [0008: Undo and Redo Through MuPDF's Journal](0008-undo-journal.md)
+- [0009: Structural Edits and Page Maps](0009-structural-edits-and-page-maps.md)

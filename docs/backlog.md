@@ -491,3 +491,25 @@ Found in Plan 0005 Phase 0 (§10 there).
 Measure a build with `default-features = false` and only the features the app needs (build time,
 binary size, the formats that still open), and decide per feature. OCR comes back with the
 roadmap's OCR item; forms (v0.4) decide `js`.
+
+---
+
+## 12. Cache the system font search
+
+**Labels:** `performance`, `upstream`
+
+### Problem Statement
+
+mupdf-rs looks up a font a document names but does not embed through `font-kit`, building a new
+`SystemSource` for every request (`patches/mupdf/src/system_font.rs:127`): 1.2-1.7 s on Windows
+per font object (Plan 0005 §3.8). Plan 0005 Phase 1 hands MuPDF its built-in copies of the 14
+standard fonts first, which covers Helvetica, Times and Courier. Any other unembedded font (Arial,
+Calibri, ...) still pays the full search, once per document and per page copy that carries one.
+
+### Proposed Solution
+
+- In mupdf-rs: keep one `SystemSource`, or cache lookups by name and style (an upstream pull
+  request).
+- Until then, or instead: a caching loader in `crates/engine-mupdf/src/fonts.rs` that keeps found
+  font data by name.
+- Measure on Windows, Linux (fontconfig) and macOS before choosing.

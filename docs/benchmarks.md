@@ -1290,3 +1290,50 @@ Size: mupdf-rs' default features already compile the DOCX writer. The `docx_benc
 temporary change to the workspace manifest) it is 10 909 184 bytes, so the DOCX writer and
 `extract` add **246 272 bytes (0.23 MiB)**. A binary that uses no document writer at all (the same
 test reading text instead) is 8 557 056 bytes: using `DocumentWriter` brings 2.48 MiB of writers.
+
+### 11.4 Phase 1: page structure (rows AA, AB, AG)
+
+Row AA's engine half is a test (`crates/engine-mupdf/tests/pages_test.rs`). It makes 40 edits from a
+fixed random sequence on a 12-page document whose pages tell themselves apart by width: rotate, delete,
+duplicate, move and insert blank. After every edit, undo and redo, the page sizes match a model
+that follows the reported page maps. The search thread's snapshot and a reopened in-place save
+also have the right text on every page. Mutation check: without the journal operation the undo
+half fails.
+
+Through a real window, release build of `879bfbb` plus the bench fixes before `a0506eb`, 2026-10-22,
+the §1 machine, viewport 884x612 logical. The documents are written by
+`write_pages_bench_documents` (same file): 612 pt wide, 800 + their number tall, so the page order
+is read from the page sizes.
+
+```powershell
+cargo test --release -p engine-mupdf --test pages_test write_pages -- --ignored
+target\release\app.exe target\tmp\pb200.pdf --bench-pages --bench-step-ms 400 --bench-settle-ms 1500
+target\release\app.exe target\tmp\pb1000.pdf --bench-pages --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+The run rotates page 1, deletes three pages chosen with a click and a Shift+click, duplicates, moves
+by the strip, inserts a blank page and drags thumbnail 1 into the lower half of thumbnail 2 with
+mouse events. It undoes each with Ctrl+Z. 14 of 14 checks pass on both documents.
+
+| Document | `t_restructure` min / med / max | Layout rebuild med | `ws` before / after 100 edits |
+| :--- | ---: | ---: | ---: |
+| 200 pages | 1 / 5 / 11 ms | 152 us | 138.3 / 138.4 MiB |
+| 1000 pages | 1 / 15 / 28 ms | 479 us | 138.9 / 141.9 MiB |
+
+`t_restructure` is timed for the six operations sent from the strip and the drag; undos by Ctrl+Z and
+the 100-edit burst are not timed.
+
+The first drag attempt never dropped: a text payload made Slint hand the drag to the platform,
+whose drops the winit backend does not deliver back. The payload is application data now. Before
+that, the click area lay over the drag area as a sibling and took the press.
+
+**Unembedded standard fonts** (Plan 0005 §3.8), probes in a release test build, the same day:
+
+| Display list of | System font search (before) | Built-in standard fonts (after) |
+| :--- | ---: | ---: |
+| A fresh document's page 1 (Helvetica, not embedded) | 1696 ms | 1.0 ms |
+| A duplicated page (its own copy of the font) | 1189 ms | 0.69 ms |
+
+`text_bench.rs` (§9.1) calls MuPDF without the engine and so without the loader. Re-run the same
+day, its first page still takes 1470 ms (200 pages) and 845 ms (1000 pages): this is the one-off
+of §7.2 and §9.1.
