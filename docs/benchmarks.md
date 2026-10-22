@@ -1152,3 +1152,35 @@ target\release\app.exe target\tmp\edit_bench.pdf --bench-edit 20 --bench-step-ms
 
 `t_edit` median 4 ms, worst 19 ms (n = 22, edits only). `t_save` 0 ms (17,153 bytes; below the
 millisecond the harness reports).
+
+### 10.5 Phase 3: notes (row U)
+
+Row U is a test (`crates/engine-mupdf/tests/note_test.rs`):
+
+- **Text round trip:** a note whose text mixes Turkish (`Öğrenci notu — çşığüÖ`), CJK, a check mark,
+  an emoji and a line break is saved in place. A separate `PdfDocument` reads its `/Contents` back
+  byte for byte. **Pass.**
+- **Edit, move, undo, delete:** editing the text, moving the note, undoing each, deleting it and
+  undoing the delete keep the note's id and text.
+- **Empty text:** clearing the text clears the comment.
+
+Through a real window, release build of `a4455dd`, 2026-10-22, the §1 machine:
+
+```powershell
+target\release\app.exe target\tmp\note_bench.pdf --bench-note --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+On a copy of `select_3p.pdf`, 5 of 5 checks pass:
+
+1. The Note tool opens the editor.
+2. The note is placed at (300, 399) with its Turkish text.
+3. Hovering shows the text.
+4. A drag moves the note to (400, 159).
+5. Ctrl+Z puts it back.
+
+`--bench-edit` (7 of 7, `t_edit` median 3 ms) and `--bench-select` (11 of 11) were re-run on the
+same build without a change.
+
+The first run of `--bench-note` placed the note on line 45 (579 pt). That is below the viewport of
+the default 900x700 window, so the scripted click never reached the page: 0 of 5. The run now uses
+line 30.
