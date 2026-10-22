@@ -1393,3 +1393,35 @@ that page, then undoes all three. 4 of 4 checks on both.
 | :--- | ---: |
 | 200 pages | 28 / 21 / 14 ms |
 | 1000 pages | 205 / 155 / 25 ms |
+
+### 11.7 Phase 4: compress, export, images to PDF (rows AE, AF)
+
+Rows AE and AF's engine half is `crates/engine-mupdf/tests/convert_test.rs` (5 tests, plan §5
+Phase 4 results). Release build, 2026-10-23, the §1 machine:
+
+| Run | Result |
+| :--- | ---: |
+| Lossless, 40 text pages (uncompressed input) | 161 170 to 21 943 bytes |
+| Balanced, 4-page 300 dpi JPEG scan | 2826 to 763 KiB, 1087 ms |
+| Strong, same scan | 2826 to 325 KiB, 817 ms |
+| Balanced with MuPDF's averaging downsampler (first version) | 2826 to 2102 KiB |
+| PNG at 150 dpi | 69.4 ms per page |
+| Images to PDF, 3 images | 741 KiB in, 741 KiB out |
+
+Through a real window, release build of `8ec028d`:
+
+```powershell
+target\release\app.exe target\tmp\cv_pt200.pdf --bench-convert --bench-step-ms 400 --bench-settle-ms 1500
+target\release\app.exe target\tmp\cv_pt1000.pdf --bench-convert --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+(copies of `pages_bench_200.pdf` and `pages_bench_1000.pdf`, §11.4, already compressed: Lossless
+keeps them as they are.)
+
+| Document | Compress `t_tool` | Export 2 pages | Images to PDF | `ws` at the end |
+| :--- | ---: | ---: | ---: | ---: |
+| 200 pages | 21 ms | 83 ms | 105 ms | 120.7 MiB |
+| 1000 pages | 643 ms | 103 ms | 117 ms | 108.5 MiB |
+
+2 of 2 checks on both: the compressed copy is not larger; pages 6 and 1 exported, made into a PDF
+and opened come back in that order.

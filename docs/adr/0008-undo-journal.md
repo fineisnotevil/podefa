@@ -51,6 +51,11 @@ messense/mupdf-rs#267 proposed it and was closed unmerged.
    - Undoing back to the saved position is clean again.
    - A new edit after undoing past the save makes that position unreachable.
    - Edit > Undo is Ctrl+Z; Redo is Ctrl+Y or Ctrl+Shift+Z.
+   - **Amended 2026-10-23 (Plan 0005 Phase 4):** `journal/tools.c`, compiled the same way, adds
+     two more: `pdf_rewrite_images` (lossy compression; its options struct is filled in C, so
+     its layout is not copied into Rust) and `fz_save_pixmap_as_jpeg`. Exposed as
+     `PdfDocument::rewrite_images` and `Pixmap::save_as_jpeg`, refused under the same header
+     check.
 6. **An upstream pull request** adds the same wrappers to mupdf-sys and mupdf-rs (messense/mupdf-rs#273, merged into mupdf-rs `main` as `7aa360d3` on 2026-10-22; no release
    carries it yet). When a release
    carries them, `journal/`, `build.rs` and the pin go.
