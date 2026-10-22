@@ -1361,3 +1361,35 @@ is checked from the page sizes (`pages_bench_*.pdf`, §11.4). 3 of 3 checks on b
 
 `t_tool` (§11.2) runs from the job's start on the tool thread to its outputs being complete. The
 merged 2000-page file is 421 KiB.
+
+### 11.6 Phase 3: watermark, page numbers, crop (row AD)
+
+Row AD's engine half is `crates/engine-mupdf/tests/stamps_test.rs` (4 tests, plan §5 Phase 3
+results). Release build, 1000 Letter pages, 2026-10-23, the §1 machine:
+
+| Stamp | Time | Per page |
+| :--- | ---: | ---: |
+| Watermark (diagonal, opacity 30%) | 200.0 ms | 0.20 ms |
+| Page numbers | 144.8 ms | 0.14 ms |
+
+The first version, through mupdf-rs' `insert_contents` (a nested journal operation per call, merged
+into the outer one by MuPDF's quadratic `resolve_undo`), took 17 953 ms and 10 012 ms for the same
+two stamps on 1000 pages, and 128.6 / 66.9 ms on 200. Measured in isolation, one `insert_contents`
+per page inside one operation took 28 / 269 / 2166 ms on 250 / 500 / 1000 pages; a plain
+`add_stream` per page 7 / 27 / 107 ms.
+
+Through a real window, release build of `396778f`:
+
+```powershell
+target\release\app.exe target\tmp\st_pt200.pdf --bench-stamps --bench-step-ms 400 --bench-settle-ms 1500
+target\release\app.exe target\tmp\st_pt1000.pdf --bench-stamps --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+(copies of `pages_bench_200.pdf` and `pages_bench_1000.pdf`, §11.4). The run applies a watermark and
+page numbers through the stamp panel, draws a crop on page 1 with the pointer and applies it to
+that page, then undoes all three. 4 of 4 checks on both.
+
+| Document | `t_restructure` watermark / numbers / crop |
+| :--- | ---: |
+| 200 pages | 28 / 21 / 14 ms |
+| 1000 pages | 205 / 155 / 25 ms |

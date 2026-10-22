@@ -554,3 +554,30 @@ Phase 2).
 
 Report it to mupdf-rs with the reproduction from `tools_test.rs`. Offer the copy as a pull request
 if they want it in the crate.
+
+---
+
+## 15. mupdf-rs: nested operations in `insert_contents`, and `set_crop_box` on rotated pages
+
+**Labels:** `upstream`, `performance`
+
+### Problem Statement
+
+Found in Plan 0005 Phase 3 (`docs/benchmarks.md` §11.6):
+
+- `PdfPage::insert_contents` (and the other helpers built on `DocOperation`) opens a journal
+  operation of its own. Inside an outer operation MuPDF merges it into the outer one with
+  `resolve_undo` (`pdf-object.c`), which compares every change of the outer operation with every
+  other. One call per page inside one operation costs n^3: 2.2 s for 1000 pages.
+- `PdfPage::set_crop_box` (`mupdf-sys` `wrapper/pdf_page.c`, `mupdf_pdf_page_set_crop_box`) flips
+  the rectangle against the MediaBox height only: it ignores `/Rotate` and a MediaBox that does not
+  start at (0, 0).
+
+fa-pdf works around both (`crates/engine-mupdf/src/edit.rs`, `wrap_contents` and `crop`).
+
+### Proposed Solution
+
+Report both to mupdf-rs with a reproduction. For the first, the helpers could skip their own
+operation when one is already open (MuPDF's journal tells through `pdf_undoredo_state`'s nesting
+only indirectly, so a flag on `PdfDocument` may be simpler); for the second, transform the rectangle
+through the inverse of `pdf_page_transform`, as fa-pdf does.
