@@ -59,7 +59,7 @@ impl AppState {
     }
 
     /// The pages the stamp panel names: all of them when its field is empty.
-    fn stamp_pages(&self, text: &str) -> Result<Vec<u32>, String> {
+    pub(crate) fn stamp_pages(&self, text: &str) -> Result<Vec<u32>, String> {
         let count = self.page_sizes.len() as u32;
         if text.trim().is_empty() {
             return Ok((0..count).collect());

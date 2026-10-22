@@ -148,6 +148,11 @@ pub struct Cfg {
     /// the pointer, then all three undone; checks the page sizes the layout sees and reports
     /// `t_restructure` (Plan 0005 Phase 3, row AD).
     pub stamps: bool,
+    /// `--bench-convert`: compress the open document (lossless), export two pages as PNG, make a
+    /// PDF of those images and open it, checking the page order from the page sizes; reports
+    /// `t_tool` for each (Plan 0005 Phase 4, rows AE and AF). Same documents as `--bench-pages`;
+    /// writes `bench_compressed.pdf`, `bench_img_*.png` and `bench_images.pdf` next to the document.
+    pub convert: bool,
 }
 
 impl Default for Cfg {
@@ -184,6 +189,7 @@ impl Default for Cfg {
             pages: false,
             tools: false,
             stamps: false,
+            convert: false,
         }
     }
 }
@@ -207,6 +213,7 @@ impl Cfg {
             && !self.pages
             && !self.tools
             && !self.stamps
+            && !self.convert
     }
 }
 
@@ -320,6 +327,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             "--bench-stamps" => {
                 cfg.stamps = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-convert" => {
+                cfg.convert = number.is_none_or(|on| on != 0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-edit-burst" => {
@@ -1553,6 +1564,8 @@ enum Phase {
     Tools,
     /// Watermark, page numbers and a crop, then undone (Plan 0005 Phase 3).
     Stamps,
+    /// Compress, export as images and images to PDF, the result opened (Plan 0005 Phase 4).
+    Convert,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1576,6 +1589,7 @@ struct Pending {
     pages: bool,
     tools: bool,
     stamps: bool,
+    convert: bool,
 }
 
 impl Pending {
@@ -1598,6 +1612,7 @@ impl Pending {
             pages: cfg.pages,
             tools: cfg.tools,
             stamps: cfg.stamps,
+            convert: cfg.convert,
         }
     }
 
@@ -1620,6 +1635,7 @@ impl Pending {
             (&mut self.pages, Phase::Pages),
             (&mut self.tools, Phase::Tools),
             (&mut self.stamps, Phase::Stamps),
+            (&mut self.convert, Phase::Convert),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -2050,6 +2066,7 @@ impl Driver {
             Phase::Pages => "pages",
             Phase::Tools => "tools",
             Phase::Stamps => "stamps",
+            Phase::Convert => "convert",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -2415,6 +2432,95 @@ impl Driver {
                     }
                     4 => {
                         check("Ctrl+Z puts it back", "(300,399)".to_owned(), at(&note()));
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                }
+                self.step += 1;
+                false
+            }
+            Phase::Convert => {
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                // Wait for the job or the open the last step started.
+                let mut done = 0;
+                let mut path = None;
+                with_state(|state| {
+                    done = state.bench.tools_done();
+                    path = state.doc_path.clone();
+                });
+                if done < self.tools_wait {
+                    return false;
+                }
+                if let Some(pages) = self.open_wait {
+                    if ui.get_total_pages() != pages || ui.get_is_loading() {
+                        return false;
+                    }
+                    self.open_wait = None;
+                }
+                let Some(dir) = path.as_deref().and_then(std::path::Path::parent) else {
+                    self.settle();
+                    return false;
+                };
+                let compressed = dir.join("bench_compressed.pdf");
+                let images = [dir.join("bench_img_6.png"), dir.join("bench_img_1.png")];
+                let album = dir.join("bench_images.pdf");
+                let start = |job: pdf_core::tools::ToolJob| {
+                    with_state(|state| {
+                        state.start_tool(ui, job, false);
+                    });
+                };
+                match self.step {
+                    0 => {
+                        let Some(source) = path.clone() else {
+                            self.settle();
+                            return false;
+                        };
+                        self.base_size = std::fs::metadata(&source)
+                            .map_or(0, |m| m.len())
+                            .to_string();
+                        start(pdf_core::tools::ToolJob::Compress {
+                            input: pdf_core::tools::MergeInput::Current,
+                            preset: pdf_core::tools::Preset::Lossless,
+                            output: compressed.clone(),
+                        });
+                        self.tools_wait = done + 1;
+                    }
+                    1 => {
+                        let before: u64 = self.base_size.parse().unwrap_or(0);
+                        let after = std::fs::metadata(&compressed).map_or(u64::MAX, |m| m.len());
+                        check(
+                            "compressed copy not larger",
+                            "true".to_owned(),
+                            (after <= before).to_string(),
+                        );
+                        start(pdf_core::tools::ToolJob::ExportImages {
+                            pages: vec![(5, images[0].clone()), (0, images[1].clone())],
+                            format: pdf_core::tools::ImageFormat::Png,
+                            dpi: 150,
+                        });
+                        self.tools_wait = done + 1;
+                    }
+                    2 => {
+                        start(pdf_core::tools::ToolJob::ImagesToPdf {
+                            images: images.to_vec(),
+                            output: album.clone(),
+                        });
+                        self.tools_wait = done + 1;
+                    }
+                    3 => {
+                        with_state(|state| state.open_path(ui, album.clone()));
+                        self.open_wait = Some(2);
+                    }
+                    4 => {
+                        check(
+                            "pages 6 and 1 as images, then a PDF again",
+                            order_str(2, vec!["5".to_owned(), "0".to_owned()]),
+                            page_order(),
+                        );
                     }
                     _ => {
                         self.settle();

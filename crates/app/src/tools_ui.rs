@@ -13,7 +13,7 @@ use pdf_core::EngineCmd;
 use pdf_core::annot::EditOp;
 use pdf_core::pages::PageOp;
 use pdf_core::tools::{
-    DocumentInfo, MergeInput, Metadata, ToolJob, parse_ranges, part_name, split_every,
+    DocumentInfo, MergeInput, Metadata, ToolJob, ToolSizes, parse_ranges, part_name, split_every,
 };
 use slint::SharedString;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ pub(crate) struct RunningTool {
 
 impl AppState {
     /// The open document's file name without its extension, for naming outputs.
-    fn doc_stem(&self) -> String {
+    pub(crate) fn doc_stem(&self) -> String {
         self.doc_path
             .as_deref()
             .and_then(Path::file_stem)
@@ -40,7 +40,7 @@ impl AppState {
             )
     }
 
-    fn doc_dir(&self) -> Option<PathBuf> {
+    pub(crate) fn doc_dir(&self) -> Option<PathBuf> {
         self.doc_path
             .as_deref()
             .and_then(Path::parent)
@@ -82,6 +82,7 @@ impl AppState {
         ui: &MainWindow,
         job_id: u64,
         result: Result<Vec<PathBuf>, String>,
+        sizes: Option<ToolSizes>,
     ) -> Option<Result<PathBuf, String>> {
         let tool = self.running_tool.take_if(|t| t.job_id == job_id)?;
         ui.set_tool_running(false);
@@ -89,9 +90,10 @@ impl AppState {
             .tool_done(tool.title, tool.started.elapsed(), &result);
         match result {
             Ok(files) => {
-                let message = match files.as_slice() {
-                    [one] => format!("Wrote {}", one.display()),
-                    many => format!("Wrote {} files", many.len()),
+                let message = match (files.as_slice(), sizes) {
+                    (_, Some(sizes)) => crate::convert_ui::compress_message(sizes),
+                    ([one], None) => format!("Wrote {}", one.display()),
+                    (many, None) => format!("Wrote {} files", many.len()),
                 };
                 ui.set_status_text(SharedString::from(message));
                 match files.as_slice() {
@@ -303,7 +305,7 @@ pub(crate) fn merge_add(ui: &MainWindow) {
 }
 
 /// A save dialog for one new PDF, next to the open document.
-fn save_dialog(title: &str, name: &str) -> Option<PathBuf> {
+pub(crate) fn save_dialog(title: &str, name: &str) -> Option<PathBuf> {
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
     let mut dialog = rfd::FileDialog::new()
         .set_title(title)
@@ -350,26 +352,32 @@ pub(crate) fn split_run(ui: &MainWindow) {
     let Some(job) = with_state_ret(|state| state.split_job(groups, &folder)) else {
         return;
     };
-    let existing = job.outputs().iter().filter(|p| p.exists()).count();
-    if existing > 0 {
-        let answer = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Warning)
-            .set_title("PODEFA")
-            .set_description(format!(
-                "{existing} of the {} files already exist in that folder. Replace them?",
-                job.outputs().len()
-            ))
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show();
-        if answer != rfd::MessageDialogResult::Yes {
-            return;
-        }
+    if !confirm_replace(&job) {
+        return;
     }
     with_state(|state| {
         if state.start_tool(ui, job, false) {
             ui.set_split_visible(false);
         }
     });
+}
+
+/// Asks before a job writes over files that exist; true to go on.
+pub(crate) fn confirm_replace(job: &ToolJob) -> bool {
+    let existing = job.outputs().iter().filter(|p| p.exists()).count();
+    if existing == 0 {
+        return true;
+    }
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("PODEFA")
+        .set_description(format!(
+            "{existing} of the {} files already exist in that folder. Replace them?",
+            job.outputs().len()
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show();
+    answer == rfd::MessageDialogResult::Yes
 }
 
 /// Tools > Extract Pages...: the chosen pages (or the current one) into one new file.

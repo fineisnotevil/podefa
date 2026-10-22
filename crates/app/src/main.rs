@@ -53,6 +53,7 @@ use std::time::Instant;
 
 /// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
 mod bench;
+mod convert_ui;
 mod stamps_ui;
 mod tools_ui;
 
@@ -188,6 +189,14 @@ slint::slint! {
         in-out property <string> stamp-size: "10";
         in-out property <string> stamp-pages: "";
         in-out property <string> stamp-error: "";
+        // The convert panel (Plan 0005 Phase 4): compress (mode 0) or export as images (mode 1).
+        in-out property <bool> convert-visible: false;
+        in-out property <int> convert-mode: 0;
+        in-out property <int> convert-preset: 1;
+        in-out property <int> convert-format: 0;
+        in-out property <string> convert-dpi: "150";
+        in-out property <string> convert-pages: "";
+        in-out property <string> convert-error: "";
         // The crop panel, open once the Crop tool's rectangle is drawn.
         in-out property <bool> crop-visible: false;
         in-out property <string> crop-size: "";
@@ -213,6 +222,8 @@ slint::slint! {
         // changes, the tool (0 select, 1 highlight, 2 underline, 3 strike-out, 4 squiggly), the
         // colour and its swatches, and the outline of the selected annotation.
         in-out property <bool> editable: false;
+        // MuPDF repaired the open file (Plan 0005 Phase 4): File offers a repaired copy.
+        in-out property <bool> repaired: false;
         in-out property <bool> dirty: false;
         in-out property <int> tool: 0;
         in-out property <int> colour-index: 0;
@@ -325,6 +336,10 @@ slint::slint! {
         callback extract_pages();
         callback insert_from_file();
         callback props_open();
+        callback convert_open(int);
+        callback convert_run();
+        callback convert_close();
+        callback images_to_pdf();
         callback stamp_open(int);
         callback stamp_apply();
         callback stamp_close();
@@ -378,6 +393,10 @@ slint::slint! {
                     title: "Save As...";
                     shortcut: @keys(Control + Shift + S);
                     enabled: root.editable;
+                    activated => { root.save_as(); }
+                }
+                if root.repaired : MenuItem {
+                    title: "Save Repaired Copy...";
                     activated => { root.save_as(); }
                 }
                 MenuSeparator {}
@@ -498,6 +517,23 @@ slint::slint! {
                     enabled: root.editable && root.total_pages > 0;
                     activated => { root.stamp_open(1); }
                 }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Compress...";
+                    enabled: root.editable && !root.tool-running;
+                    activated => { root.convert_open(0); }
+                }
+                MenuItem {
+                    title: "Export as Images...";
+                    enabled: root.total_pages > 0 && !root.tool-running;
+                    activated => { root.convert_open(1); }
+                }
+                MenuItem {
+                    title: "Images to PDF...";
+                    enabled: !root.tool-running;
+                    activated => { root.images_to_pdf(); }
+                }
+                MenuSeparator {}
                 MenuItem {
                     title: "Crop Pages";
                     checkable: true;
@@ -1517,6 +1553,89 @@ slint::slint! {
                                     text: "Apply";
                                     primary: true;
                                     clicked => { root.stamp_apply(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Compress or export as images (Plan 0005 Phase 4): new files from the document as
+                // it is now.
+                if root.convert-visible : FocusScope {
+                    x: (parent.width - self.width) / 2;
+                    y: 16px;
+                    width: min(parent.width - 32px, 420px);
+                    height: root.convert-mode == 0 ? 170px : 230px;
+                    init => { self.focus(); }
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.convert_close();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000040;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 6px;
+                            Text {
+                                text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+                            if root.convert-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Palette.foreground; }
+                                ComboBox {
+                                    model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
+                                    current-index <=> root.convert-preset;
+                                }
+                            }
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Format"; vertical-alignment: center; color: Palette.foreground; }
+                                ComboBox {
+                                    model: ["PNG", "JPEG"];
+                                    current-index <=> root.convert-format;
+                                }
+                                Text { text: "Resolution"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit { width: 70px; text <=> root.convert-dpi; }
+                                Text { text: "dpi"; vertical-alignment: center; color: Palette.foreground; }
+                            }
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit {
+                                    text <=> root.convert-pages;
+                                    placeholder-text: "All, or 1-3, 5, 8-";
+                                }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.convert-error;
+                                color: #b42318;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.convert_close(); } }
+                                Button {
+                                    text: root.convert-mode == 0 ? "Compress..." : "Export...";
+                                    primary: true;
+                                    enabled: !root.tool-running;
+                                    clicked => { root.convert_run(); }
                                 }
                             }
                         }
@@ -4250,6 +4369,7 @@ impl AppState {
     fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>, editable: bool) {
         self.crop_cancel(ui);
         ui.set_stamp_visible(false);
+        ui.set_convert_visible(false);
         self.page_sizes = page_sizes;
         self.layout_generation += 1;
         self.page_sel.clear();
@@ -4881,6 +5001,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     page_sizes,
                     unsized_pages,
                     editable,
+                    repaired,
                 } => {
                     ui.set_has_error(false);
                     ui.set_error_text(SharedString::from(""));
@@ -4889,7 +5010,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_is_loading(false);
                     // A page whose bounds could not be read is laid out as Letter; say so rather
                     // than draw it at a size the document never had without a word.
-                    let status = if unsized_pages.is_empty() {
+                    let mut status = if unsized_pages.is_empty() {
                         format!("{page_count} pages")
                     } else {
                         format!(
@@ -4897,6 +5018,14 @@ fn main() -> Result<(), slint::PlatformError> {
                             unsized_pages.len()
                         )
                     };
+                    // A damaged file MuPDF repaired: a full copy is a clean one (Plan 0005 Phase 4).
+                    ui.set_repaired(repaired);
+                    if repaired {
+                        status.push_str(
+                            " - the file was damaged and repaired when opened: \
+                             File > Save Repaired Copy writes a clean copy",
+                        );
+                    }
                     ui.set_status_text(SharedString::from(status));
                     with_state(|state| {
                         state.set_document(&ui, page_sizes, editable);
@@ -5000,9 +5129,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 } => {
                     with_state(|state| state.tool_progress(&ui, job_id, done, total));
                 }
-                EngineEvent::ToolDone { job_id, result } => {
+                EngineEvent::ToolDone {
+                    job_id,
+                    result,
+                    sizes,
+                } => {
                     let outcome =
-                        with_state_ret(|state| state.tool_done(&ui, job_id, result)).flatten();
+                        with_state_ret(|state| state.tool_done(&ui, job_id, result, sizes))
+                            .flatten();
                     tools_ui::tool_finished(&ui, outcome);
                 }
                 EngineEvent::DocumentInfo { generation, info } => {
@@ -5397,6 +5531,30 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
         main_window.on_cancel_tool(|| with_state(|state| state.cancel_tool()));
+        let weak = main_window.as_weak();
+        main_window.on_convert_open(move |mode| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.convert_open(&ui, mode));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_convert_run(move || {
+            if let Some(ui) = weak.upgrade() {
+                convert_ui::convert_run(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_convert_close(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_convert_visible(false);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_images_to_pdf(move || {
+            if let Some(ui) = weak.upgrade() {
+                convert_ui::images_to_pdf(&ui);
+            }
+        });
         let weak = main_window.as_weak();
         main_window.on_stamp_open(move |mode| {
             if let Some(ui) = weak.upgrade() {
