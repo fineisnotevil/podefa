@@ -8,7 +8,7 @@
 //! was opened with, redoing all of them the annotations after the last edit, and a save made
 //! halfway back must write that halfway state.
 
-use engine_mupdf::MupdfEngine;
+use engine_mupdf::{Change, MupdfEngine};
 use mupdf::pdf::{PdfDocument, PdfPage};
 use pdf_core::Rect;
 use pdf_core::annot::{AnnotInfo, Colour, EditOp, MarkupKind, PALETTE};
@@ -267,12 +267,12 @@ fn a_new_edit_after_undoing_drops_the_redo_steps() {
     engine.edit(&mark(1, 10)).expect("edit");
     engine.edit(&mark(3, 10)).expect("edit");
     // Undo reports the page each step changed, so the app redraws the right one.
-    assert_eq!(engine.undo().expect("undo").map(|(page, _)| page), Some(3));
+    assert_eq!(undone_page(engine.undo().expect("undo")), Some(3));
     assert_eq!(engine.history_state(), (true, true));
     engine.edit(&mark(4, 20)).expect("edit on a new branch");
     assert_eq!(engine.history_state(), (true, false));
-    assert_eq!(engine.undo().expect("undo").map(|(page, _)| page), Some(4));
-    assert_eq!(engine.undo().expect("undo").map(|(page, _)| page), Some(1));
+    assert_eq!(undone_page(engine.undo().expect("undo")), Some(4));
+    assert_eq!(undone_page(engine.undo().expect("undo")), Some(1));
     assert_eq!(engine.undo().expect("start"), None);
     // Each change gave its page a new revision.
     assert!(engine.revision(1) >= 2 && engine.revision(4) >= 2);
@@ -296,4 +296,12 @@ fn a_failed_edit_leaves_no_step() {
 fn the_journal_headers_are_the_linked_mupdf() {
     // journal/include must be the headers of the MuPDF mupdf-sys links; MuPDF checks it.
     assert!(mupdf::pdf::journal::journal_headers_match());
+}
+
+/// The page an undo reported changing.
+fn undone_page(change: Option<Change>) -> Option<u32> {
+    match change? {
+        Change::Page { page, .. } => Some(page),
+        Change::Pages { .. } => None,
+    }
 }

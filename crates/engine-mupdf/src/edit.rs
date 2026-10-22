@@ -10,10 +10,11 @@
 
 use crate::MupdfError;
 use mupdf::color::AnnotationColor;
-use mupdf::pdf::{PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage};
-use mupdf::{Point, Quad, Rect as MuRect};
+use mupdf::pdf::{InsertPosition, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage};
+use mupdf::{Point, Quad, Rect as MuRect, Size};
 use pdf_core::Rect;
 use pdf_core::annot::{AnnotInfo, AnnotKind, Colour, EditOp, MarkupKind, cut};
+use pdf_core::pages::{self, PageOp};
 
 fn to_rect(r: MuRect) -> Rect {
     Rect::new(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
@@ -318,6 +319,8 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
             }
             annot.update().map_err(fail)?;
         }
+        // Structural edits go through `apply_pages`; the engine never sends them here.
+        EditOp::Pages(_) => {}
         EditOp::SetColour { id, colour, .. } => {
             let mut annot =
                 find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;
@@ -325,6 +328,69 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
                 .set_color(to_annotation_colour(*colour))
                 .map_err(fail)?;
             annot.update().map_err(fail)?;
+        }
+    }
+    Ok(())
+}
+
+/// Applies a structural edit to a document of `count` pages (Plan 0005, §4.1), inside the caller's
+/// journal operation; [`pages::plan`] has checked it already.
+pub(crate) fn apply_pages(
+    doc: &mut PdfDocument,
+    op: &PageOp,
+    count: u32,
+) -> Result<(), MupdfError> {
+    let fail = |source| MupdfError::EditFailed {
+        page: op.first_page(),
+        source,
+    };
+    match op {
+        PageOp::Rotate {
+            pages,
+            quarter_turns,
+        } => {
+            for page in pages::chosen(pages, count)? {
+                let mut pdf_page = doc.load_pdf_page(page as i32).map_err(fail)?;
+                let rotation = pdf_page.rotation().map_err(fail)?;
+                pdf_page
+                    .set_rotation((rotation + 90 * quarter_turns).rem_euclid(360))
+                    .map_err(fail)?;
+            }
+        }
+        PageOp::Delete { pages } => {
+            let gone: Vec<usize> = pages::chosen(pages, count)?
+                .into_iter()
+                .map(|p| p as usize)
+                .collect();
+            doc.delete_pages(gone).map_err(fail)?;
+        }
+        PageOp::Duplicate { pages } => {
+            // From the back, so the pages still to copy keep their indices.
+            for page in pages::chosen(pages, count)?.into_iter().rev() {
+                doc.copy_page(page as usize, InsertPosition::After(page as usize))
+                    .map_err(fail)?;
+            }
+        }
+        PageOp::Move { pages, before } => {
+            let order = pages::moved_order(pages, *before, count)?;
+            // Puts each position's page in place from the front; MuPDF's move takes a page out and
+            // inserts it at the target index of the result.
+            let mut current: Vec<u32> = (0..count).collect();
+            for (target, page) in order.iter().enumerate() {
+                let Some(at) = current.iter().position(|p| p == page) else {
+                    continue;
+                };
+                if at != target {
+                    doc.move_page(at, target).map_err(fail)?;
+                    let moved = current.remove(at);
+                    current.insert(target, moved);
+                }
+            }
+        }
+        PageOp::InsertBlank { at, width, height } => {
+            let index = if *at >= count { -1 } else { *at as i32 };
+            doc.new_page_at(index, Size::new(*width, *height))
+                .map_err(fail)?;
         }
     }
     Ok(())

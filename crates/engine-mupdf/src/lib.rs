@@ -13,12 +13,14 @@
 //!   *resolved* jobs (page display list included) instead of commands.
 
 mod edit;
+mod fonts;
 mod pool;
 mod search;
 
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
 use pdf_core::annot::{AnnotInfo, EditOp};
+use pdf_core::pages::{self, PageMap, PageOp};
 use pdf_core::{
     Bitmap, EngineCmd, EngineEvent, HistoryChange, OutlineItem, PageGeometry, PageSize, PdfEngine,
     PixelFormat, Rect, RequestId, SaveError, TILE_STRIDE_PX, thumb_scale_milli,
@@ -51,6 +53,10 @@ pub enum MupdfError {
     /// No document is currently open.
     #[error("No document is currently open")]
     NoDocumentOpen,
+
+    /// A structural edit that cannot be applied to this document (Plan 0005).
+    #[error("{0}")]
+    PageOp(#[from] pdf_core::pages::PageOpError),
 
     /// Page index was out of bounds.
     #[error("Page index {page_index} out of bounds (total pages: {total_pages})")]
@@ -150,8 +156,9 @@ pub enum MupdfError {
 /// opens (images, EPUB, ...) as a plain [`Document`], which is view-only (Plan 0004, §1).
 /// `revisions` counts the changes of each page (Plan 0004, §4.1) - edits, undos and redos: every
 /// job carries the revision of the display list it was given, so the app can tell pixels drawn
-/// before a change. `history` is the page each step of MuPDF's undo journal changed, in journal
-/// order (ADR 0008): the journal knows how to undo a step, this knows which page to redraw.
+/// before a change. `history` is what each step of MuPDF's undo journal changed, in journal order
+/// (ADR 0008): the journal knows how to undo a step, this knows what to redraw - one page, or the
+/// page order (Plan 0005).
 pub struct MupdfEngine {
     doc: Option<Doc>,
     path: Option<PathBuf>,
@@ -159,7 +166,31 @@ pub struct MupdfEngine {
     scratch: Option<Pixmap>,
     display_lists: Vec<(u32, Arc<DisplayList>)>,
     revisions: Vec<u32>,
-    history: Vec<u32>,
+    history: Vec<Step>,
+}
+
+/// What one step of the undo history changed.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    /// One page's content: annotations, its text or position.
+    Page(u32),
+    /// The pages themselves: `forward` is the step's page map, from a document of `old_count`
+    /// pages.
+    Pages { forward: PageMap, old_count: u32 },
+}
+
+/// What an edit, an undo or a redo changed, for the actor to report.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    /// One page, now at `revision`.
+    Page { page: u32, revision: u32 },
+    /// The pages (Plan 0005, §4.1): their sizes now, the revision every one of them is at, and
+    /// where each came from.
+    Pages {
+        page_sizes: Vec<PageSize>,
+        revision: u32,
+        map: PageMap,
+    },
 }
 
 /// The open document, editable or not.
@@ -200,6 +231,7 @@ impl Default for MupdfEngine {
 impl MupdfEngine {
     /// Creates a new uninitialized MuPDF engine instance.
     pub fn new() -> Self {
+        fonts::install();
         Self {
             doc: None,
             path: None,
@@ -531,7 +563,10 @@ impl MupdfEngine {
     /// The edit is one operation of MuPDF's undo journal (ADR 0008): everything it changes -
     /// cutting old markup included - is undone by one undo, and an edit that fails is rolled back
     /// whole (`pdf_abandon_operation`).
-    pub fn edit(&mut self, op: &EditOp) -> Result<u32, MupdfError> {
+    pub fn edit(&mut self, op: &EditOp) -> Result<Change, MupdfError> {
+        if let EditOp::Pages(pages) = op {
+            return self.restructure(pages);
+        }
         let page = op.page();
         if page as usize >= self.revisions.len() {
             return Err(MupdfError::PageOutOfBounds {
@@ -552,14 +587,106 @@ impl MupdfEngine {
         let after = journal_position(pdf);
         if after > before {
             self.history.truncate(before);
-            self.history.push(page);
+            self.history.push(Step::Page(page));
         }
-        Ok(self.touch(page))
+        Ok(Change::Page {
+            page,
+            revision: self.touch(page),
+        })
     }
 
-    /// Undoes the last edit; returns the page it changed with its new revision, or `None` when
-    /// there was nothing to undo.
-    pub fn undo(&mut self) -> Result<Option<(u32, u32)>, MupdfError> {
+    /// Applies a structural edit (Plan 0005, §4.1) as one journal operation. Every page gets a new
+    /// revision, past every revision before, so no tile drawn before the edit - whatever page index
+    /// it had - can pass for one drawn after it.
+    fn restructure(&mut self, op: &PageOp) -> Result<Change, MupdfError> {
+        let count = self.revisions.len() as u32;
+        let map = pages::plan(op, count)?;
+        let pdf = self.pdf_mut()?;
+        // An edit that leaves every page as it was (a move to where the pages are, a full turn)
+        // changes nothing: MuPDF's journal would record no step for it, and neither does this.
+        if map.len() == count as usize && map.iter().enumerate().all(|(i, o)| *o == Some(i as u32))
+        {
+            return Ok(self.restructured(map));
+        }
+        let journal = |source| MupdfError::EditFailed {
+            page: op.first_page(),
+            source,
+        };
+        let before = journal_position(pdf);
+        pdf.begin_operation(op.title()).map_err(journal)?;
+        let applied = edit::apply_pages(pdf, op, count).and_then(|()| {
+            let now = pdf.page_count().map_err(journal)?.max(0) as usize;
+            if now == map.len() {
+                Ok(())
+            } else {
+                Err(MupdfError::Backend(format!(
+                    "{}: {now} pages, {} expected",
+                    op.title(),
+                    map.len()
+                )))
+            }
+        });
+        if let Err(err) = applied {
+            let _ = pdf.abandon_operation();
+            return Err(err);
+        }
+        pdf.end_operation().map_err(journal)?;
+        let after = journal_position(pdf);
+        if after > before {
+            self.history.truncate(before);
+            self.history.push(Step::Pages {
+                forward: map.clone(),
+                old_count: count,
+            });
+        }
+        Ok(self.restructured(map))
+    }
+
+    /// The pages changed: every display list goes, every page gets the same new revision, and the
+    /// new sizes are read.
+    fn restructured(&mut self, map: PageMap) -> Change {
+        let revision = self.revisions.iter().copied().max().unwrap_or(0) + 1;
+        self.display_lists.clear();
+        let (page_sizes, _) = self.page_sizes_lenient();
+        self.revisions = vec![revision; page_sizes.len()];
+        Change::Pages {
+            page_sizes,
+            revision,
+            map,
+        }
+    }
+
+    /// What one history step changed, undone (`undo`) or redone, as a change to report.
+    fn replay(&mut self, step: Step, undo: bool) -> Change {
+        match step {
+            Step::Page(page) => Change::Page {
+                page,
+                revision: self.touch(page),
+            },
+            Step::Pages { forward, old_count } => {
+                let map = if undo {
+                    pages::invert(&forward, old_count)
+                } else {
+                    forward
+                };
+                self.restructured(map)
+            }
+        }
+    }
+
+    /// The document as it is now, unsaved changes included, as PDF bytes: what the search thread
+    /// reads after a structural edit. Written without garbage collection, which would break the
+    /// undo journal (Plan 0005, §3.4).
+    pub fn snapshot(&self) -> Result<Vec<u8>, MupdfError> {
+        let pdf = self.pdf()?;
+        let mut bytes = Vec::new();
+        pdf.write_to(&mut bytes)
+            .map_err(|e| MupdfError::Backend(format!("snapshot: {e}")))?;
+        Ok(bytes)
+    }
+
+    /// Undoes the last edit; returns what it changed, or `None` when there was nothing to undo.
+    pub fn undo(&mut self) -> Result<Option<Change>, MupdfError> {
         let pdf = self.pdf_mut()?;
         let position = journal_position(pdf);
         if position == 0 {
@@ -570,12 +697,12 @@ impl MupdfEngine {
         Ok(self
             .history
             .get(position - 1)
-            .copied()
-            .map(|page| (page, self.touch(page))))
+            .cloned()
+            .map(|step| self.replay(step, true)))
     }
 
     /// Redoes the last undone edit, like [`Self::undo`].
-    pub fn redo(&mut self) -> Result<Option<(u32, u32)>, MupdfError> {
+    pub fn redo(&mut self) -> Result<Option<Change>, MupdfError> {
         let pdf = self.pdf_mut()?;
         let (position, steps) = pdf.undo_redo_state().unwrap_or((0, 0));
         if position >= steps {
@@ -586,8 +713,8 @@ impl MupdfEngine {
         Ok(self
             .history
             .get(position as usize)
-            .copied()
-            .map(|page| (page, self.touch(page))))
+            .cloned()
+            .map(|step| self.replay(step, false)))
     }
 
     /// `(can_undo, can_redo)`: both false for a document without a journal.
@@ -958,16 +1085,8 @@ impl EngineHandle {
                             // `PageChanged` goes out before any tile of the new revision can be
                             // prepared - this loop prepares nothing until it returns - so the app
                             // always knows a revision before it sees pixels of it.
-                            let page = op.page();
-                            let result = engine.edit(&op).and_then(|revision| {
-                                let items = engine.annotations(page)?;
-                                let _ = event_tx.send(EngineEvent::PageChanged {
-                                    generation,
-                                    page,
-                                    revision,
-                                    items,
-                                });
-                                Ok(())
+                            let result = engine.edit(&op).and_then(|change| {
+                                Self::changed(&event_tx, &engine, &search, generation, change)
                             });
                             let applied = result.is_ok();
                             let _ = event_tx.send(EngineEvent::Edited {
@@ -988,14 +1107,12 @@ impl EngineHandle {
                             let undo = matches!(cmd, EngineCmd::Undo { .. });
                             let moved = if undo { engine.undo() } else { engine.redo() };
                             match moved {
-                                Ok(Some((page, revision))) => {
-                                    let items = engine.annotations(page).unwrap_or_default();
-                                    let _ = event_tx.send(EngineEvent::PageChanged {
-                                        generation,
-                                        page,
-                                        revision,
-                                        items,
-                                    });
+                                Ok(Some(change)) => {
+                                    if let Err(err) = Self::changed(
+                                        &event_tx, &engine, &search, generation, change,
+                                    ) {
+                                        Self::report(&event_tx, &err);
+                                    }
                                     let change = if undo {
                                         HistoryChange::Undone
                                     } else {
@@ -1053,6 +1170,47 @@ impl EngineHandle {
     }
 
     /// Reports where the undo history stands.
+    /// Reports what an edit, undo or redo changed: `PageChanged` with the page's annotations, or
+    /// `Restructured` (Plan 0005, §4.1), after which the search thread reads the document as it is
+    /// now and the outline is sent again, its entries resolved to the new page numbers. Sent
+    /// before any tile of the new revision can be prepared.
+    fn changed(
+        events: &Sender<EngineEvent>,
+        engine: &MupdfEngine,
+        search: &SearchThread,
+        generation: u64,
+        change: Change,
+    ) -> Result<(), MupdfError> {
+        match change {
+            Change::Page { page, revision } => {
+                let items = engine.annotations(page)?;
+                let _ = events.send(EngineEvent::PageChanged {
+                    generation,
+                    page,
+                    revision,
+                    items,
+                });
+            }
+            Change::Pages {
+                page_sizes,
+                revision,
+                map,
+            } => {
+                let _ = events.send(EngineEvent::Restructured {
+                    generation,
+                    page_sizes,
+                    revision,
+                    map,
+                });
+                let _ = events.send(EngineEvent::Outline {
+                    items: engine.outline(),
+                });
+                search.document_bytes(engine.snapshot()?, engine.password.clone());
+            }
+        }
+        Ok(())
+    }
+
     fn history(
         events: &Sender<EngineEvent>,
         engine: &MupdfEngine,

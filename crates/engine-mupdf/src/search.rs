@@ -41,6 +41,12 @@ enum SearchCmd {
         path: PathBuf,
         password: Option<String>,
     },
+    /// The open document after a structural edit, as bytes (Plan 0005, §4.1): its pages no longer
+    /// match the file's.
+    Bytes {
+        data: Arc<Vec<u8>>,
+        password: Option<String>,
+    },
     Search {
         query: String,
         from_page: u32,
@@ -90,6 +96,18 @@ impl SearchThread {
         self.current.store(0, Ordering::SeqCst);
         if let Some(tx) = &self.tx {
             let _ = tx.send(SearchCmd::Document { path, password });
+        }
+    }
+
+    /// The open document's pages changed: read them from these bytes from now on. A running search
+    /// stops, since its page numbers are the old ones.
+    pub(crate) fn document_bytes(&self, data: Vec<u8>, password: Option<String>) {
+        self.current.store(0, Ordering::SeqCst);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(SearchCmd::Bytes {
+                data: Arc::new(data),
+                password,
+            });
         }
     }
 
@@ -148,7 +166,7 @@ struct Searcher {
     pending: VecDeque<SearchCmd>,
     current: Arc<AtomicU64>,
     events: Sender<EngineEvent>,
-    source: Option<(PathBuf, Option<String>)>,
+    source: Option<(Source, Option<String>)>,
     doc: Option<Document>,
     /// Character lists of recently selected pages, with the tick they were last used.
     chars: HashMap<u32, (Vec<SelChar>, u64)>,
@@ -182,12 +200,19 @@ impl Searcher {
     fn handle(&mut self, cmd: SearchCmd) {
         match cmd {
             SearchCmd::Document { path, password } => {
-                self.doc = open(&path, &password);
-                self.source = Some((path, password));
+                let source = Source::File(path);
+                self.doc = open(&source, &password);
+                self.source = Some((source, password));
                 self.chars.clear();
                 if let Some(doc) = &self.doc {
                     warm_up(doc);
                 }
+            }
+            SearchCmd::Bytes { data, password } => {
+                let source = Source::Bytes(data);
+                self.doc = open(&source, &password);
+                self.source = Some((source, password));
+                self.chars.clear();
             }
             SearchCmd::Search {
                 query,
@@ -366,8 +391,17 @@ fn warm_up(doc: &Document) {
     }
 }
 
-fn open(path: &std::path::Path, password: &Option<String>) -> Option<Document> {
-    let mut doc = Document::open(path.to_str()?).ok()?;
+/// Where the search thread reads the document from.
+enum Source {
+    File(PathBuf),
+    Bytes(Arc<Vec<u8>>),
+}
+
+fn open(source: &Source, password: &Option<String>) -> Option<Document> {
+    let mut doc = match source {
+        Source::File(path) => Document::open(path.to_str()?).ok()?,
+        Source::Bytes(data) => Document::from_bytes(data, "application/pdf").ok()?,
+    };
     if doc.needs_password().unwrap_or(false) {
         let authed = password
             .as_deref()
