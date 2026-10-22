@@ -759,8 +759,10 @@ impl MupdfEngine {
                 return Err(SaveError::NeedsSaveAs);
             }
             let name = current.to_str().ok_or(SaveError::NeedsSaveAs)?;
+            // New streams are compressed (Plan 0005 §3.5: MuPDF writes them raw otherwise); no
+            // garbage collection, which would break the undo journal (§3.4).
             let mut options = PdfWriteOptions::default();
-            options.set_incremental(true);
+            options.set_incremental(true).set_compress(true);
             pdf.save_with_options(name, options)
                 .map_err(|e| SaveError::Failed(e.to_string()))?;
             let len = file_len(&current);

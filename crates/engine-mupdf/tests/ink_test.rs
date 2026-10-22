@@ -185,3 +185,32 @@ fn ink_is_recoloured_undone_and_deleted() {
     engine.redo().expect("redo add");
     assert_points_eq(&inks(&engine, 0)[0].strokes[0], &stroke);
 }
+
+/// An in-place save compresses the streams it adds (Plan 0005 Phase 1, §3.5): a long stroke's
+/// appearance stream goes into the appended section deflated, and undo still works after it.
+#[test]
+fn an_in_place_save_compresses_new_streams_and_keeps_undo() {
+    let path = scratch("ink_compressed.pdf");
+    std::fs::write(&path, text_pdf(1)).expect("write fixture");
+    let opened = std::fs::metadata(&path).expect("size").len() as usize;
+    let mut engine = open(&path);
+    let stroke = simplify(&drawn_stroke(), INK_SIMPLIFY_PT);
+    engine
+        .edit(&EditOp::AddInk {
+            page: 0,
+            strokes: vec![stroke],
+            colour: PALETTE[0],
+            width: INK_WIDTHS[1],
+            author: None,
+        })
+        .expect("add ink");
+    engine.save(None).expect("in-place save");
+    let bytes = std::fs::read(&path).expect("read");
+    let appended = &bytes[opened..];
+    assert!(
+        appended.windows(12).any(|w| w == b"/FlateDecode"),
+        "the appended section has a deflated stream"
+    );
+    engine.undo().expect("undo after the save");
+    assert!(inks(&engine, 0).is_empty(), "undo still restores the page");
+}
