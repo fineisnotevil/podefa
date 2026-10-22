@@ -9,6 +9,7 @@
 //! top-left), the same space as the text selection's rectangles.
 
 use crate::Rect;
+use crate::pages::PageOp;
 
 /// What kind of annotation an [`AnnotInfo`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -207,6 +208,9 @@ pub enum EditOp {
         id: u32,
         rect: Rect,
     },
+    /// Changes the pages themselves (Plan 0005): renumbers them, so the engine answers with
+    /// `Restructured` rather than `PageChanged`.
+    Pages(PageOp),
     /// Draws free-hand strokes (PDF `Ink` annotation), each a list of page points.
     AddInk {
         page: u32,
@@ -234,12 +238,14 @@ impl EditOp {
             Self::SetContents { .. } => "Edit note",
             Self::MoveNote { .. } => "Move note",
             Self::AddInk { .. } => "Ink",
+            Self::Pages(op) => op.title(),
         }
     }
 
-    /// The page the edit changes.
+    /// The page the edit changes; for a structural edit, the first page it names.
     pub fn page(&self) -> u32 {
         match self {
+            Self::Pages(op) => op.first_page(),
             Self::AddMarkup { page, .. }
             | Self::Delete { page, .. }
             | Self::SetColour { page, .. }

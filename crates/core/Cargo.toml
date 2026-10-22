@@ -15,4 +15,5 @@ description = "Engine-agnostic core types and traits for PODEFA"
 workspace = true
 
 [dependencies]
+thiserror = { workspace = true }
 

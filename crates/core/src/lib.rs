@@ -11,6 +11,7 @@
 //! - [`tiling`]: pure tile geometry, and [`scheduler`]: the pure tile cache/request policy.
 //! - [`layout`]: the continuous page layout and the canvas window (Plan 0002).
 //! - [`annot`]: annotations, edits and the unsaved-changes state (Plan 0004).
+//! - [`pages`]: structural edits and how they renumber pages (Plan 0005).
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 pub mod annot;
 pub mod layout;
 pub mod nav;
+pub mod pages;
 pub mod scheduler;
 pub mod search;
 pub mod select;
@@ -316,6 +318,15 @@ pub enum EngineEvent {
         page: u32,
         revision: u32,
         items: Vec<annot::AnnotInfo>,
+    },
+    /// A structural edit, or its undo or redo, changed the pages (Plan 0005, §4.1): they are now
+    /// `page_sizes`, every one at `revision`, and `map` says where each came from. Everything the
+    /// receiver keeps per page index is out of date; what `map` names can be moved over.
+    Restructured {
+        generation: u64,
+        page_sizes: Vec<PageSize>,
+        revision: u32,
+        map: pages::PageMap,
     },
     /// An edit was applied, or why it was not.
     Edited {
