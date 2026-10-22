@@ -22,6 +22,7 @@ use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
 use pdf_core::annot::{AnnotInfo, EditOp};
 use pdf_core::pages::{self, PageMap, PageOp};
+use pdf_core::tools::{MergeInput, ToolJob};
 use pdf_core::{
     Bitmap, EngineCmd, EngineEvent, HistoryChange, OutlineItem, PageGeometry, PageSize, PdfEngine,
     PixelFormat, Rect, RequestId, SaveError, TILE_STRIDE_PX, thumb_scale_milli,
@@ -562,6 +563,13 @@ impl MupdfEngine {
         matches!(self.doc, Some(Doc::Pdf(_)))
     }
 
+    /// Whether MuPDF repaired the open PDF while opening it. Right after opening, that is the only
+    /// reason MuPDF refuses an incremental save (`pdf_can_be_saved_incrementally`: a repair or a
+    /// redaction, and nothing has been redacted yet).
+    pub fn was_repaired(&self) -> bool {
+        matches!(&self.doc, Some(Doc::Pdf(pdf)) if !pdf.can_be_saved_incrementally())
+    }
+
     /// How many edits a page has had since the document was opened.
     pub fn revision(&self, page: u32) -> u32 {
         self.revisions.get(page as usize).copied().unwrap_or(0)
@@ -1066,6 +1074,7 @@ impl EngineHandle {
                                         page_sizes,
                                         unsized_pages,
                                         editable: engine.is_editable(),
+                                        repaired: engine.was_repaired(),
                                     });
                                     let _ = event_tx.send(EngineEvent::Outline {
                                         items: engine.outline(),
@@ -1227,7 +1236,17 @@ impl EngineHandle {
                                 Self::history(&event_tx, &engine, 0, HistoryChange::None);
                             }
                         }
-                        EngineCmd::RunTool { job_id, job } => {
+                        EngineCmd::RunTool { job_id, mut job } => {
+                            // Compressing a document with no unsaved changes reads its file, so
+                            // "before" is the size the user knows and a result that is not smaller
+                            // is the file itself.
+                            if let ToolJob::Compress { input, .. } = &mut job
+                                && *input == MergeInput::Current
+                                && let Some(path) = engine.path.clone()
+                                && engine.pdf().is_ok_and(|pdf| !pdf.has_unsaved_changes())
+                            {
+                                *input = MergeInput::File(path);
+                            }
                             // No output may be the open file: MuPDF reads from it.
                             let clash = engine.path.as_deref().is_some_and(|open| {
                                 job.outputs().iter().any(|out| same_file(out, open))
@@ -1245,12 +1264,14 @@ impl EngineHandle {
                                             "the open document cannot be written over; choose another file"
                                                 .to_owned(),
                                         ),
+                                        sizes: None,
                                     });
                                 }
                                 (false, Err(err)) => {
                                     let _ = event_tx.send(EngineEvent::ToolDone {
                                         job_id,
                                         result: Err(err.to_string()),
+                                        sizes: None,
                                     });
                                 }
                                 (false, Ok(current)) => tools.run(job_id, job, current),

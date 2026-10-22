@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! The tool thread (Plan 0005, §4.2): merging and extracting pages into new files.
+//! The tool thread (Plan 0005, §4.2): merging and extracting pages into new files, exporting pages
+//! as images, making a PDF of images and compressing (Phase 4).
 //!
 //! Jobs run here, on documents of their own, never on the open one: rewriting a file with garbage
 //! collection breaks the open document's undo journal (Plan 0005 §3.4), and a merge of thousands of
@@ -11,9 +12,13 @@
 //! chose: a cancelled or failed job deletes its `.part` files and leaves any file it would have
 //! replaced untouched.
 
-use mupdf::pdf::{InsertPdfOptions, PageSelection, PdfDocument, PdfWriteOptions};
+use mupdf::pdf::{
+    InsertImageOptions, InsertPdfOptions, PageImageSource, PageSelection, PdfDocument,
+    PdfWriteOptions,
+};
+use mupdf::{Colorspace, Image, Matrix, Rect, Size};
 use pdf_core::EngineEvent;
-use pdf_core::tools::{MergeInput, ToolJob};
+use pdf_core::tools::{ImageFormat, MergeInput, ToolJob, ToolSizes};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,10 +49,14 @@ impl ToolThread {
             .name("mupdf-tools".to_string())
             .spawn(move || {
                 while let Ok(run) = rx.recv() {
-                    let result = execute(&run, &shared, &events);
+                    let (result, sizes) = match execute(&run, &shared, &events) {
+                        Ok((files, sizes)) => (Ok(files), sizes),
+                        Err(err) => (Err(err), None),
+                    };
                     let _ = events.send(EngineEvent::ToolDone {
                         job_id: run.job_id,
                         result,
+                        sizes,
                     });
                 }
             })
@@ -90,7 +99,9 @@ impl Drop for ToolThread {
 pub(crate) fn needs_current(job: &ToolJob) -> bool {
     match job {
         ToolJob::Merge { inputs, .. } => inputs.contains(&MergeInput::Current),
-        ToolJob::Extract { .. } => true,
+        ToolJob::Extract { .. } | ToolJob::ExportImages { .. } => true,
+        ToolJob::ImagesToPdf { .. } => false,
+        ToolJob::Compress { input, .. } => *input == MergeInput::Current,
     }
 }
 
@@ -127,6 +138,73 @@ fn write_part(doc: &PdfDocument, output: &Path) -> Result<PathBuf, String> {
     }
 }
 
+fn utf8(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("not a UTF-8 path: {}", path.display()))
+}
+
+/// Renders one page at `dpi` and writes it to the `.part` file of `output`, which it returns.
+fn export_page(
+    doc: &PdfDocument,
+    page: u32,
+    output: &Path,
+    format: ImageFormat,
+    dpi: u32,
+) -> Result<PathBuf, String> {
+    let fail = |e: mupdf::Error| format!("page {}: {e}", page + 1);
+    let scale = dpi.clamp(1, 2400) as f32 / 72.0;
+    let mut pixmap = doc
+        .load_page(page as i32)
+        .map_err(fail)?
+        .to_pixmap(
+            &Matrix::new_scale(scale, scale),
+            &Colorspace::device_rgb(),
+            false,
+            true,
+        )
+        .map_err(fail)?;
+    // The files say their resolution, so a page made of one again has the size it had.
+    let dpi = dpi.clamp(1, 2400) as i32;
+    pixmap.set_resolution(dpi, dpi);
+    let part = part_path(output);
+    let name = utf8(&part)?;
+    let written = match format {
+        ImageFormat::Png => pixmap.save_as(name, mupdf::ImageFormat::PNG),
+        ImageFormat::Jpeg { quality } => pixmap.save_as_jpeg(name, quality),
+    };
+    match written {
+        Ok(()) => Ok(part),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(format!("{}: {e}", output.display()))
+        }
+    }
+}
+
+/// Adds one image file to `doc` as a page of the image's size at its resolution (72 dpi when it
+/// names none). The file's bytes go in as they are where MuPDF can keep them (JPEG).
+fn add_image_page(doc: &mut PdfDocument, path: &Path) -> Result<(), String> {
+    let fail = |e: mupdf::Error| format!("{}: {e}", path.display());
+    let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let image = Image::from_bytes(&data).map_err(fail)?;
+    let (xres, yres) = image.resolution();
+    let points =
+        |pixels: u32, res: i32| pixels as f32 * 72.0 / if res > 0 { res as f32 } else { 72.0 };
+    let (w, h) = (points(image.width(), xres), points(image.height(), yres));
+    if !(w >= 1.0 && h >= 1.0) {
+        return Err(format!("{}: the image is empty", path.display()));
+    }
+    let mut page = doc.new_page(Size::new(w, h)).map_err(fail)?;
+    page.insert_image(
+        doc,
+        Rect::new(0.0, 0.0, w, h),
+        PageImageSource::Image(&image),
+        InsertImageOptions::default(),
+    )
+    .map_err(fail)?;
+    Ok(())
+}
+
 fn open(input: &MergeInput, current: Option<&Arc<Vec<u8>>>) -> Result<PdfDocument, String> {
     let doc = match input {
         MergeInput::Current => {
@@ -150,11 +228,12 @@ fn open(input: &MergeInput, current: Option<&Arc<Vec<u8>>>) -> Result<PdfDocumen
     Ok(doc)
 }
 
+/// Runs a job; returns the files it wrote and, for Compress, the sizes.
 fn execute(
     run: &Run,
     cancelled: &AtomicU64,
     events: &Sender<EngineEvent>,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<(Vec<PathBuf>, Option<ToolSizes>), String> {
     let stop = || {
         let id = cancelled.load(Ordering::SeqCst);
         id == run.job_id || id == u64::MAX
@@ -168,6 +247,7 @@ fn execute(
     };
     // `(part file, output)` for every file written so far.
     let mut written: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut sizes = None;
     let result = (|| -> Result<(), String> {
         match &run.job {
             ToolJob::Merge { inputs, output } => {
@@ -231,6 +311,85 @@ fn execute(
                     progress(done + 1, parts.len());
                 }
             }
+            ToolJob::ExportImages { pages, format, dpi } => {
+                let source = open(&MergeInput::Current, run.current.as_ref())?;
+                for (done, (page, output)) in pages.iter().enumerate() {
+                    if stop() {
+                        return Err("cancelled".to_owned());
+                    }
+                    written.push((
+                        export_page(&source, *page, output, *format, *dpi)?,
+                        output.clone(),
+                    ));
+                    progress(done + 1, pages.len());
+                }
+            }
+            ToolJob::ImagesToPdf { images, output } => {
+                if images.is_empty() {
+                    return Err("no images chosen".to_owned());
+                }
+                let mut doc = PdfDocument::new();
+                let total = images.len() + 1;
+                for (done, image) in images.iter().enumerate() {
+                    if stop() {
+                        return Err("cancelled".to_owned());
+                    }
+                    add_image_page(&mut doc, image)?;
+                    progress(done + 1, total);
+                }
+                if stop() {
+                    return Err("cancelled".to_owned());
+                }
+                written.push((write_part(&doc, output)?, output.clone()));
+                progress(total, total);
+            }
+            ToolJob::Compress {
+                input,
+                preset,
+                output,
+            } => {
+                let bytes = match input {
+                    MergeInput::Current => run
+                        .current
+                        .as_ref()
+                        .map(|b| b.as_slice().to_vec())
+                        .ok_or("the open document is not available")?,
+                    MergeInput::File(path) => {
+                        std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?
+                    }
+                };
+                progress(0, 2);
+                let mut doc = PdfDocument::from_bytes(&bytes).map_err(|e| e.to_string())?;
+                if doc.needs_password().unwrap_or(false) {
+                    return Err("the document is password-protected".to_owned());
+                }
+                if let Some((above, to, quality)) = preset.images() {
+                    doc.rewrite_images(above, to, quality)
+                        .map_err(|e| e.to_string())?;
+                }
+                if stop() {
+                    return Err("cancelled".to_owned());
+                }
+                progress(1, 2);
+                let part = write_part(&doc, output)?;
+                let after = std::fs::metadata(&part).map_or(u64::MAX, |m| m.len());
+                let before = bytes.len() as u64;
+                // Never a larger file: the input itself is the better copy then.
+                let kept_original = after >= before;
+                if kept_original {
+                    if let Err(e) = std::fs::write(&part, &bytes) {
+                        let _ = std::fs::remove_file(&part);
+                        return Err(format!("{}: {e}", output.display()));
+                    }
+                }
+                written.push((part, output.clone()));
+                sizes = Some(ToolSizes {
+                    before,
+                    after: after.min(before),
+                    kept_original,
+                });
+                progress(2, 2);
+            }
         }
         if stop() {
             return Err("cancelled".to_owned());
@@ -242,7 +401,10 @@ fn execute(
         Ok(())
     })();
     match result {
-        Ok(()) => Ok(written.into_iter().map(|(_, output)| output).collect()),
+        Ok(()) => Ok((
+            written.into_iter().map(|(_, output)| output).collect(),
+            sizes,
+        )),
         Err(err) => {
             for (part, _) in &written {
                 let _ = std::fs::remove_file(part);

@@ -173,7 +173,9 @@ fn run(
     loop {
         match next(rx) {
             EngineEvent::ToolProgress { job_id: id, .. } if id == job_id => progress += 1,
-            EngineEvent::ToolDone { job_id: id, result } if id == job_id => {
+            EngineEvent::ToolDone {
+                job_id: id, result, ..
+            } if id == job_id => {
                 return (result, progress);
             }
             _ => {}
@@ -317,7 +319,10 @@ fn a_cancelled_merge_writes_nothing() {
         .send(EngineCmd::CancelTool { job_id: 11 })
         .expect("actor");
     let result = loop {
-        if let EngineEvent::ToolDone { job_id: 11, result } = next(&rx) {
+        if let EngineEvent::ToolDone {
+            job_id: 11, result, ..
+        } = next(&rx)
+        {
             break result;
         }
     };
