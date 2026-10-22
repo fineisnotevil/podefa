@@ -126,6 +126,10 @@ pub struct Cfg {
     /// one, the tiles the first edit asks for are still in flight when the next one changes the
     /// page again (row W). 0, the default, edits by dragging over the text.
     pub edit_burst: u32,
+    /// `--bench-note`: place a note with the Note tool on a `select_*p.pdf` document, check its
+    /// text and its hover preview, drag it elsewhere and undo the move, all through the window's
+    /// input path (Plan 0004 Phase 3).
+    pub note: bool,
 }
 
 impl Default for Cfg {
@@ -157,6 +161,7 @@ impl Default for Cfg {
             edit_pan_px: 0.0,
             edit_save: false,
             edit_burst: 0,
+            note: false,
         }
     }
 }
@@ -175,6 +180,7 @@ impl Cfg {
             && self.search.is_none()
             && !self.select
             && self.edits == 0
+            && !self.note
     }
 }
 
@@ -269,6 +275,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             "--bench-edit-pan" => {
                 cfg.edit_pan_px = number.unwrap_or(40.0).max(0.0);
                 consumed = 2;
+            }
+            "--bench-note" => {
+                cfg.note = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-edit-burst" => {
                 cfg.edit_burst = number.unwrap_or(2.0).max(0.0) as u32;
@@ -1312,6 +1322,8 @@ enum Phase {
     Select,
     /// Highlights made through the tool and a drag, one per tick (Plan 0004 rows R, W).
     Edit,
+    /// A sticky note placed, previewed, moved and the move undone (Plan 0004 Phase 3).
+    Note,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1330,6 +1342,7 @@ struct Pending {
     search: bool,
     select: bool,
     edit: bool,
+    note: bool,
 }
 
 impl Pending {
@@ -1347,6 +1360,7 @@ impl Pending {
             search: cfg.search.is_some(),
             select: cfg.select,
             edit: cfg.edits > 0,
+            note: cfg.note,
         }
     }
 
@@ -1364,6 +1378,7 @@ impl Pending {
             (&mut self.search, Phase::Search),
             (&mut self.select, Phase::Select),
             (&mut self.edit, Phase::Edit),
+            (&mut self.note, Phase::Note),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1720,6 +1735,7 @@ impl Driver {
             Phase::Search => "search",
             Phase::Select => "select",
             Phase::Edit => "edit",
+            Phase::Note => "note",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -2006,6 +2022,91 @@ impl Driver {
                     }
                 };
                 self.nav_expect = Some((name, expected));
+                self.step += 1;
+                false
+            }
+            Phase::Note => {
+                // `select_*p.pdf` page 1: line 30 is at 399 pt from the top, inside the default
+                // window's viewport; x = 300 pt is beside its text, so the note goes on empty
+                // paper.
+                const TEXT: &str = "Öğrenci notu ✓";
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                let note = || {
+                    let mut found = None;
+                    with_state(|state| {
+                        found = state.annots.get(&0).and_then(|items| {
+                            items
+                                .iter()
+                                .find(|item| item.kind == pdf_core::annot::AnnotKind::Note)
+                                .cloned()
+                        });
+                    });
+                    found
+                };
+                let at = |n: &Option<pdf_core::annot::AnnotInfo>| {
+                    n.as_ref().map_or_else(
+                        || "none".to_owned(),
+                        |n| format!("({:.0},{:.0})", n.rect.x, n.rect.y),
+                    )
+                };
+                match self.step {
+                    0 => {
+                        ui.invoke_choose_tool(5);
+                        select_click(ui, (300.0, 30), false);
+                    }
+                    1 => {
+                        check(
+                            "Note tool opens the editor",
+                            "editor=true".to_owned(),
+                            format!("editor={}", ui.get_note_editor_visible()),
+                        );
+                        ui.set_note_text(TEXT.into());
+                        ui.invoke_note_save();
+                    }
+                    2 => {
+                        let n = note();
+                        check(
+                            "the note is placed with its text",
+                            format!("{TEXT} at (300,399)"),
+                            format!(
+                                "{} at {}",
+                                n.as_ref()
+                                    .and_then(|n| n.contents.clone())
+                                    .unwrap_or_default(),
+                                at(&n)
+                            ),
+                        );
+                        ui.invoke_choose_tool(0);
+                        let position = window_point(ui, (305.0, 30));
+                        ui.window()
+                            .dispatch_event(WindowEvent::PointerMoved { position });
+                        check(
+                            "hovering shows its text",
+                            format!("visible=true {TEXT}"),
+                            format!(
+                                "visible={} {}",
+                                ui.get_note_hover_visible(),
+                                ui.get_note_hover_text()
+                            ),
+                        );
+                        // Grabbed 5 pt right of its top-left corner, dropped 100 pt right and on
+                        // line 10 (159 pt).
+                        select_drag(ui, (305.0, 30), (405.0, 10));
+                    }
+                    3 => {
+                        check("a drag moves it", "(400,159)".to_owned(), at(&note()));
+                        with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                    }
+                    4 => {
+                        check("Ctrl+Z puts it back", "(300,399)".to_owned(), at(&note()));
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                }
                 self.step += 1;
                 false
             }
