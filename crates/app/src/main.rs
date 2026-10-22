@@ -15,7 +15,10 @@
 //! to that window's start.
 
 use engine_mupdf::EngineHandle;
-use pdf_core::annot::{AnnotInfo, AnnotKind, EditOp, MarkupKind, PALETTE, SaveState, note_rect};
+use pdf_core::annot::{
+    AnnotInfo, AnnotKind, EditOp, INK_SIMPLIFY_PT, INK_WIDTHS, MarkupKind, PALETTE, SaveState,
+    note_rect, simplify,
+};
 use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
@@ -37,6 +40,7 @@ use slint::{
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -178,6 +182,12 @@ slint::slint! {
         in-out property <length> note-hover-x: 0px;
         in-out property <length> note-hover-y: 0px;
         in-out property <string> note-hover-text: "";
+        // The Ink tool (Plan 0004 Phase 4): the line width chosen, and the stroke being drawn as
+        // SVG path commands in viewport coordinates, with its colour and width.
+        in-out property <int> ink-width-index: 1;
+        in-out property <string> ink-commands: "";
+        in-out property <color> ink-colour;
+        in-out property <length> ink-stroke-width: 2px;
         // Where the viewport sits in the window, for scripted pointer input (bench only).
         out property <length> viewport-abs-x: viewport.absolute-position.x;
         out property <length> viewport-abs-y: viewport.absolute-position.y;
@@ -224,6 +234,7 @@ slint::slint! {
         callback copy_selection();
         callback choose_tool(int);
         callback choose_colour(int);
+        callback choose_ink_width(int);
         callback delete_annotation();
         callback undo();
         callback redo();
@@ -482,6 +493,11 @@ slint::slint! {
                     primary: root.tool == 5;
                     clicked => { root.choose_tool(5); }
                 }
+                Button {
+                    text: "Ink (I)";
+                    primary: root.tool == 6;
+                    clicked => { root.choose_tool(6); }
+                }
                 Rectangle { width: 6px; }
                 for swatch[index] in root.swatches : VerticalLayout {
                     alignment: center;
@@ -496,10 +512,30 @@ slint::slint! {
                     }
                 }
                 Rectangle { width: 6px; }
-                Button {
+                // The Ink tool draws instead of selecting, so its line widths take Delete's place.
+                if root.tool != 6 : Button {
                     text: "Delete";
                     enabled: root.has-annot-selection;
                     clicked => { root.delete_annotation(); }
+                }
+                if root.tool == 6 : HorizontalLayout {
+                    spacing: 6px;
+                    for line[index] in [1px, 2px, 4px] : VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 4px;
+                            border-width: index == root.ink-width-index ? 2px : 1px;
+                            border-color: index == root.ink-width-index ? Palette.foreground : Palette.border;
+                            Rectangle {
+                                width: 14px;
+                                height: line;
+                                background: Palette.foreground;
+                            }
+                            TouchArea { clicked => { root.choose_ink_width(index); } }
+                        }
+                    }
                 }
                 Rectangle { horizontal-stretch: 1; }
             }
@@ -697,9 +733,9 @@ slint::slint! {
                     content-x <=> root.scroll-x;
                     content-y <=> root.scroll-y;
                     // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
-                    // except while a long press is selecting.
+                    // except while a long press is selecting or the Ink tool draws.
                     mouse-drag-pan-enabled: false;
-                    interactive: !root.touch-selecting;
+                    interactive: !root.touch-selecting && root.tool != 6;
 
                     // These fire on every change, user or programmatic, including each tick of
                     // the 180 ms wheel animation, which makes them the viewport source of truth.
@@ -761,7 +797,7 @@ slint::slint! {
                             }
                             return reject;
                         }
-                        mouse-cursor: root.tool == 5 ? MouseCursor.crosshair
+                        mouse-cursor: root.tool == 5 || root.tool == 6 ? MouseCursor.crosshair
                             : root.text-cursor ? MouseCursor.text : MouseCursor.default;
                         changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
                         changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
@@ -823,6 +859,28 @@ slint::slint! {
                                 root.scrollbar_moved(self.mouse-y - self.grab, self.height);
                             }
                         }
+                    }
+                }
+
+                // The ink stroke being drawn, over the page until MuPDF draws it in the tiles.
+                if root.ink-commands != "" : Rectangle {
+                    x: viewport.x;
+                    y: viewport.y;
+                    width: viewport.width;
+                    height: viewport.height;
+                    clip: true;
+                    Path {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: parent.height;
+                        commands: root.ink-commands;
+                        stroke: root.ink-colour;
+                        stroke-width: root.ink-stroke-width;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        // Unscaled: the commands are in this element's logical pixels.
+                        fit: preserve;
                     }
                 }
 
@@ -1012,6 +1070,8 @@ enum Tool {
     Markup(MarkupKind),
     /// A click places a sticky note there (Plan 0004 Phase 3).
     Note,
+    /// A drag draws a free-hand line (Plan 0004 Phase 4).
+    Ink,
 }
 
 /// The note the editor is open for: a new one at a rectangle, or an existing one.
@@ -1042,6 +1102,7 @@ impl Tool {
             Tool::Markup(MarkupKind::StrikeOut) => 3,
             Tool::Markup(MarkupKind::Squiggly) => 4,
             Tool::Note => 5,
+            Tool::Ink => 6,
         }
     }
 
@@ -1052,6 +1113,7 @@ impl Tool {
             3 => Tool::Markup(MarkupKind::StrikeOut),
             4 => Tool::Markup(MarkupKind::Squiggly),
             5 => Tool::Note,
+            6 => Tool::Ink,
             _ => Tool::Select,
         }
     }
@@ -1186,6 +1248,14 @@ struct AppState {
     /// become a move (Plan 0004 Phase 3).
     note_edit: Option<(u32, NoteTarget)>,
     note_drag: Option<NoteDrag>,
+    /// The Ink tool's line width (index into [`INK_WIDTHS`]), and the stroke being drawn: its
+    /// page and its points in page space as the pointer gave them (Plan 0004 Phase 4).
+    ink_width: usize,
+    ink: Option<(u32, Vec<(f32, f32)>)>,
+    /// The live stroke's path commands, rebuilt in place on every pointer move.
+    ink_commands: String,
+    /// The page whose committed stroke is still drawn live, until its new tiles are all in.
+    ink_shown: Option<u32>,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -1691,6 +1761,24 @@ impl AppState {
         touch: bool,
     ) {
         let point = self.page_point(ui, x, y);
+        // The Ink tool draws with the mouse, a pen and a finger alike (Plan 0004, §4.2).
+        if self.tool == Tool::Ink && self.editable {
+            match kind {
+                0 => {
+                    if let Some(point) = point {
+                        self.clear_selection(ui);
+                        self.select_annotation(ui, None);
+                        self.ink = Some((point.page, Vec::new()));
+                        self.ink_point(ui, x, y);
+                    }
+                }
+                2 => self.ink_point(ui, x, y),
+                1 => self.finish_ink(ui, true),
+                4 => self.finish_ink(ui, false),
+                _ => {}
+            }
+            return;
+        }
         match kind {
             // Down.
             0 if touch => {
@@ -1794,13 +1882,9 @@ impl AppState {
                 if let Some(mut drag) = self.note_drag {
                     // Moving a note: its outline follows the pointer, on its own page.
                     if dragged
-                        && let Some(slot) = self.layout.slot(drag.page as usize)
+                        && let Some((px, py)) = self.page_local(drag.page, x, y)
                         && let Some(size) = self.page_sizes.get(drag.page as usize)
                     {
-                        let s = self.scale_milli as f64 / 1000.0;
-                        let sf = self.sf();
-                        let px = ((self.pos.0 + x as f64 * sf - slot.x as f64) / s) as f32;
-                        let py = ((self.pos.1 + y as f64 * sf - slot.y as f64) / s) as f32;
                         let rect =
                             note_rect(px - drag.grab.0, py - drag.grab.1, size.width, size.height);
                         drag.rect = Some(rect);
@@ -1898,6 +1982,113 @@ impl AppState {
                     ui.set_touch_selecting(false);
                 }
             }
+        }
+    }
+
+    /// A viewport point (logical pixels) in the space of a given page, which it may lie outside.
+    fn page_local(&self, page: u32, x: f32, y: f32) -> Option<(f32, f32)> {
+        let slot = self.layout.slot(page as usize)?;
+        let s = self.scale_milli as f64 / 1000.0;
+        let sf = self.sf();
+        Some((
+            ((self.pos.0 + x as f64 * sf - slot.x as f64) / s) as f32,
+            ((self.pos.1 + y as f64 * sf - slot.y as f64) / s) as f32,
+        ))
+    }
+
+    /// The pointer moved while drawing: the stroke gets the point, kept on its page.
+    fn ink_point(&mut self, ui: &MainWindow, x: f32, y: f32) {
+        let Some(page) = self.ink.as_ref().map(|(page, _)| *page) else {
+            return;
+        };
+        let (Some((px, py)), Some(size)) = (
+            self.page_local(page, x, y),
+            self.page_sizes.get(page as usize),
+        ) else {
+            return;
+        };
+        let point = (px.clamp(0.0, size.width), py.clamp(0.0, size.height));
+        if let Some((_, points)) = self.ink.as_mut() {
+            points.push(point);
+        }
+        self.rebuild_ink(ui);
+    }
+
+    /// The live stroke's path, in viewport logical pixels: rebuilt whole on each move or scroll
+    /// (`ink_rebuild_ms`, benchmarks §10.2), since the points are in page space.
+    fn rebuild_ink(&mut self, ui: &MainWindow) {
+        let started = Instant::now();
+        let Some((page, points)) = self.ink.as_ref() else {
+            return;
+        };
+        let Some(slot) = self.layout.slot(*page as usize) else {
+            return;
+        };
+        let s = self.scale_milli as f64 / 1000.0;
+        let sf = self.sf();
+        let (ox, oy) = (
+            (slot.x as f64 - self.pos.0) / sf,
+            (slot.y as f64 - self.pos.1) / sf,
+        );
+        let k = s / sf;
+        self.ink_commands.clear();
+        for (i, &(px, py)) in points.iter().enumerate() {
+            let vx = ox + px as f64 * k;
+            let vy = oy + py as f64 * k;
+            let _ = write!(
+                self.ink_commands,
+                "{}{vx:.1} {vy:.1} ",
+                if i == 0 { "M" } else { "L" }
+            );
+        }
+        // One point draws a dot: a zero-length segment with round caps.
+        if let [(px, py)] = points.as_slice() {
+            let _ = write!(
+                self.ink_commands,
+                "L{:.1} {:.1}",
+                ox + *px as f64 * k,
+                oy + *py as f64 * k
+            );
+        }
+        let colour = PALETTE[self.colour];
+        ui.set_ink_colour(slint::Color::from_rgb_f32(colour.r, colour.g, colour.b));
+        ui.set_ink_stroke_width((INK_WIDTHS[self.ink_width] as f64 * k) as f32);
+        ui.set_ink_commands(SharedString::from(self.ink_commands.as_str()));
+        let points = points.len();
+        self.bench.ink_rebuilt(points, started.elapsed());
+    }
+
+    /// The pointer came up (`commit`) or was taken away: the stroke is simplified and drawn by
+    /// the engine, or dropped. The live path stays until the page's new tiles replace it.
+    fn finish_ink(&mut self, ui: &MainWindow, commit: bool) {
+        let Some((page, points)) = self.ink.take() else {
+            return;
+        };
+        if !commit || points.is_empty() {
+            ui.set_ink_commands(SharedString::new());
+            return;
+        }
+        self.ink_shown = Some(page);
+        let mut stroke = simplify(&points, INK_SIMPLIFY_PT);
+        // A tap is a dot: a stroke needs two points for other readers to draw it.
+        if let [only] = stroke.as_slice() {
+            stroke.push(*only);
+        }
+        self.bench.ink_sent(&stroke);
+        self.send_edit(EditOp::AddInk {
+            page,
+            strokes: vec![stroke],
+            colour: PALETTE[self.colour],
+            width: INK_WIDTHS[self.ink_width],
+            author: self.settings.author.clone(),
+        });
+    }
+
+    /// A line width chip of the Ink tool.
+    fn choose_ink_width(&mut self, ui: &MainWindow, index: usize) {
+        if index < INK_WIDTHS.len() {
+            self.ink_width = index;
+            ui.set_ink_width_index(index as i32);
         }
     }
 
@@ -2120,8 +2311,11 @@ impl AppState {
             self.thumb_inflight.insert(page);
             self.send_thumb(page);
         }
-        self.bench
-            .page_changed(page, self.scheduler.stale_visible(page));
+        let stale = self.scheduler.stale_visible(page);
+        self.bench.page_changed(page, stale);
+        if stale == 0 {
+            self.ink_drawn(ui, page);
+        }
         self.update_annot_selection(ui);
     }
 
@@ -2147,6 +2341,9 @@ impl AppState {
         }
         if let Err(message) = result {
             ui.set_status_text(SharedString::from(format!("Could not edit: {message}")));
+            if let Some(page) = self.ink_shown {
+                self.ink_drawn(ui, page);
+            }
         }
     }
 
@@ -2222,7 +2419,7 @@ impl AppState {
     /// A tool button or its key (Plan 0004, §4.2): with text selected, a markup marks it and the
     /// tool stays; with nothing selected, the markup tool is switched on (or off again).
     fn choose_tool(&mut self, ui: &MainWindow, tool: Tool) {
-        if tool == Tool::Note && !self.editable {
+        if matches!(tool, Tool::Note | Tool::Ink) && !self.editable {
             return;
         }
         if let Tool::Markup(kind) = tool
@@ -2266,6 +2463,7 @@ impl AppState {
 
     /// Esc: back to the Select tool, nothing selected.
     fn escape(&mut self, ui: &MainWindow) {
+        self.finish_ink(ui, false);
         self.find_close(ui);
         self.clear_selection(ui);
         self.select_annotation(ui, None);
@@ -2914,8 +3112,19 @@ impl AppState {
         ui.set_is_loading(false);
         let visible = self.visible(ui);
         self.bench.tile(&self.scheduler, &visible);
-        self.bench
-            .tile_after_edit(key.page, self.scheduler.stale_visible(key.page));
+        let stale = self.scheduler.stale_visible(key.page);
+        self.bench.tile_after_edit(key.page, stale);
+        if stale == 0 {
+            self.ink_drawn(ui, key.page);
+        }
+    }
+
+    /// The page's tiles show its new revision: a stroke drawn live on it is in them now.
+    fn ink_drawn(&mut self, ui: &MainWindow, page: u32) {
+        if self.ink_shown == Some(page) && self.ink.is_none() {
+            self.ink_shown = None;
+            ui.set_ink_commands(SharedString::new());
+        }
     }
 
     /// A base layer arrived: stretch it under its page's tiles, if the page is still near the view.
@@ -3303,6 +3512,9 @@ fn viewport_moved(ui: &MainWindow) {
             }
             state.refresh(ui);
             state.pump_thumbs(ui);
+            if state.ink.is_some() {
+                state.rebuild_ink(ui);
+            }
         }
     });
 }
@@ -3437,6 +3649,7 @@ enum KeyCommand {
     SaveAs,
     Mark(MarkupKind),
     NoteTool,
+    InkTool,
     DeleteAnnotation,
     Undo,
     Redo,
@@ -3474,6 +3687,7 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
         'u' | 'U' => return Some(KeyCommand::Mark(MarkupKind::Underline)),
         'k' | 'K' => return Some(KeyCommand::Mark(MarkupKind::StrikeOut)),
         'n' | 'N' => return Some(KeyCommand::NoteTool),
+        'i' | 'I' => return Some(KeyCommand::InkTool),
         _ => {}
     }
     if c == char::from(Key::F4) {
@@ -3643,6 +3857,10 @@ fn main() -> Result<(), slint::PlatformError> {
             pending_mark: None,
             note_edit: None,
             note_drag: None,
+            ink_width: 1,
+            ink: None,
+            ink_commands: String::new(),
+            ink_shown: None,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             bench: bench::Trace::new(trace_on),
@@ -3926,6 +4144,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 KeyCommand::DeleteAnnotation => state.delete_annotation(&ui),
                 KeyCommand::NoteTool => state.choose_tool(&ui, Tool::Note),
+                KeyCommand::InkTool => state.choose_tool(&ui, Tool::Ink),
                 KeyCommand::Undo => state.undo(),
                 KeyCommand::Redo => state.redo(),
                 KeyCommand::Open | KeyCommand::SaveAs => {}
@@ -4222,6 +4441,17 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let weak = main_window.as_weak();
+        main_window.on_choose_ink_width(move |index| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(index) = usize::try_from(index)
+            {
+                with_state(|state| state.choose_ink_width(&ui, index));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
         main_window.on_choose_colour(move |index| {
             if let Some(ui) = weak.upgrade()
                 && let Ok(index) = usize::try_from(index)
@@ -4478,6 +4708,7 @@ mod tests {
             Some(KeyCommand::Mark(MarkupKind::StrikeOut))
         );
         assert_eq!(key_command("n", false, false), Some(KeyCommand::NoteTool));
+        assert_eq!(key_command("I", false, true), Some(KeyCommand::InkTool));
         assert_eq!(key_command("z", true, false), Some(KeyCommand::Undo));
         assert_eq!(key_command("Z", true, true), Some(KeyCommand::Redo));
         assert_eq!(key_command("y", true, false), Some(KeyCommand::Redo));
@@ -4492,7 +4723,7 @@ mod tests {
 
     #[test]
     fn tool_indices_round_trip() {
-        for index in 0..6 {
+        for index in 0..7 {
             assert_eq!(Tool::from_index(index).index(), index);
         }
         assert_eq!(Tool::from_index(99), Tool::Select);

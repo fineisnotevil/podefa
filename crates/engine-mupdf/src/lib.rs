@@ -249,8 +249,11 @@ impl MupdfEngine {
                 source,
             })?;
             // Undo and redo (ADR 0008). Without a journal the document still opens and edits; it
-            // only cannot be undone, which `history_state` reports.
-            let _ = pdf.enable_journal();
+            // only cannot be undone, which `history_state` reports. `FA_PDF_NO_JOURNAL` leaves it
+            // off, so a bench run can measure the journal's share of memory (Plan 0004 row X).
+            if std::env::var_os("FA_PDF_NO_JOURNAL").is_none() {
+                let _ = pdf.enable_journal();
+            }
             Doc::Pdf(pdf)
         } else {
             Doc::Plain(doc)

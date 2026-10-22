@@ -130,6 +130,10 @@ pub struct Cfg {
     /// text and its hover preview, drag it elsewhere and undo the move, all through the window's
     /// input path (Plan 0004 Phase 3).
     pub note: bool,
+    /// `--bench-ink`: draw a 2000-point stroke with the Ink tool on page 1 through the window's
+    /// input path, report `ink_rebuild_ms`, check the committed stroke against the simplified
+    /// points, undo and redo it and select it by a click (Plan 0004 Phase 4, row V).
+    pub ink: bool,
 }
 
 impl Default for Cfg {
@@ -162,6 +166,7 @@ impl Default for Cfg {
             edit_save: false,
             edit_burst: 0,
             note: false,
+            ink: false,
         }
     }
 }
@@ -181,6 +186,7 @@ impl Cfg {
             && !self.select
             && self.edits == 0
             && !self.note
+            && !self.ink
     }
 }
 
@@ -278,6 +284,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             "--bench-note" => {
                 cfg.note = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-ink" => {
+                cfg.ink = number.is_none_or(|on| on != 0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-edit-burst" => {
@@ -623,6 +633,12 @@ pub struct Trace {
     /// Tile requests per page while an edit phase runs: without a pan, only the edited page may
     /// be asked for again (row W).
     edit_requests: Option<HashMap<u32, u32>>,
+    /// `ws_after_edits_n` samples: `(edits, working set bytes)` (row X).
+    edit_ws: Vec<(u32, usize)>,
+    /// `ink_rebuild_ms` samples as `(points in the stroke, microseconds)`, and the last stroke
+    /// the app committed, simplified (row V).
+    ink_rebuild_us: Vec<(usize, u128)>,
+    last_ink: Option<Vec<(f32, f32)>>,
 }
 
 impl Trace {
@@ -656,7 +672,39 @@ impl Trace {
             save_started: None,
             saves: Vec::new(),
             edit_requests: None,
+            edit_ws: Vec::new(),
+            ink_rebuild_us: Vec::new(),
+            last_ink: None,
         }
+    }
+
+    /// The working set `n` edits into an edit phase (`ws_after_edits_n`, row X).
+    pub fn edit_memory(&mut self, n: u32) {
+        if !self.on {
+            return;
+        }
+        let ws = process_memory().map_or(0, |mem| mem.ws);
+        self.edit_ws.push((n, ws));
+        println!("[bench] ws_after_edits n={n} ws={}", mem_str(Some(ws)));
+    }
+
+    /// The live ink path was rebuilt for a stroke of `points` points.
+    pub fn ink_rebuilt(&mut self, points: usize, took: Duration) {
+        if self.on {
+            self.ink_rebuild_us.push((points, took.as_micros()));
+        }
+    }
+
+    /// A stroke was committed with these simplified points.
+    pub fn ink_sent(&mut self, stroke: &[(f32, f32)]) {
+        if self.on {
+            self.last_ink = Some(stroke.to_vec());
+        }
+    }
+
+    /// The last stroke committed.
+    pub fn last_ink(&self) -> Option<&[(f32, f32)]> {
+        self.last_ink.as_deref()
     }
 
     /// Starts or ends counting tile requests per page (row W).
@@ -1148,6 +1196,42 @@ impl Trace {
         for (ms, bytes) in &self.saves {
             println!("[bench] t_save_ms   {ms} ({bytes} bytes)");
         }
+        if !self.edit_ws.is_empty() {
+            let journal = if env::var_os("FA_PDF_NO_JOURNAL").is_some() {
+                "off"
+            } else {
+                "on"
+            };
+            let listed: Vec<String> = self
+                .edit_ws
+                .iter()
+                .map(|(n, ws)| format!("n={n}:{}", mem_str(Some(*ws))))
+                .collect();
+            println!(
+                "[bench] ws_after_edits {} (journal {journal})",
+                listed.join(" ")
+            );
+        }
+        let mut ink_failed = false;
+        if !self.ink_rebuild_us.is_empty() {
+            let us: Vec<u128> = self.ink_rebuild_us.iter().map(|(_, us)| *us).collect();
+            let (_, med, max) = spread(&us);
+            let points = self
+                .ink_rebuild_us
+                .iter()
+                .map(|(n, _)| *n)
+                .max()
+                .unwrap_or(0);
+            // Row V: every move of the stroke rebuilds its path within 4 ms.
+            ink_failed = max > 4000;
+            println!(
+                "[bench] ink_rebuild_ms med={:.3} max={:.3} moves={} ink_points={points} {}",
+                med as f64 / 1000.0,
+                max as f64 / 1000.0,
+                us.len(),
+                if ink_failed { "FAIL" } else { "PASS" }
+            );
+        }
         let (r_min, r_med, r_max) = spread(&self.reanchor_us);
         println!(
             "[bench] pages       visited={} resident_max={} reanchors={} reanchor_us \
@@ -1283,11 +1367,18 @@ impl Trace {
                 println!("[bench] VERDICT     FAIL - more thumbnails held than the cap");
                 return false;
             }
+            if ink_failed {
+                println!("[bench] VERDICT     FAIL - an ink path took over 4 ms to rebuild");
+                return false;
+            }
             println!("[bench] VERDICT     n/a - no level change was measured");
             return true;
         };
-        let pass =
-            worst_blank <= cfg.max_blank_ms && nav_failed == 0 && !reopen_failed && !thumbs_failed;
+        let pass = worst_blank <= cfg.max_blank_ms
+            && nav_failed == 0
+            && !reopen_failed
+            && !thumbs_failed
+            && !ink_failed;
         println!(
             "[bench] VERDICT     {} - worst t_blank {worst_blank} ms vs {} ms ceiling",
             if pass { "PASS" } else { "FAIL" },
@@ -1324,6 +1415,8 @@ enum Phase {
     Edit,
     /// A sticky note placed, previewed, moved and the move undone (Plan 0004 Phase 3).
     Note,
+    /// An ink stroke drawn, checked, undone, redone and selected (Plan 0004 Phase 4).
+    Ink,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1343,6 +1436,7 @@ struct Pending {
     select: bool,
     edit: bool,
     note: bool,
+    ink: bool,
 }
 
 impl Pending {
@@ -1361,6 +1455,7 @@ impl Pending {
             select: cfg.select,
             edit: cfg.edits > 0,
             note: cfg.note,
+            ink: cfg.ink,
         }
     }
 
@@ -1379,6 +1474,7 @@ impl Pending {
             (&mut self.select, Phase::Select),
             (&mut self.edit, Phase::Edit),
             (&mut self.note, Phase::Note),
+            (&mut self.ink, Phase::Ink),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1413,10 +1509,18 @@ struct Driver {
     nav_expect: Option<(&'static str, String)>,
     /// Searches finished before the search phase started.
     searches_before: u32,
+    /// The edit phase waits until this moment, then samples the working set after this many
+    /// edits (`ws_after_edits_n`: 2 s after the n-th edit).
+    edit_hold: Option<(Instant, u32)>,
 }
 
 /// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
 fn window_point(ui: &MainWindow, (x, line): (f32, usize)) -> LogicalPosition {
+    page_window_point(ui, x, 42.0 + 12.0 * line as f32 - 3.0)
+}
+
+/// A page-space point of page 0, in points from its top-left, as a window position.
+fn page_window_point(ui: &MainWindow, x: f32, page_y: f32) -> LogicalPosition {
     let mut at = LogicalPosition::new(0.0, 0.0);
     with_state(|state| {
         let Some(slot) = state.layout.slot(0) else {
@@ -1424,7 +1528,7 @@ fn window_point(ui: &MainWindow, (x, line): (f32, usize)) -> LogicalPosition {
         };
         let s = state.scale_milli as f64 / 1000.0;
         let sf = state.sf();
-        let page_y = 42.0 + 12.0 * line as f64 - 3.0;
+        let page_y = page_y as f64;
         let doc_x = slot.x as f64 + x as f64 * s;
         let doc_y = slot.y as f64 + page_y * s;
         at = LogicalPosition::new(
@@ -1447,6 +1551,20 @@ fn select_drag(ui: &MainWindow, from: (f32, usize), to: (f32, usize)) {
     window.dispatch_event(WindowEvent::PointerMoved { position: b });
     window.dispatch_event(WindowEvent::PointerReleased {
         position: b,
+        button: slint::platform::PointerEventButton::Left,
+    });
+}
+
+/// One left click at a window position.
+fn click_at(ui: &MainWindow, position: LogicalPosition) {
+    let window = ui.window();
+    window.dispatch_event(WindowEvent::PointerMoved { position });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position,
         button: slint::platform::PointerEventButton::Left,
     });
 }
@@ -1736,6 +1854,7 @@ impl Driver {
             Phase::Select => "select",
             Phase::Edit => "edit",
             Phase::Note => "note",
+            Phase::Ink => "ink",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -2110,14 +2229,140 @@ impl Driver {
                 self.step += 1;
                 false
             }
+            Phase::Ink => {
+                // `select_*p.pdf` page 1, inside the default window's viewport: a wave from
+                // x = 100 to 500 pt around y = 220 pt.
+                const POINTS: usize = 2000;
+                let wave = |i: usize| {
+                    let t = i as f32 / (POINTS - 1) as f32;
+                    (100.0 + 400.0 * t, 220.0 + 60.0 * (t * 10.0).sin())
+                };
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                let inks = || {
+                    let mut found = Vec::new();
+                    with_state(|state| {
+                        found = state.annots.get(&0).map_or_else(Vec::new, |items| {
+                            items
+                                .iter()
+                                .filter(|item| item.kind == pdf_core::annot::AnnotKind::Ink)
+                                .cloned()
+                                .collect()
+                        });
+                    });
+                    found
+                };
+                match self.step {
+                    0 => {
+                        ui.invoke_choose_tool(6);
+                        let window = ui.window();
+                        let (x, y) = wave(0);
+                        let start = page_window_point(ui, x, y);
+                        window.dispatch_event(WindowEvent::PointerMoved { position: start });
+                        window.dispatch_event(WindowEvent::PointerPressed {
+                            position: start,
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                        let mut end = start;
+                        for i in 1..POINTS {
+                            let (x, y) = wave(i);
+                            end = page_window_point(ui, x, y);
+                            window.dispatch_event(WindowEvent::PointerMoved { position: end });
+                        }
+                        window.dispatch_event(WindowEvent::PointerReleased {
+                            position: end,
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                    }
+                    1 => {
+                        let found = inks();
+                        let mut sent = None;
+                        with_state(|state| sent = state.bench.last_ink().map(<[_]>::to_vec));
+                        let equal = match (found.first(), sent) {
+                            (Some(ink), Some(sent)) => {
+                                ink.strokes.len() == 1
+                                    && ink.strokes[0].len() == sent.len()
+                                    && ink.strokes[0].iter().zip(&sent).all(|(a, b)| {
+                                        (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01
+                                    })
+                            }
+                            _ => false,
+                        };
+                        check(
+                            "the stroke is committed simplified",
+                            "ink=1 equal=true live=false".to_owned(),
+                            format!(
+                                "ink={} equal={equal} live={}",
+                                found.len(),
+                                !ui.get_ink_commands().is_empty()
+                            ),
+                        );
+                        with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                    }
+                    2 => {
+                        check(
+                            "Ctrl+Z removes it",
+                            "ink=0".to_owned(),
+                            format!("ink={}", inks().len()),
+                        );
+                        with_modifier(ui, Key::Control, || press(ui, "y".into()));
+                    }
+                    3 => {
+                        check(
+                            "Ctrl+Y brings it back",
+                            "ink=1".to_owned(),
+                            format!("ink={}", inks().len()),
+                        );
+                        // Select: a click on the line selects the stroke; one inside its bounds
+                        // but away from the line (a trough of the wave, 100 pt below a crest)
+                        // does not.
+                        ui.invoke_choose_tool(0);
+                        let (x, y) = wave(POINTS / 2);
+                        let position = page_window_point(ui, x, y);
+                        click_at(ui, position);
+                    }
+                    4 => {
+                        let on_line = ui.get_has_annot_selection();
+                        let crest = (0..POINTS).map(wave).fold((0.0_f32, f32::MAX), |acc, p| {
+                            if p.1 < acc.1 { p } else { acc }
+                        });
+                        let position = page_window_point(ui, crest.0, crest.1 + 100.0);
+                        click_at(ui, position);
+                        let off_line = ui.get_has_annot_selection();
+                        check(
+                            "a click selects ink on its line only",
+                            "on_line=true off_line=false".to_owned(),
+                            format!("on_line={on_line} off_line={off_line}"),
+                        );
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                }
+                self.step += 1;
+                false
+            }
             Phase::Edit => {
                 let edits = self.cfg.edits;
+                if let Some((until, n)) = self.edit_hold {
+                    if Instant::now() < until {
+                        return false;
+                    }
+                    self.edit_hold = None;
+                    with_state(|state| state.bench.edit_memory(n));
+                }
                 if self.step == 0 {
                     // The tool stays on, so each drag below marks the line it selects.
                     ui.invoke_choose_tool(1);
-                    with_state(|state| state.bench.requests_during_edits(true));
+                    with_state(|state| {
+                        state.bench.requests_during_edits(true);
+                        state.bench.edit_memory(0);
+                    });
                 }
                 if self.step < edits {
+                    let before = self.step;
                     // Lines 2..=41 of page 0, starting on the line's first character.
                     let burst = self.cfg.edit_burst.min(edits - self.step);
                     if burst == 0 {
@@ -2154,6 +2399,12 @@ impl Driver {
                         });
                     }
                     self.step += burst.max(1) - 1;
+                    // Row X: the working set 2 s after the 100th and the 1000th edit.
+                    for n in [100, 1000] {
+                        if before < n && self.step + 1 >= n {
+                            self.edit_hold = Some((Instant::now() + Duration::from_secs(2), n));
+                        }
+                    }
                     if self.cfg.edit_pan_px > 0.0 {
                         // Down and back up in turn, so page 1 stays where the next drag lands
                         // while every edit still races a scroll's tile requests.
@@ -2498,6 +2749,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             resetting: false,
             nav_expect: None,
             searches_before: 0,
+            edit_hold: None,
         });
     });
 
