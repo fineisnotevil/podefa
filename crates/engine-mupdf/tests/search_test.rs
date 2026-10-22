@@ -7,6 +7,7 @@ use engine_mupdf::EngineHandle;
 use pdf_core::{EngineCmd, EngineEvent};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -67,7 +68,11 @@ fn next(rx: &Receiver<EngineEvent>) -> EngineEvent {
 }
 
 fn open_text(pages: usize) -> (EngineHandle, Receiver<EngineEvent>) {
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("search_{pages}p.pdf"));
+    // A file of its own per call: tests run in parallel, and two writing the same file race with
+    // each other's open.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("search_{pages}p_{n}.pdf"));
     std::fs::write(&path, text_pdf(pages)).expect("write fixture");
     let (handle, rx) = EngineHandle::spawn();
     handle

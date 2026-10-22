@@ -11,6 +11,7 @@ use pdf_core::select::{PagePoint, SelectMode};
 use pdf_core::{EngineCmd, EngineEvent};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -79,8 +80,16 @@ fn next(rx: &Receiver<EngineEvent>) -> EngineEvent {
 }
 
 fn open(pages: usize) -> (EngineHandle, Receiver<EngineEvent>) {
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("select_{pages}p.pdf"));
-    std::fs::write(&path, text_pdf(pages)).expect("write fixture");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let bytes = text_pdf(pages);
+    // `select_{pages}p.pdf` is the document the window benches select on (`--bench-select`); the
+    // test opens a copy of its own, since tests run in parallel and two writing one file race with
+    // each other's open. The shared copy is best effort for the same reason.
+    let _ = std::fs::write(dir.join(format!("select_{pages}p.pdf")), &bytes);
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("select_{pages}p_{n}.pdf"));
+    std::fs::write(&path, &bytes).expect("write fixture");
     let (handle, rx) = EngineHandle::spawn();
     handle
         .send(EngineCmd::Open {
