@@ -53,10 +53,11 @@ use std::time::Instant;
 
 /// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
 mod bench;
+mod stamps_ui;
 mod tools_ui;
 
 slint::slint! {
-    import { Button, LineEdit, ListView, Palette, TextEdit } from "std-widgets.slint";
+    import { Button, ComboBox, LineEdit, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
 
     // One model row: an image plus where it goes, in canvas logical pixels.
     //
@@ -174,6 +175,23 @@ slint::slint! {
         in-out property <string> props-subject: "";
         in-out property <string> props-keywords: "";
         in-out property <string> props-info: "";
+        // The stamp panel (Plan 0005 Phase 3): a watermark (mode 0) or page numbers (mode 1).
+        in-out property <bool> stamp-visible: false;
+        in-out property <int> stamp-mode: 0;
+        in-out property <string> stamp-text: "DRAFT";
+        in-out property <bool> stamp-diagonal: true;
+        in-out property <float> stamp-opacity: 30;
+        in-out property <int> stamp-colour: 0;
+        in-out property <string> stamp-format: "{n} / {total}";
+        in-out property <string> stamp-first: "1";
+        in-out property <int> stamp-corner: 4;
+        in-out property <string> stamp-size: "10";
+        in-out property <string> stamp-pages: "";
+        in-out property <string> stamp-error: "";
+        // The crop panel, open once the Crop tool's rectangle is drawn.
+        in-out property <bool> crop-visible: false;
+        in-out property <string> crop-size: "";
+        out property <color> crop-colour: Palette.accent-background;
         // Where the thumbnail list is in the window, for the bench harness's drags.
         in-out property <length> thumb-list-x: 0px;
         in-out property <length> thumb-list-y: 0px;
@@ -307,6 +325,12 @@ slint::slint! {
         callback extract_pages();
         callback insert_from_file();
         callback props_open();
+        callback stamp_open(int);
+        callback stamp_apply();
+        callback stamp_close();
+        callback crop_tool();
+        callback crop_apply(bool);
+        callback crop_cancel();
         callback props_save();
         callback props_close();
         callback cancel_tool();
@@ -462,6 +486,24 @@ slint::slint! {
                     title: "Insert Pages from File...";
                     enabled: root.editable;
                     activated => { root.insert_from_file(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Watermark...";
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.stamp_open(0); }
+                }
+                MenuItem {
+                    title: "Page Numbers...";
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.stamp_open(1); }
+                }
+                MenuItem {
+                    title: "Crop Pages";
+                    checkable: true;
+                    checked: root.tool == 7;
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.crop_tool(); }
                 }
                 MenuSeparator {}
                 MenuItem {
@@ -1011,7 +1053,7 @@ slint::slint! {
                             }
                             return reject;
                         }
-                        mouse-cursor: root.tool == 5 || root.tool == 6 ? MouseCursor.crosshair
+                        mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
                             : root.text-cursor ? MouseCursor.text : MouseCursor.default;
                         changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
                         changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
@@ -1345,6 +1387,191 @@ slint::slint! {
                 }
 
                 // Document Properties: the fields readers show, and what else the file says.
+                // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
+                if root.stamp-visible : FocusScope {
+                    x: (parent.width - self.width) / 2;
+                    y: 16px;
+                    width: min(parent.width - 32px, 440px);
+                    height: root.stamp-mode == 0 ? 300px : 330px;
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.stamp_close();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000040;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 6px;
+                            Text {
+                                text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Text"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
+                            }
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Palette.foreground; }
+                                Button {
+                                    text: "Diagonal";
+                                    checkable: true;
+                                    checked: root.stamp-diagonal;
+                                    clicked => { root.stamp-diagonal = true; }
+                                }
+                                Button {
+                                    text: "Horizontal";
+                                    checkable: true;
+                                    checked: !root.stamp-diagonal;
+                                    clicked => { root.stamp-diagonal = false; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Palette.foreground; }
+                                Slider {
+                                    minimum: 5;
+                                    maximum: 100;
+                                    value <=> root.stamp-opacity;
+                                }
+                                Text {
+                                    width: 40px;
+                                    text: round(root.stamp-opacity) + "%";
+                                    vertical-alignment: center;
+                                    color: Palette.foreground;
+                                }
+                            }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Format"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit {
+                                    text <=> root.stamp-format;
+                                    placeholder-text: "{n} / {total}";
+                                    init => { self.focus(); }
+                                }
+                            }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit { width: 70px; text <=> root.stamp-first; }
+                                Text { text: "Size (pt)"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit { width: 70px; text <=> root.stamp-size; }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Position"; vertical-alignment: center; color: Palette.foreground; }
+                                ComboBox {
+                                    model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
+                                    current-index <=> root.stamp-corner;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Palette.foreground; }
+                                ComboBox {
+                                    model: ["Grey", "Red", "Blue", "Black"];
+                                    current-index <=> root.stamp-colour;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit {
+                                    text <=> root.stamp-pages;
+                                    placeholder-text: "All, or 1-3, 5, 8-";
+                                }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.stamp-error;
+                                color: #b42318;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.stamp_close(); } }
+                                Button {
+                                    text: "Apply";
+                                    primary: true;
+                                    clicked => { root.stamp_apply(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Crop: the rectangle the Crop tool drew, applied to its page or to every page.
+                if root.crop-visible : FocusScope {
+                    x: (parent.width - self.width) / 2;
+                    y: 16px;
+                    width: min(parent.width - 32px, 380px);
+                    height: 96px;
+                    init => { self.focus(); }
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.crop_cancel();
+                            return accept;
+                        }
+                        if (event.text == Key.Return) {
+                            root.crop_apply(false);
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000040;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Crop to the drawn area (" + root.crop-size + ")";
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
+                                Button { text: "All pages"; clicked => { root.crop_apply(true); } }
+                                Button {
+                                    text: "This page";
+                                    primary: true;
+                                    clicked => { root.crop_apply(false); }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if root.props-visible : FocusScope {
                     x: (parent.width - self.width) / 2;
                     y: 16px;
@@ -1549,6 +1776,8 @@ enum Tool {
     Note,
     /// A drag draws a free-hand line (Plan 0004 Phase 4).
     Ink,
+    /// A drag draws the rectangle to crop pages to (Plan 0005 Phase 3).
+    Crop,
 }
 
 /// The note the editor is open for: a new one at a rectangle, or an existing one.
@@ -1580,6 +1809,7 @@ impl Tool {
             Tool::Markup(MarkupKind::Squiggly) => 4,
             Tool::Note => 5,
             Tool::Ink => 6,
+            Tool::Crop => 7,
         }
     }
 
@@ -1591,6 +1821,7 @@ impl Tool {
             4 => Tool::Markup(MarkupKind::Squiggly),
             5 => Tool::Note,
             6 => Tool::Ink,
+            7 => Tool::Crop,
             _ => Tool::Select,
         }
     }
@@ -1733,6 +1964,8 @@ struct AppState {
     ink_commands: String,
     /// The page whose committed stroke is still drawn live, until its new tiles are all in.
     ink_shown: Option<u32>,
+    /// The Crop tool's rectangle (Plan 0005 Phase 3).
+    crop: Option<stamps_ui::CropDraw>,
     /// Pages chosen in the thumbnails for a page operation (Plan 0005 Phase 1), the row a Shift+click
     /// range starts from, and the pages a thumbnail drag is moving.
     page_sel: std::collections::BTreeSet<u32>,
@@ -2253,6 +2486,10 @@ impl AppState {
         shift: bool,
         touch: bool,
     ) {
+        if self.tool == Tool::Crop && self.editable {
+            self.crop_pointer(ui, kind, x, y);
+            return;
+        }
         let point = self.page_point(ui, x, y);
         // The Ink tool draws with the mouse, a pen and a finger alike (Plan 0004, §4.2).
         if self.tool == Tool::Ink && self.editable {
@@ -2795,6 +3032,7 @@ impl AppState {
 
         // Whatever is open on the old pages ends.
         self.finish_ink(ui, false);
+        self.crop_cancel(ui);
         self.note_cancel(ui);
         self.note_drag = None;
         self.select_annotation(ui, None);
@@ -3136,7 +3374,7 @@ impl AppState {
     /// A tool button or its key (Plan 0004, §4.2): with text selected, a markup marks it and the
     /// tool stays; with nothing selected, the markup tool is switched on (or off again).
     fn choose_tool(&mut self, ui: &MainWindow, tool: Tool) {
-        if matches!(tool, Tool::Note | Tool::Ink) && !self.editable {
+        if matches!(tool, Tool::Note | Tool::Ink | Tool::Crop) && !self.editable {
             return;
         }
         if let Tool::Markup(kind) = tool
@@ -3152,6 +3390,9 @@ impl AppState {
             tool
         };
         ui.set_tool(self.tool.index());
+        if self.tool != Tool::Crop {
+            self.crop_cancel(ui);
+        }
     }
 
     /// A swatch: the colour of the next markup, and of the selected annotation.
@@ -4007,6 +4248,8 @@ impl AppState {
 
     /// A document was opened: forget everything and show the top of page 1 at 100%.
     fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>, editable: bool) {
+        self.crop_cancel(ui);
+        ui.set_stamp_visible(false);
         self.page_sizes = page_sizes;
         self.layout_generation += 1;
         self.page_sel.clear();
@@ -4246,6 +4489,9 @@ fn viewport_moved(ui: &MainWindow) {
             state.pump_thumbs(ui);
             if state.ink.is_some() {
                 state.rebuild_ink(ui);
+            }
+            if state.crop.is_some() {
+                state.rebuild_crop(ui);
             }
         }
     });
@@ -4595,6 +4841,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ink: None,
             ink_commands: String::new(),
             ink_shown: None,
+            crop: None,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             page_sel: std::collections::BTreeSet::new(),
@@ -5150,6 +5397,42 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
         main_window.on_cancel_tool(|| with_state(|state| state.cancel_tool()));
+        let weak = main_window.as_weak();
+        main_window.on_stamp_open(move |mode| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.stamp_open(&ui, mode));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_stamp_apply(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.stamp_apply(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_stamp_close(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_stamp_visible(false);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_crop_tool(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.crop_tool(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_crop_apply(move |all| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.crop_apply(&ui, all));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_crop_cancel(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.crop_cancel(&ui));
+            }
+        });
     }
     main_window.on_thumb_dropped(move |row, after| {
         if let Ok(row) = u32::try_from(row) {

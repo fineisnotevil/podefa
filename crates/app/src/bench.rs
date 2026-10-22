@@ -144,6 +144,10 @@ pub struct Cfg {
     /// set around the merge (Plan 0005 Phase 2, rows AC and AG). Same documents as `--bench-pages`;
     /// writes `bench_merged.pdf` and `bench_part_*.pdf` next to the document.
     pub tools: bool,
+    /// `--bench-stamps`: a watermark and page numbers through the stamp panel, a crop drawn with
+    /// the pointer, then all three undone; checks the page sizes the layout sees and reports
+    /// `t_restructure` (Plan 0005 Phase 3, row AD).
+    pub stamps: bool,
 }
 
 impl Default for Cfg {
@@ -179,6 +183,7 @@ impl Default for Cfg {
             ink: false,
             pages: false,
             tools: false,
+            stamps: false,
         }
     }
 }
@@ -201,6 +206,7 @@ impl Cfg {
             && !self.ink
             && !self.pages
             && !self.tools
+            && !self.stamps
     }
 }
 
@@ -310,6 +316,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             "--bench-tools" => {
                 cfg.tools = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-stamps" => {
+                cfg.stamps = number.is_none_or(|on| on != 0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-edit-burst" => {
@@ -1541,6 +1551,8 @@ enum Phase {
     Pages,
     /// Merge and extract on the tool thread, each output opened and checked (Plan 0005 Phase 2).
     Tools,
+    /// Watermark, page numbers and a crop, then undone (Plan 0005 Phase 3).
+    Stamps,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1563,6 +1575,7 @@ struct Pending {
     ink: bool,
     pages: bool,
     tools: bool,
+    stamps: bool,
 }
 
 impl Pending {
@@ -1584,6 +1597,7 @@ impl Pending {
             ink: cfg.ink,
             pages: cfg.pages,
             tools: cfg.tools,
+            stamps: cfg.stamps,
         }
     }
 
@@ -1605,6 +1619,7 @@ impl Pending {
             (&mut self.ink, Phase::Ink),
             (&mut self.pages, Phase::Pages),
             (&mut self.tools, Phase::Tools),
+            (&mut self.stamps, Phase::Stamps),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1648,6 +1663,8 @@ struct Driver {
     /// `--bench-tools` waits for this many finished jobs, or for an open of this many pages.
     tools_wait: u32,
     open_wait: Option<i32>,
+    /// `--bench-stamps`: the first page's size as opened.
+    base_size: String,
 }
 
 /// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
@@ -2032,6 +2049,7 @@ impl Driver {
             Phase::Ink => "ink",
             Phase::Pages => "pages",
             Phase::Tools => "tools",
+            Phase::Stamps => "stamps",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -2397,6 +2415,98 @@ impl Driver {
                     }
                     4 => {
                         check("Ctrl+Z puts it back", "(300,399)".to_owned(), at(&note()));
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                }
+                self.step += 1;
+                false
+            }
+            Phase::Stamps => {
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                let mut rebuilt = 0;
+                let mut first = String::new();
+                let mut count = 0;
+                with_state(|state| {
+                    rebuilt = state.bench.rebuilds();
+                    count = state.page_sizes.len();
+                    if let Some(size) = state.page_sizes.first() {
+                        first = format!("{:.0}x{:.0}", size.width, size.height);
+                    }
+                });
+                // Each step waits for the layout rebuilds of the one before.
+                if rebuilt < self.pages_rebuilds {
+                    return false;
+                }
+                if let Some((name, expected)) = self.nav_expect.take() {
+                    check(name, expected, format!("{count} pages, page 1 {first}"));
+                }
+                if self.step == 0 {
+                    self.pages_base = count as u32;
+                    self.open_wait = None;
+                }
+                let base = self.pages_base;
+                let opened = |size: &str| format!("{base} pages, page 1 {size}");
+                match self.step {
+                    0 => {
+                        self.tools_wait = 0;
+                        // The page as opened, for the undo check.
+                        self.nav_expect = Some(("opened", opened(&first)));
+                        with_state(|state| state.bench.time_restructures(true));
+                        ui.set_stamp_mode(0);
+                        ui.set_stamp_text("TASLAK ĞŞİ".into());
+                        ui.set_stamp_pages("".into());
+                        ui.invoke_stamp_apply();
+                        self.pages_rebuilds = rebuilt + 1;
+                        self.base_size = first;
+                    }
+                    1 => {
+                        ui.set_stamp_mode(1);
+                        ui.set_stamp_format("Sayfa {n} / {total}".into());
+                        ui.invoke_stamp_apply();
+                        self.pages_rebuilds = rebuilt + 1;
+                        self.nav_expect =
+                            Some(("watermark and page numbers", opened(&self.base_size)));
+                    }
+                    2 => {
+                        // Draw 200 x 340 points of page 1 with the Crop tool, from (50, 60).
+                        ui.invoke_crop_tool();
+                        let mut from = None;
+                        let mut to = None;
+                        with_state(|state| {
+                            from = state.viewport_point(0, 50.0, 60.0);
+                            to = state.viewport_point(0, 250.0, 400.0);
+                        });
+                        let (Some(from), Some(to)) = (from, to) else {
+                            self.settle();
+                            return false;
+                        };
+                        ui.invoke_select_pointer(0, from.0, from.1, false, false);
+                        for k in 1..=10 {
+                            let f = k as f32 / 10.0;
+                            ui.invoke_select_pointer(
+                                2,
+                                from.0 + (to.0 - from.0) * f,
+                                from.1 + (to.1 - from.1) * f,
+                                false,
+                                false,
+                            );
+                        }
+                        ui.invoke_select_pointer(1, to.0, to.1, false, false);
+                        ui.invoke_crop_apply(false);
+                        self.pages_rebuilds = rebuilt + 1;
+                        self.nav_expect = Some(("crop page 1 with the pointer", opened("200x340")));
+                    }
+                    3 => {
+                        for _ in 0..3 {
+                            with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                        }
+                        self.pages_rebuilds = rebuilt + 3;
+                        self.nav_expect = Some(("undo all three", opened(&self.base_size)));
                     }
                     _ => {
                         self.settle();
@@ -3205,6 +3315,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             pages_rebuilds: 0,
             tools_wait: 0,
             open_wait: None,
+            base_size: String::new(),
         });
     });
 
