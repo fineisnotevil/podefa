@@ -254,6 +254,9 @@ pub enum EngineEvent {
         unsized_pages: Vec<u32>,
         /// Whether the document can be annotated and saved: only PDFs can (Plan 0004, §1).
         editable: bool,
+        /// MuPDF had to repair the file to open it (Plan 0005 Phase 4): it cannot be saved in
+        /// place, and a full copy written with Save As is a clean, repaired file.
+        repaired: bool,
     },
     /// One tile has been rendered.
     ///
@@ -341,9 +344,11 @@ pub enum EngineEvent {
     /// A tool job advanced: `done` of `total` steps.
     ToolProgress { job_id: u64, done: u32, total: u32 },
     /// A tool job finished: the files it wrote, or why it did not (a cancelled job says so).
+    /// Compress also reports the sizes.
     ToolDone {
         job_id: u64,
         result: Result<Vec<PathBuf>, String>,
+        sizes: Option<tools::ToolSizes>,
     },
     /// The open document's information (answer to [`EngineCmd::DocumentInfo`]).
     DocumentInfo {

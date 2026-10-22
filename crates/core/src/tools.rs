@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! Tools that write new files (Plan 0005, §4.2): merging, splitting and extracting pages. They run
-//! on the engine's tool thread, on documents of their own, never on the open one (§3.4); this
-//! module describes the jobs and parses what the user types for them.
+//! Tools that write new files (Plan 0005, §4.2): merging, splitting and extracting pages, exporting
+//! pages as images, making a PDF of images and compressing. They run on the engine's tool thread,
+//! on documents of their own, never on the open one (§3.4); this module describes the jobs and
+//! parses what the user types for them.
 
 use std::path::PathBuf;
 
@@ -27,6 +28,83 @@ pub enum ToolJob {
     /// Pages of the open document, as it is now, into new files: each part's pages, in their order,
     /// into its own file.
     Extract { parts: Vec<(Vec<u32>, PathBuf)> },
+    /// Pages of the open document, as it is now, as image files: each page into its file
+    /// (Phase 4).
+    ExportImages {
+        pages: Vec<(u32, PathBuf)>,
+        format: ImageFormat,
+        dpi: u32,
+    },
+    /// Image files (PNG, JPEG and whatever else MuPDF reads) into a new PDF, one per page, each
+    /// page the image's size at its resolution (Phase 4).
+    ImagesToPdf {
+        images: Vec<PathBuf>,
+        output: PathBuf,
+    },
+    /// A smaller copy of a document (Phase 4). The engine reads the open document's file when it
+    /// has no unsaved changes, and its current state otherwise.
+    Compress {
+        input: MergeInput,
+        preset: Preset,
+        output: PathBuf,
+    },
+}
+
+/// The file format of exported pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Png,
+    /// Baseline JPEG of this quality, 1 to 100.
+    Jpeg {
+        quality: u8,
+    },
+}
+
+impl ImageFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg { .. } => "jpg",
+        }
+    }
+}
+
+/// How hard Compress works (§4.3, decided in §0 question 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    /// Unused objects dropped, duplicates merged, streams, fonts and images compressed without
+    /// loss.
+    Lossless,
+    /// Lossless, plus colour and grey images above 225 dpi downsampled to 150 dpi, and images
+    /// recompressed as JPEG of quality 75 where that is smaller.
+    Balanced,
+    /// Images above 150 dpi to 96 dpi, JPEG quality 60.
+    Strong,
+}
+
+impl Preset {
+    pub const ALL: [Self; 3] = [Self::Lossless, Self::Balanced, Self::Strong];
+
+    /// `(above this dpi, down to this dpi, JPEG quality)` for the image rewrite, or `None` for
+    /// lossless.
+    pub fn images(self) -> Option<(u32, u32, u8)> {
+        match self {
+            Self::Lossless => None,
+            Self::Balanced => Some((225, 150, 75)),
+            Self::Strong => Some((150, 96, 60)),
+        }
+    }
+}
+
+/// What a finished tool job reports besides its files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ToolSizes {
+    /// The input's size in bytes.
+    pub before: u64,
+    /// The output's size in bytes.
+    pub after: u64,
+    /// The result was not smaller, so the output is a copy of the input.
+    pub kept_original: bool,
 }
 
 impl ToolJob {
@@ -35,6 +113,9 @@ impl ToolJob {
         match self {
             Self::Merge { .. } => "Merging",
             Self::Extract { .. } => "Extracting pages",
+            Self::ExportImages { .. } => "Exporting images",
+            Self::ImagesToPdf { .. } => "Making a PDF of images",
+            Self::Compress { .. } => "Compressing",
         }
     }
 
@@ -43,6 +124,12 @@ impl ToolJob {
         match self {
             Self::Merge { output, .. } => vec![output.clone()],
             Self::Extract { parts } => parts.iter().map(|(_, path)| path.clone()).collect(),
+            Self::ExportImages { pages, .. } => {
+                pages.iter().map(|(_, path)| path.clone()).collect()
+            }
+            Self::ImagesToPdf { output, .. } | Self::Compress { output, .. } => {
+                vec![output.clone()]
+            }
         }
     }
 }
@@ -56,6 +143,13 @@ pub enum RangeError {
     OutOfRange { page: u32, count: u32 },
     #[error("no pages given")]
     Empty,
+}
+
+/// The file name of page `page` (zero-based) exported as an image: `<stem>_p<N>.<ext>`, N one-based
+/// and padded to the width of `count`, so the files sort in page order.
+pub fn image_name(stem: &str, page: u32, count: u32, format: ImageFormat) -> String {
+    let width = count.max(1).to_string().len();
+    format!("{stem}_p{:0width$}.{}", page + 1, format.extension())
 }
 
 /// Parses page ranges as people write them, one-based: `1-3, 5, 8-` is pages 1 to 3, page 5, and
@@ -213,5 +307,16 @@ mod tests {
     fn parts_are_named_by_their_pages() {
         assert_eq!(part_name("report", &[0, 1, 2]), "report_1-3.pdf");
         assert_eq!(part_name("report", &[4]), "report_5.pdf");
+    }
+
+    #[test]
+    fn exported_images_sort_in_page_order() {
+        assert_eq!(image_name("doc", 0, 9, ImageFormat::Png), "doc_p1.png");
+        assert_eq!(
+            image_name("doc", 6, 120, ImageFormat::Jpeg { quality: 85 }),
+            "doc_p007.jpg"
+        );
+        assert_eq!(Preset::Lossless.images(), None);
+        assert_eq!(Preset::Balanced.images(), Some((225, 150, 75)));
     }
 }
