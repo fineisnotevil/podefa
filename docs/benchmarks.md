@@ -1227,3 +1227,66 @@ journal the edit phase's "Ctrl+Z undoes the delete" check fails, as it must. `t_
 
 `--bench-note` (5 of 5), `--bench-select` (11 of 11) and `--bench-edit 20` (6 of 6, `t_edit` median
 3 ms) were re-run on the same build without a change.
+
+## 11. Plan 0005: v0.3 organize and tools
+
+### 11.1 Phase 0: page operations and tools through mupdf-rs 0.8
+
+`crates/engine-mupdf/tests/tools_bench.rs`, release build, 2026-10-22, the §1 machine, one run.
+The document is generated: 200 Letter pages of 50 Helvetica lines (540 KiB). Every operation that
+changes the document runs with MuPDF's journal on and is undone afterwards; the test checks the
+page order, rotation or text after each undo.
+
+```powershell
+cargo test --release -p engine-mupdf --test tools_bench -- --ignored --nocapture --test-threads 1
+```
+
+| Operation | Result |
+| :--- | :--- |
+| Move page 1 to the end | 0.49 ms; undo 0.01 ms |
+| Rotate all 200 pages in one operation | 4.03 ms; undo 0.01 ms |
+| Delete 100 pages | 1.41 ms; undone |
+| Duplicate a page | 0.06 ms; undone |
+| Crop all 200 pages | 4.44 ms (page 540x720 pt); undone |
+| Merge 200 + 200 pages | 39.6 ms; full compressed save 53.6 ms, 105.5 KiB |
+| Split pages 11-20 into a new file | 1.3 ms, 4.7 KiB |
+| Lossless compress, text | 539.7 to 77.2 KiB in 23.2 ms |
+| Export 10 pages as PNG at 150 dpi | 150.3 ms and 250.9 KiB per page |
+| Import those 10 PNGs as pages, default save | 265.9 ms, **61 640.9 KiB** (streams stored uncompressed) |
+| Lossless compress of that document | 61 640.9 to 2 472.7 KiB in 1949.3 ms |
+| Watermark and page number on 200 pages, one operation | 13.5 ms (0.068 ms per page); undone and redone |
+
+`a_garbage_collecting_save_breaks_undo` (same file): an edit, then a full save, then undo.
+
+| Save | Change undone |
+| :--- | :--- |
+| Full, garbage collection level 4 | **no** (undo reports success) |
+| Full, compressed, no garbage collection | yes |
+| Full, default options | yes |
+| Incremental, in place | yes |
+
+### 11.2 Metrics for the Plan 0005 runs (defined, not yet measured)
+
+| Field | Definition |
+| :--- | :--- |
+| `t_restructure` | From the moment the app sends a structural edit to the moment every visible tile of the new layout is shown. |
+| `t_tool` | From the moment a tool starts on the tool thread to its output file being complete, with the page count. |
+
+### 11.3 Phase 0: PDF to Word
+
+`crates/engine-mupdf/tests/docx_bench.rs`, release build, 2026-10-22, the §1 machine:
+
+| Input | Pages | Result |
+| :--- | ---: | :--- |
+| `minimal.pdf`, `large_200p.pdf`, `dense_vector.pdf` | 1, 200, 1 | 9.6 KiB each: no text to carry (`extract` reports one unsupported path on `dense_vector.pdf`) |
+| `select_3p.pdf` | 3 | 10.1 KiB in 1445 ms (the writer's first use in the process) |
+| 400-page merge of §11.1 | 400 | 60.7 KiB in 1465 ms (3.7 ms per page) |
+
+In `word/document.xml` every page is one paragraph: its lines joined by spaces, no line or page
+breaks, text in reading order.
+
+Size: mupdf-rs' default features already compile the DOCX writer. The `docx_bench` test binary is
+11 155 456 bytes; built with `docx-output` turned off (mupdf's other default features kept, a
+temporary change to the workspace manifest) it is 10 909 184 bytes, so the DOCX writer and
+`extract` add **246 272 bytes (0.23 MiB)**. A binary that uses no document writer at all (the same
+test reading text instead) is 8 557 056 bytes: using `DocumentWriter` brings 2.48 MiB of writers.

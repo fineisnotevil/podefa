@@ -468,3 +468,26 @@ When a release after 0.8.0 is published:
   - it takes 17 unreleased commits, including the context changes, at once.
 
   Offered to the maintainer on 2026-10-22.
+
+---
+
+## 11. Compile only the MuPDF features the app uses
+
+**Labels:** `size`, `build`
+
+### Problem Statement
+
+mupdf-rs' default features (`patches/mupdf/Cargo.toml:55-68`) build `js`, `tesseract` (OCR, with
+Leptonica), `html`, `epub`, `xps`, `svg`, `cbz`, `img`, `brotli`, `docx-output` and system fonts
+into MuPDF. The app opens PDF and the formats MuPDF reads, but runs no JavaScript and no OCR. The
+linker drops what nothing calls, so the binary pays only for what is reached, but every clean
+build compiles Tesseract and Leptonica (static libraries of 243 and 21 MiB on Windows), and
+whether JavaScript is reachable through form actions is unverified.
+
+Found in Plan 0005 Phase 0 (§10 there).
+
+### Proposed Solution
+
+Measure a build with `default-features = false` and only the features the app needs (build time,
+binary size, the formats that still open), and decide per feature. OCR comes back with the
+roadmap's OCR item; forms (v0.4) decide `js`.
