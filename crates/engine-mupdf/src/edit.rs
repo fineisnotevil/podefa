@@ -14,11 +14,12 @@ use mupdf::pdf::{
     InsertPdfOptions, InsertPosition, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject,
     PdfPage,
 };
-use mupdf::{Document, MetadataName};
+use mupdf::{Buffer, Document, Font, Matrix, MetadataName};
 use mupdf::{Point, Quad, Rect as MuRect, Size};
 use pdf_core::Rect;
 use pdf_core::annot::{AnnotInfo, AnnotKind, Colour, EditOp, MarkupKind, cut};
-use pdf_core::pages::{self, PageOp};
+use pdf_core::pages::{self, PageOp, PageOpError};
+use pdf_core::stamp::{self, Stamp};
 use pdf_core::tools::{DocumentInfo, Metadata, pdf_date};
 use std::path::Path;
 
@@ -415,8 +416,187 @@ pub(crate) fn apply_pages(
             doc.new_page_at(index, Size::new(*width, *height))
                 .map_err(fail)?;
         }
+        PageOp::Crop { pages, rect } => {
+            for page in pages::chosen(pages, count)? {
+                crop(doc, page, *rect)?;
+            }
+        }
+        PageOp::Stamp { pages, stamp } => add_stamp(doc, &pages::chosen(pages, count)?, stamp)?,
     }
     Ok(())
+}
+
+/// The page's visible space (points from its top left, after rotation and crop) and the matrix
+/// that leads from it back to the PDF's own coordinates.
+fn visible_space(page: &PdfPage) -> Result<(f32, f32, Matrix), mupdf::Error> {
+    let bounds = page.bounds()?;
+    let mut to_visible = page.ctm()?;
+    // `bounds` starts at (0, 0) for a PDF page; anything else would be moved there first.
+    to_visible.concat(Matrix::new_translate(-bounds.x0, -bounds.y0));
+    let back = to_visible
+        .invert()
+        .ok_or_else(|| mupdf::Error::InvalidArgument("the page's matrix is singular".to_owned()))?;
+    Ok((bounds.x1 - bounds.x0, bounds.y1 - bounds.y0, back))
+}
+
+/// Sets one page's crop box from a rectangle in its visible space (Plan 0005 Phase 3). mupdf-rs'
+/// `set_crop_box` is not used: it takes the rectangle as if the page were neither rotated nor
+/// offset (`mupdf-sys` `wrapper/pdf_page.c`, `mupdf_pdf_page_set_crop_box`).
+fn crop(doc: &mut PdfDocument, page: u32, rect: [f32; 4]) -> Result<(), MupdfError> {
+    let fail = |source| MupdfError::EditFailed { page, source };
+    let pdf_page = doc.load_pdf_page(page as i32).map_err(fail)?;
+    let (width, height, back) = visible_space(&pdf_page).map_err(fail)?;
+    let [x0, y0, x1, y1] =
+        stamp::clip_crop(rect, width, height).ok_or(PageOpError::CropOutside { page })?;
+    let user = MuRect::new(x0, y0, x1, y1).transform(&back);
+    let mut array = doc.new_array().map_err(fail)?;
+    user.encode_into(&mut array).map_err(fail)?;
+    pdf_page.object().dict_put("CropBox", array).map_err(fail)?;
+    Ok(())
+}
+
+/// Writes a watermark or page numbers into the pages' content, over what is there (Plan 0005
+/// Phase 3). The text is set in MuPDF's built-in Helvetica, embedded once as a CID font so any
+/// letter it has - Turkish ones included - can be written and extracted again.
+fn add_stamp(doc: &mut PdfDocument, pages: &[u32], stamp: &Stamp) -> Result<(), MupdfError> {
+    let first = pages.first().copied().unwrap_or(0);
+    let fail = |source| MupdfError::EditFailed {
+        page: first,
+        source,
+    };
+    let font = Font::new("Helvetica").map_err(fail)?;
+    let font_obj = doc.add_font(&font).map_err(fail)?;
+    let state = if stamp.opacity() < 1.0 {
+        let mut dict = doc.new_dict().map_err(fail)?;
+        dict.dict_put("Type", PdfObject::new_name("ExtGState").map_err(fail)?)
+            .map_err(fail)?;
+        for key in ["ca", "CA"] {
+            dict.dict_put(key, PdfObject::new_real(stamp.opacity()).map_err(fail)?)
+                .map_err(fail)?;
+        }
+        Some(doc.add_object(&dict).map_err(fail)?)
+    } else {
+        None
+    };
+    // One `q` stream, shared by every page, opens the wrap around the page's own content.
+    let open = doc
+        .add_stream(&Buffer::from_bytes(b"q\n").map_err(fail)?, None, false)
+        .map_err(fail)?;
+    let colour = stamp.colour();
+    let count = pages.len() as u32;
+    for (index, &page) in pages.iter().enumerate() {
+        let fail = |source| MupdfError::EditFailed { page, source };
+        let text = stamp.text(index as u32, count);
+        let mut glyphs = String::with_capacity(text.len() * 4);
+        let mut advance = 0.0;
+        for c in text.chars() {
+            let glyph = font.encode_character(c as i32).map_err(fail)?;
+            if glyph <= 0 && !c.is_whitespace() {
+                return Err(PageOpError::MissingGlyph(c).into());
+            }
+            advance += font.advance_glyph(glyph).map_err(fail)?;
+            glyphs.push_str(&format!("{glyph:04X}"));
+        }
+        let pdf_page = doc.load_pdf_page(page as i32).map_err(fail)?;
+        let (width, height, back) = visible_space(&pdf_page).map_err(fail)?;
+        let placement = stamp.placement(width, height, advance);
+        let font_name = resource(doc, &pdf_page, "Font", &font_obj).map_err(fail)?;
+        let state_name = match &state {
+            Some(state) => Some(resource(doc, &pdf_page, "ExtGState", state).map_err(fail)?),
+            None => None,
+        };
+        let [a, b, c, d, e, f] = placement.matrix;
+        let mut content = format!(
+            "Q\nq {} {} {} {} {} {} cm ",
+            back.a, back.b, back.c, back.d, back.e, back.f
+        );
+        if let Some(name) = state_name {
+            content.push_str(&format!("/{name} gs "));
+        }
+        content.push_str(&format!(
+            "{} {} {} rg BT /{font_name} 1 Tf {a} {b} {c} {d} {e} {f} Tm <{glyphs}> Tj ET Q\n",
+            colour.r, colour.g, colour.b
+        ));
+        let stamp_stream = doc
+            .add_stream(
+                &Buffer::from_bytes(content.as_bytes()).map_err(fail)?,
+                None,
+                false,
+            )
+            .map_err(fail)?;
+        wrap_contents(doc, &pdf_page, &open, stamp_stream).map_err(fail)?;
+    }
+    Ok(())
+}
+
+/// Puts `open` before the page's own content streams and `stamp` after them, so whatever state the
+/// page's content leaves behind (a matrix, a clip) does not move or hide the stamp, which begins
+/// with the matching `Q`.
+///
+/// mupdf-rs' `insert_contents` is not used: it opens a journal operation of its own, and MuPDF
+/// merges a nested operation into the outer one by comparing every change of the outer one with
+/// every other (`resolve_undo`, `pdf-object.c`), so stamping n pages that way costs n^3 (17.9 s
+/// for 1000 pages, `docs/benchmarks.md` §11.6).
+fn wrap_contents(
+    doc: &mut PdfDocument,
+    page: &PdfPage,
+    open: &PdfObject,
+    stamp: PdfObject,
+) -> Result<(), mupdf::Error> {
+    let mut page_obj = page.object();
+    let mut array = doc.new_array()?;
+    array.array_push(open.clone())?;
+    if let Some(old) = page_obj.get_dict("Contents")?
+        && !old.is_null()?
+    {
+        if old.is_array()? {
+            for index in 0..old.len()? {
+                if let Some(item) = old.get_array(index as i32)? {
+                    array.array_push(item)?;
+                }
+            }
+        } else {
+            array.array_push(old)?;
+        }
+    }
+    array.array_push(stamp)?;
+    page_obj.dict_put("Contents", array)
+}
+
+/// Puts `obj` into the page's resources of `kind` and returns its name there. A name already
+/// given to the same object (resources shared between pages) is used again.
+fn resource(
+    doc: &mut PdfDocument,
+    page: &PdfPage,
+    kind: &str,
+    obj: &PdfObject,
+) -> Result<String, mupdf::Error> {
+    let mut resources = page.resources()?;
+    let mut dict = match resources.get_dict(kind)? {
+        Some(dict) if dict.is_dict()? => dict,
+        _ => {
+            let dict = doc.new_dict()?;
+            resources.dict_put(kind, dict)?;
+            resources.get_dict(kind)?.ok_or_else(|| {
+                mupdf::Error::InvalidArgument(format!("no /{kind} in the resources"))
+            })?
+        }
+    };
+    let xref = obj.as_indirect()?;
+    for n in 0..10_000 {
+        let name = format!("FaStamp{n}");
+        match dict.get_dict(name.as_str())? {
+            None => {
+                dict.dict_put(name.as_str(), obj.clone())?;
+                return Ok(name);
+            }
+            Some(existing) if existing.as_indirect().ok() == Some(xref) => return Ok(name),
+            Some(_) => {}
+        }
+    }
+    Err(mupdf::Error::InvalidArgument(format!(
+        "no free name in the page's /{kind}"
+    )))
 }
 
 /// Another PDF to take pages from; a password-protected one is refused.
