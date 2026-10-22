@@ -211,6 +211,8 @@ pub enum EditOp {
     /// Changes the pages themselves (Plan 0005): renumbers them, so the engine answers with
     /// `Restructured` rather than `PageChanged`.
     Pages(PageOp),
+    /// Sets the document information fields (Plan 0005 Phase 2); no page changes.
+    SetMetadata(crate::tools::Metadata),
     /// Draws free-hand strokes (PDF `Ink` annotation), each a list of page points.
     AddInk {
         page: u32,
@@ -239,6 +241,7 @@ impl EditOp {
             Self::MoveNote { .. } => "Move note",
             Self::AddInk { .. } => "Ink",
             Self::Pages(op) => op.title(),
+            Self::SetMetadata(_) => "Document properties",
         }
     }
 
@@ -246,6 +249,7 @@ impl EditOp {
     pub fn page(&self) -> u32 {
         match self {
             Self::Pages(op) => op.first_page(),
+            Self::SetMetadata(_) => 0,
             Self::AddMarkup { page, .. }
             | Self::Delete { page, .. }
             | Self::SetColour { page, .. }

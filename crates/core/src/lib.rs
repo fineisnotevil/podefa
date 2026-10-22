@@ -12,6 +12,7 @@
 //! - [`layout`]: the continuous page layout and the canvas window (Plan 0002).
 //! - [`annot`]: annotations, edits and the unsaved-changes state (Plan 0004).
 //! - [`pages`]: structural edits and how they renumber pages (Plan 0005).
+//! - [`tools`]: jobs that write new files, page ranges, document information (Plan 0005).
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ pub mod search;
 pub mod select;
 pub mod settings;
 pub mod tiling;
+pub mod tools;
 
 pub use layout::{
     CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, PAGE_GAP_LOGICAL_PX, PageSlot,
@@ -193,6 +195,13 @@ pub enum EngineCmd {
     Undo { generation: u64 },
     /// Redo the last undone edit, answered like [`EngineCmd::Undo`].
     Redo { generation: u64 },
+    /// Run a job on the tool thread (Plan 0005, §4.2): answered with
+    /// [`EngineEvent::ToolProgress`] while it runs and one [`EngineEvent::ToolDone`].
+    RunTool { job_id: u64, job: tools::ToolJob },
+    /// Stop that job between two of its steps; its partial outputs are deleted.
+    CancelTool { job_id: u64 },
+    /// The open document's information, for the properties dialog.
+    DocumentInfo { generation: u64 },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -327,6 +336,18 @@ pub enum EngineEvent {
         page_sizes: Vec<PageSize>,
         revision: u32,
         map: pages::PageMap,
+    },
+    /// A tool job advanced: `done` of `total` steps.
+    ToolProgress { job_id: u64, done: u32, total: u32 },
+    /// A tool job finished: the files it wrote, or why it did not (a cancelled job says so).
+    ToolDone {
+        job_id: u64,
+        result: Result<Vec<PathBuf>, String>,
+    },
+    /// The open document's information (answer to [`EngineCmd::DocumentInfo`]).
+    DocumentInfo {
+        generation: u64,
+        info: tools::DocumentInfo,
     },
     /// An edit was applied, or why it was not.
     Edited {

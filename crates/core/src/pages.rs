@@ -44,6 +44,13 @@ pub enum PageOp {
         width: f32,
         height: f32,
     },
+    /// Every page of another PDF, inserted before page `at`. `source_pages` is that file's page
+    /// count, which the engine reads from the file (the app sends 0).
+    InsertFrom {
+        path: std::path::PathBuf,
+        at: u32,
+        source_pages: u32,
+    },
 }
 
 /// Why a structural edit cannot be applied.
@@ -67,7 +74,7 @@ impl PageOp {
             | Self::Delete { pages }
             | Self::Duplicate { pages }
             | Self::Move { pages, .. } => pages.iter().copied().min().unwrap_or(0),
-            Self::InsertBlank { at, .. } => *at,
+            Self::InsertBlank { at, .. } | Self::InsertFrom { at, .. } => *at,
         }
     }
 
@@ -79,6 +86,7 @@ impl PageOp {
             Self::Duplicate { .. } => "Duplicate pages",
             Self::Move { .. } => "Move pages",
             Self::InsertBlank { .. } => "Insert blank page",
+            Self::InsertFrom { .. } => "Insert pages from file",
         }
     }
 }
@@ -169,6 +177,20 @@ pub fn plan(op: &PageOp, count: u32) -> Result<PageMap, PageOpError> {
             }
             let mut map: PageMap = (0..count).map(Some).collect();
             map.insert(*at as usize, None);
+            Ok(map)
+        }
+        PageOp::InsertFrom {
+            at, source_pages, ..
+        } => {
+            if *at > count {
+                return Err(PageOpError::OutOfRange { page: *at, count });
+            }
+            if *source_pages == 0 {
+                return Err(PageOpError::NoPages);
+            }
+            let mut map: PageMap = (0..count).map(Some).collect();
+            let at = *at as usize;
+            map.splice(at..at, std::iter::repeat_n(None, *source_pages as usize));
             Ok(map)
         }
     }
@@ -288,6 +310,22 @@ mod tests {
             height: 792.0,
         };
         assert!(matches!(plan(&bad, 2), Err(PageOpError::BadSize { .. })));
+    }
+
+    #[test]
+    fn pages_from_a_file_are_new() {
+        let op = PageOp::InsertFrom {
+            path: "other.pdf".into(),
+            at: 1,
+            source_pages: 2,
+        };
+        assert_eq!(ids(&plan(&op, 3).unwrap()), [0, -1, -1, 1, 2]);
+        let empty = PageOp::InsertFrom {
+            path: "other.pdf".into(),
+            at: 0,
+            source_pages: 0,
+        };
+        assert_eq!(plan(&empty, 3), Err(PageOpError::NoPages));
     }
 
     #[test]
