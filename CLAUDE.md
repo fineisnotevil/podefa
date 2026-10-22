@@ -135,7 +135,7 @@ Key questions for Phase 0:
 |---|---|
 | v0.1 Viewer | File dialog + drag-drop, thumbnails, outline, text search, selection + copy, recent files, light/dark theme, keyboard shortcuts |
 | v0.2 Annotate | Highlight/underline/strikeout, notes, ink, incremental save, undo/redo |
-| v0.3 Organize | Rotate/delete/reorder/insert pages, merge/split, metadata |
+| v0.3 Organize and tools | Rotate/delete/reorder/insert pages, merge/split, metadata; and the everyday "iLovePDF-style" tools (maintainer's decision, 2026-10-22): compress, PDF to images and images to PDF, watermark, page numbers, crop, save a repaired copy. PDF to Word only if Phase 0 measures MuPDF's DOCX output as good enough. Office to PDF is out of scope (it needs LibreOffice-class dependencies, against the resource priority). |
 | v0.4 Forms | Fill AcroForms, flatten, export |
 | v0.5 Secure | Redaction, encryption, digital signatures |
 | Later | OCR (optional feature), object-level text/image editing, CLI companion, packaging (MSI/winget, dmg/Homebrew, Flatpak/AppImage, F-Droid), mobile ports, i18n and accessibility |
