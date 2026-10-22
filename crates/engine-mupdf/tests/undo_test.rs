@@ -298,10 +298,89 @@ fn the_journal_headers_are_the_linked_mupdf() {
     assert!(mupdf::pdf::journal::journal_headers_match());
 }
 
+/// The `/Prev` of a PDF file's last trailer (or cross-reference stream), and the `startxref`
+/// offset of its first section: the file's own table, which every incremental save must name.
+fn last_prev_and_first_startxref(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
+    let text = String::from_utf8_lossy(bytes);
+    let number_after = |at: usize, key: &str| -> Option<u64> {
+        let rest = text[at + key.len()..].trim_start();
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let prev = text.rfind("/Prev").and_then(|at| number_after(at, "/Prev"));
+    let first = text
+        .find("startxref")
+        .and_then(|at| number_after(at, "startxref"));
+    (prev, first)
+}
+
+/// Saving in place several times in one session (Plan 0004 §3.3): each save rewrites one
+/// cumulative section after the bytes the file had at open, and its `/Prev` must name the file's
+/// own cross-reference section. MuPDF 1.27.2 named the previous save's section, which the save
+/// had just overwritten: from the second save on, a reader lost pages (a maintainer's file opened
+/// with none). After every save the file opens on its own, unrepaired, with every page and edit.
+#[test]
+fn saving_in_place_again_and_again_keeps_the_file_readable() {
+    let path = fixture("undo_resave");
+    let opened = std::fs::read(&path).expect("read");
+    let (_, own) = last_prev_and_first_startxref(&opened);
+    let mut engine = open(&path);
+    let before = snapshot(&engine);
+    for round in 0..3 {
+        let mark = EditOp::AddMarkup {
+            page: round,
+            kind: MarkupKind::StrikeOut,
+            rects: vec![line_box(12 + round as usize, 54.0, 90.0)],
+            colour: PALETTE[round as usize],
+            author: None,
+        };
+        engine.edit(&mark).expect("edit");
+        engine.save(None).expect("in-place save");
+        let bytes = std::fs::read(&path).expect("read");
+        let (prev, _) = last_prev_and_first_startxref(&bytes);
+        assert_eq!(
+            prev, own,
+            "save {round}: /Prev names the file's own section"
+        );
+
+        // Read on its own, the file needs no repair (MuPDF repairs a broken /Prev chain, and a
+        // repaired document cannot be saved incrementally) and has every edit so far.
+        let mut reader = open(&path);
+        assert_eq!(snapshot(&reader).len(), PAGES, "save {round}: every page");
+        assert_eq!(
+            shape(&snapshot(&reader)),
+            shape(&snapshot(&engine)),
+            "save {round}: the edits so far"
+        );
+        assert!(
+            reader.save(None).is_ok(),
+            "save {round}: not a repaired file"
+        );
+    }
+    // Undo still reaches the document as opened, across the saves.
+    for _ in 0..3 {
+        engine.undo().expect("undo");
+    }
+    assert_eq!(shape(&snapshot(&engine)), shape(&before));
+}
+
 /// The page an undo reported changing.
 fn undone_page(change: Option<Change>) -> Option<u32> {
     match change? {
         Change::Page { page, .. } => Some(page),
         Change::Pages { .. } => None,
     }
+}
+
+/// A file whose page tree yields no page (the broken `/Prev` above did that to a real file) is
+/// refused, so the app reports it and keeps the document it had open.
+#[test]
+fn a_document_without_readable_pages_is_refused() {
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("undo_no_pages.pdf");
+    std::fs::write(&path, text_pdf(0)).expect("write");
+    let mut engine = MupdfEngine::new();
+    assert!(matches!(
+        engine.open_document_with_password(&path, None),
+        Err(engine_mupdf::MupdfError::NoPages(_))
+    ));
 }

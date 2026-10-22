@@ -32,6 +32,8 @@ extern "C" {
         steps: *mut c_int,
         errptr: *mut *mut mupdf_error_t,
     ) -> c_int;
+    fn fa_pdf_startxref(doc: *mut pdf_document) -> i64;
+    fn fa_pdf_set_startxref(doc: *mut pdf_document, startxref: i64);
 }
 
 /// Whether the headers `journal/journal.c` was compiled against are the linked MuPDF's version.
@@ -84,6 +86,23 @@ impl PdfDocument {
     pub fn can_redo(&self) -> Result<bool, Error> {
         let (position, steps) = self.undo_redo_state()?;
         Ok(position < steps)
+    }
+
+    /// The offset of the cross-reference section the next incremental save will name as `/Prev`;
+    /// `None` when the wrappers' headers are not the linked MuPDF's (the field's place in the
+    /// struct is theirs).
+    pub fn startxref(&self) -> Option<i64> {
+        journal_headers_match().then(|| unsafe { fa_pdf_startxref(self.as_raw()) })
+    }
+
+    /// Sets that offset. MuPDF 1.27.2 moves it to each incremental save's own section, although
+    /// the next incremental save writes over that section again from the file's size at open; put
+    /// the value the document was opened with back before each incremental save
+    /// (`journal/journal.c`). Does nothing when the headers do not match.
+    pub fn set_startxref(&mut self, startxref: i64) {
+        if journal_headers_match() {
+            unsafe { fa_pdf_set_startxref(self.as_raw(), startxref) }
+        }
     }
 }
 

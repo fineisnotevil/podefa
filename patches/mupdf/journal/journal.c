@@ -70,3 +70,22 @@ int fa_pdf_undoredo_state(fz_context *ctx, pdf_document *doc, int *steps, mupdf_
         mupdf_save_error(ctx, errptr);
     return position;
 }
+
+/* The offset of the cross-reference section the next incremental save names as /Prev, and setting
+ * it. MuPDF 1.27.2 moves it to the section each incremental save writes (pdf-write.c, writexref and
+ * writexrefstream), although the next incremental save of the same document truncates the file to
+ * its size at open and writes one cumulative section again (ensure_initial_incremental_contents):
+ * from the second save on, /Prev named a section that was gone, and a reader followed it into the
+ * middle of the new data, or into the new section itself. The caller puts back the value the
+ * document was opened with before each incremental save. Plain field accesses that cannot throw;
+ * the struct layout is the headers', which fa_pdf_journal_headers_match vouches for. */
+int64_t fa_pdf_startxref(pdf_document *doc)
+{
+    return doc->startxref;
+}
+
+void fa_pdf_set_startxref(pdf_document *doc, int64_t startxref)
+{
+    doc->startxref = startxref;
+}
+

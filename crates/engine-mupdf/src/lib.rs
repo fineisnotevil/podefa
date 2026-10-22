@@ -54,6 +54,10 @@ pub enum MupdfError {
     #[error("No document is currently open")]
     NoDocumentOpen,
 
+    /// The document opened but has no page that can be read.
+    #[error("'{0}' has no pages that can be read")]
+    NoPages(PathBuf),
+
     /// A structural edit that cannot be applied to this document (Plan 0005).
     #[error("{0}")]
     PageOp(#[from] pdf_core::pages::PageOpError),
@@ -163,6 +167,9 @@ pub struct MupdfEngine {
     doc: Option<Doc>,
     path: Option<PathBuf>,
     password: Option<String>,
+    /// Where the open file's own cross-reference section starts: every incremental save names it
+    /// as `/Prev` (see [`Self::save`]).
+    startxref: Option<i64>,
     scratch: Option<Pixmap>,
     display_lists: Vec<(u32, Arc<DisplayList>)>,
     revisions: Vec<u32>,
@@ -236,6 +243,7 @@ impl MupdfEngine {
             doc: None,
             path: None,
             password: None,
+            startxref: None,
             scratch: None,
             display_lists: Vec::new(),
             revisions: Vec::new(),
@@ -274,6 +282,11 @@ impl MupdfEngine {
             .page_count()
             .map_err(|e| MupdfError::Backend(e.to_string()))?
             .max(0) as usize;
+        // A document whose page tree yields nothing cannot be shown; the one already open stays,
+        // as for any other failed open.
+        if count == 0 {
+            return Err(MupdfError::NoPages(path.to_path_buf()));
+        }
 
         let doc = if doc.is_pdf() {
             let mut pdf = PdfDocument::try_from(doc).map_err(|source| MupdfError::OpenFailed {
@@ -286,6 +299,7 @@ impl MupdfEngine {
             if std::env::var_os("FA_PDF_NO_JOURNAL").is_none() {
                 let _ = pdf.enable_journal();
             }
+            self.startxref = pdf.startxref();
             Doc::Pdf(pdf)
         } else {
             Doc::Plain(doc)
@@ -753,12 +767,21 @@ impl MupdfEngine {
         let in_place = target
             .as_deref()
             .is_none_or(|target| same_file(target, &current));
-        let pdf = self.pdf().map_err(|_| SaveError::NotEditable)?;
+        let startxref = self.startxref;
+        let pdf = self.pdf_mut().map_err(|_| SaveError::NotEditable)?;
         if in_place {
             if !pdf.can_be_saved_incrementally() {
                 return Err(SaveError::NeedsSaveAs);
             }
             let name = current.to_str().ok_or(SaveError::NeedsSaveAs)?;
+            // Every incremental save of this document rewrites one cumulative section after the
+            // bytes the file had at open, so its `/Prev` must name the file's own section. MuPDF
+            // 1.27.2 points it at the previous save's section instead, which the save itself
+            // overwrites: the second save in place made a file other readers, and MuPDF itself,
+            // read with pages missing (`patches/mupdf/journal/journal.c`). Without the offset the
+            // file is not written in place at all.
+            let startxref = startxref.ok_or(SaveError::NeedsSaveAs)?;
+            pdf.set_startxref(startxref);
             // New streams are compressed (Plan 0005 §3.5: MuPDF writes them raw otherwise); no
             // garbage collection, which would break the undo journal (§3.4).
             let mut options = PdfWriteOptions::default();
