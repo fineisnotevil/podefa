@@ -1337,3 +1337,27 @@ that, the click area lay over the drag area as a sibling and took the press.
 `text_bench.rs` (§9.1) calls MuPDF without the engine and so without the loader. Re-run the same
 day, its first page still takes 1470 ms (200 pages) and 845 ms (1000 pages): this is the one-off
 of §7.2 and §9.1.
+
+### 11.5 Phase 2: merge, split, extract (rows AC, AG)
+
+Row AC's engine half is `crates/engine-mupdf/tests/tools_test.rs` (8 tests, plan §5 Phase 2
+results).
+
+Through a real window, release build of `2a3945c`, 2026-10-22, the §1 machine:
+
+```powershell
+target\release\app.exe target\tmp\pt200.pdf --bench-tools --bench-step-ms 400 --bench-settle-ms 1500
+target\release\app.exe target\tmp\pt1000.pdf --bench-tools --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+The run merges the open document with itself on the tool thread and opens the result. It then
+extracts two parts (last page then first; page 6 alone) and opens each. Every output's page order
+is checked from the page sizes (`pages_bench_*.pdf`, §11.4). 3 of 3 checks on both.
+
+| Document | Merge with itself: `t_tool` | `ws` before / at the end | Extract 2 parts: `t_tool` |
+| :--- | ---: | ---: | ---: |
+| 200 pages | 33 ms | 122.1 / 123.8 MiB | 11 ms |
+| 1000 pages | 627 ms | 123.1 / 125.2 MiB | 30-37 ms |
+
+`t_tool` (§11.2) runs from the job's start on the tool thread to its outputs being complete. The
+merged 2000-page file is 421 KiB.

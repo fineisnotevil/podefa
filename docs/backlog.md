@@ -516,3 +516,41 @@ Calibri, ...) still pays the full search, once per document and per page copy th
 - Until then, or instead: a caching loader in `crates/engine-mupdf/src/fonts.rs` that keeps found
   font data by name.
 - Measure on Windows, Linux (fontconfig) and macOS before choosing.
+
+---
+
+## 13. Keep the XMP metadata in step with the document properties
+
+**Labels:** `pdf`, `metadata`
+
+### Problem Statement
+
+Document Properties (Plan 0005 Phase 2) writes the `/Info` dictionary, as MuPDF's own
+`pdf_set_metadata` does. A document that also has an XMP metadata stream (`/Metadata` in the
+catalog) keeps its old title, author and so on there, and readers that prefer XMP show those. The
+properties panel tells the user when that is the case.
+
+### Proposed Solution
+
+Update `dc:title`, `dc:creator`, `dc:description`, `pdf:Keywords` and `xmp:ModifyDate` in the XMP
+packet when it exists, with a small XML rewrite that leaves the rest of the packet as it is (PDF/A
+identification, custom schemas). Test it against files from Word, LibreOffice and Acrobat.
+
+---
+
+## 14. mupdf-rs: `insert_pdf` claims to copy annotations and links but does not
+
+**Labels:** `upstream`
+
+### Problem Statement
+
+`InsertPdfOptions` in mupdf-rs has `copy_links`, `copy_annotations` and `copy_widgets`, all `true`
+by default and required to stay `true` (`validate_supported`). The pages are grafted with
+`pdf_graft_page`, which leaves `/Annots` out (MuPDF `pdf-graft.c`, `copy_list`), so nothing is
+copied. fa-pdf copies them itself (`crates/engine-mupdf/src/edit.rs`, `copy_annotations`, Plan 0005
+Phase 2).
+
+### Proposed Solution
+
+Report it to mupdf-rs with the reproduction from `tools_test.rs`. Offer the copy as a pull request
+if they want it in the crate.
