@@ -16,6 +16,7 @@ mod edit;
 mod fonts;
 mod pool;
 mod search;
+mod tools;
 
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
@@ -34,6 +35,7 @@ use thiserror::Error;
 use pool::{Job, Pool, Prepared, run_tile};
 pub use pool::{MID_RASTER_ABORT, worker_count};
 use search::SearchThread;
+use tools::ToolThread;
 
 /// Typed error enum for MuPDF engine operations.
 #[derive(Debug, Error)]
@@ -184,6 +186,8 @@ enum Step {
     /// The pages themselves: `forward` is the step's page map, from a document of `old_count`
     /// pages.
     Pages { forward: PageMap, old_count: u32 },
+    /// The document as a whole (its information fields); no page to redraw.
+    Document,
 }
 
 /// What an edit, an undo or a redo changed, for the actor to report.
@@ -198,6 +202,8 @@ pub enum Change {
         revision: u32,
         map: PageMap,
     },
+    /// The document's information fields (Plan 0005 Phase 2).
+    Document,
 }
 
 /// The open document, editable or not.
@@ -581,6 +587,9 @@ impl MupdfEngine {
         if let EditOp::Pages(pages) = op {
             return self.restructure(pages);
         }
+        if let EditOp::SetMetadata(fields) = op {
+            return self.set_metadata(fields);
+        }
         let page = op.page();
         if page as usize >= self.revisions.len() {
             return Err(MupdfError::PageOutOfBounds {
@@ -614,6 +623,19 @@ impl MupdfEngine {
     /// it had - can pass for one drawn after it.
     fn restructure(&mut self, op: &PageOp) -> Result<Change, MupdfError> {
         let count = self.revisions.len() as u32;
+        // Pages from a file: how many is the file's to say.
+        let resolved;
+        let op = match op {
+            PageOp::InsertFrom { path, at, .. } => {
+                resolved = PageOp::InsertFrom {
+                    path: path.clone(),
+                    at: *at,
+                    source_pages: edit::source_page_count(path)?,
+                };
+                &resolved
+            }
+            other => other,
+        };
         let map = pages::plan(op, count)?;
         let pdf = self.pdf_mut()?;
         // An edit that leaves every page as it was (a move to where the pages are, a full turn)
@@ -670,6 +692,34 @@ impl MupdfEngine {
         }
     }
 
+    /// Sets the document information fields (Plan 0005 Phase 2) as one journal operation.
+    fn set_metadata(&mut self, fields: &pdf_core::tools::Metadata) -> Result<Change, MupdfError> {
+        let pdf = self.pdf_mut()?;
+        let journal = |source| MupdfError::EditFailed { page: 0, source };
+        let before = journal_position(pdf);
+        pdf.begin_operation("Document properties")
+            .map_err(journal)?;
+        if let Err(err) = edit::set_metadata(pdf, fields) {
+            let _ = pdf.abandon_operation();
+            return Err(err);
+        }
+        pdf.end_operation().map_err(journal)?;
+        if journal_position(pdf) > before {
+            self.history.truncate(before);
+            self.history.push(Step::Document);
+        }
+        Ok(Change::Document)
+    }
+
+    /// The open document's information, for the properties dialog.
+    pub fn document_info(&self) -> Result<pdf_core::tools::DocumentInfo, MupdfError> {
+        match self.doc.as_ref() {
+            Some(Doc::Pdf(pdf)) => Ok(edit::document_info(pdf)),
+            Some(Doc::Plain(doc)) => Ok(edit::plain_info(doc)),
+            None => Err(MupdfError::NoDocumentOpen),
+        }
+    }
+
     /// What one history step changed, undone (`undo`) or redone, as a change to report.
     fn replay(&mut self, step: Step, undo: bool) -> Change {
         match step {
@@ -685,6 +735,7 @@ impl MupdfEngine {
                 };
                 self.restructured(map)
             }
+            Step::Document => Change::Document,
         }
     }
 
@@ -1000,6 +1051,8 @@ impl EngineHandle {
                 let pool = Pool::start(worker_count(), event_tx.clone());
                 // Search runs beside the pool, on a document of its own (Plan 0003, §3.6).
                 let search = SearchThread::start(event_tx.clone());
+                // Tools that write new files run beside them (Plan 0005, §4.2).
+                let tools = ToolThread::start(event_tx.clone());
 
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
@@ -1174,6 +1227,45 @@ impl EngineHandle {
                                 Self::history(&event_tx, &engine, 0, HistoryChange::None);
                             }
                         }
+                        EngineCmd::RunTool { job_id, job } => {
+                            // No output may be the open file: MuPDF reads from it.
+                            let clash = engine.path.as_deref().is_some_and(|open| {
+                                job.outputs().iter().any(|out| same_file(out, open))
+                            });
+                            let current = if tools::needs_current(&job) {
+                                engine.snapshot().map(Some)
+                            } else {
+                                Ok(None)
+                            };
+                            match (clash, current) {
+                                (true, _) => {
+                                    let _ = event_tx.send(EngineEvent::ToolDone {
+                                        job_id,
+                                        result: Err(
+                                            "the open document cannot be written over; choose another file"
+                                                .to_owned(),
+                                        ),
+                                    });
+                                }
+                                (false, Err(err)) => {
+                                    let _ = event_tx.send(EngineEvent::ToolDone {
+                                        job_id,
+                                        result: Err(err.to_string()),
+                                    });
+                                }
+                                (false, Ok(current)) => tools.run(job_id, job, current),
+                            }
+                        }
+                        EngineCmd::CancelTool { job_id } => tools.cancel(job_id),
+                        EngineCmd::DocumentInfo { generation } => {
+                            match engine.document_info() {
+                                Ok(info) => {
+                                    let _ = event_tx
+                                        .send(EngineEvent::DocumentInfo { generation, info });
+                                }
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
+                        }
                         EngineCmd::Cancel { request_id } => pool.cancel(request_id),
                         EngineCmd::Shutdown => break,
                     }
@@ -1181,6 +1273,7 @@ impl EngineHandle {
 
                 // Dropping the pool and the search thread stops and joins them before the actor
                 // thread exits.
+                drop(tools);
                 drop(search);
                 drop(pool);
             })
@@ -1231,6 +1324,12 @@ impl EngineHandle {
                     items: engine.outline(),
                 });
                 search.document_bytes(engine.snapshot()?, engine.password.clone());
+            }
+            Change::Document => {
+                let _ = events.send(EngineEvent::DocumentInfo {
+                    generation,
+                    info: engine.document_info()?,
+                });
             }
         }
         Ok(())

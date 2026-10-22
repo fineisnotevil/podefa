@@ -157,7 +157,7 @@ fn pages_changed(change: Change) -> (Vec<pdf_core::PageSize>, u32, PageMap) {
             revision,
             map,
         } => (page_sizes, revision, map),
-        Change::Page { .. } => panic!("a structural edit reported one page"),
+        other => panic!("a structural edit reported {other:?}"),
     }
 }
 

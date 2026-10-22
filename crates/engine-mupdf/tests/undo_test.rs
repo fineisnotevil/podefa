@@ -368,7 +368,7 @@ fn saving_in_place_again_and_again_keeps_the_file_readable() {
 fn undone_page(change: Option<Change>) -> Option<u32> {
     match change? {
         Change::Page { page, .. } => Some(page),
-        Change::Pages { .. } => None,
+        Change::Pages { .. } | Change::Document => None,
     }
 }
 

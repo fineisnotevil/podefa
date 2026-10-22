@@ -10,11 +10,17 @@
 
 use crate::MupdfError;
 use mupdf::color::AnnotationColor;
-use mupdf::pdf::{InsertPosition, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage};
+use mupdf::pdf::{
+    InsertPdfOptions, InsertPosition, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject,
+    PdfPage,
+};
+use mupdf::{Document, MetadataName};
 use mupdf::{Point, Quad, Rect as MuRect, Size};
 use pdf_core::Rect;
 use pdf_core::annot::{AnnotInfo, AnnotKind, Colour, EditOp, MarkupKind, cut};
 use pdf_core::pages::{self, PageOp};
+use pdf_core::tools::{DocumentInfo, Metadata, pdf_date};
+use std::path::Path;
 
 fn to_rect(r: MuRect) -> Rect {
     Rect::new(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
@@ -319,8 +325,9 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
             }
             annot.update().map_err(fail)?;
         }
-        // Structural edits go through `apply_pages`; the engine never sends them here.
-        EditOp::Pages(_) => {}
+        // Structural edits go through `apply_pages`, and the information fields through
+        // `set_metadata`; the engine never sends them here.
+        EditOp::Pages(_) | EditOp::SetMetadata(_) => {}
         EditOp::SetColour { id, colour, .. } => {
             let mut annot =
                 find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;
@@ -365,10 +372,13 @@ pub(crate) fn apply_pages(
             doc.delete_pages(gone).map_err(fail)?;
         }
         PageOp::Duplicate { pages } => {
-            // From the back, so the pages still to copy keep their indices.
+            // From the back, so the pages still to copy keep their indices. Links keep pointing
+            // where they did: in the same document, a page's index is looked up afresh.
             for page in pages::chosen(pages, count)?.into_iter().rev() {
                 doc.copy_page(page as usize, InsertPosition::After(page as usize))
                     .map_err(fail)?;
+                let at = page as i32;
+                copy_annotations(doc, None, &[(at, at + 1)], &|n| Some(n)).map_err(fail)?;
             }
         }
         PageOp::Move { pages, before } => {
@@ -387,6 +397,19 @@ pub(crate) fn apply_pages(
                 }
             }
         }
+        PageOp::InsertFrom { path, at, .. } => {
+            let source = open_source(path)?;
+            let options = InsertPdfOptions {
+                target: InsertPosition::Before(*at as usize),
+                ..InsertPdfOptions::default()
+            };
+            doc.insert_pdf(&source, options).map_err(fail)?;
+            let n = source.page_count().map_err(fail)?;
+            let at = *at as i32;
+            let pairs: Vec<(i32, i32)> = (0..n).map(|p| (p, at + p)).collect();
+            copy_annotations(doc, Some(&source), &pairs, &|p| (p < n).then_some(at + p))
+                .map_err(fail)?;
+        }
         PageOp::InsertBlank { at, width, height } => {
             let index = if *at >= count { -1 } else { *at as i32 };
             doc.new_page_at(index, Size::new(*width, *height))
@@ -394,4 +417,251 @@ pub(crate) fn apply_pages(
         }
     }
     Ok(())
+}
+
+/// Another PDF to take pages from; a password-protected one is refused.
+fn open_source(path: &Path) -> Result<PdfDocument, MupdfError> {
+    let name = path
+        .to_str()
+        .ok_or_else(|| MupdfError::InvalidPath(path.to_path_buf()))?;
+    let doc = PdfDocument::open(name).map_err(|source| MupdfError::OpenFailed {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if doc.needs_password().unwrap_or(false) {
+        return Err(MupdfError::PasswordRequired);
+    }
+    Ok(doc)
+}
+
+/// How many pages a PDF to insert has (Plan 0005 Phase 2).
+pub(crate) fn source_page_count(path: &Path) -> Result<u32, MupdfError> {
+    let doc = open_source(path)?;
+    let count = doc
+        .page_count()
+        .map_err(|e| MupdfError::Backend(e.to_string()))?;
+    Ok(count.max(0) as u32)
+}
+
+/// Writes the information fields into the trailer's `/Info` dictionary, created when the document
+/// has none, and stamps `/ModDate`. MuPDF's own `pdf_set_metadata` does the same and, like it, this
+/// leaves an XMP metadata stream as it is (Plan 0005 §3.2).
+pub(crate) fn set_metadata(doc: &mut PdfDocument, fields: &Metadata) -> Result<(), MupdfError> {
+    let fail = |source| MupdfError::EditFailed { page: 0, source };
+    let existing = doc
+        .trailer()
+        .map_err(fail)?
+        .get_dict("Info")
+        .map_err(fail)?
+        .filter(|info| info.is_dict().unwrap_or(false));
+    let mut info = match existing {
+        Some(info) => info,
+        None => {
+            let dict = doc.new_dict().map_err(fail)?;
+            let info = doc.add_object(&dict).map_err(fail)?;
+            // The trailer is fetched after the new object: on a document with no change yet,
+            // adding it starts the section of changes, which has a trailer of its own, and a key
+            // put into the trailer fetched before would be lost.
+            let mut trailer = doc.trailer().map_err(fail)?;
+            trailer.dict_put("Info", info.clone()).map_err(fail)?;
+            info
+        }
+    };
+    for (key, value) in [
+        ("Title", &fields.title),
+        ("Author", &fields.author),
+        ("Subject", &fields.subject),
+        ("Keywords", &fields.keywords),
+    ] {
+        match value.as_deref() {
+            None => {}
+            Some("") => info.dict_delete(key).map_err(fail)?,
+            Some(text) => {
+                let text = doc.new_string(text).map_err(fail)?;
+                info.dict_put(key, text).map_err(fail)?;
+            }
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let date = doc.new_string(&pdf_date(now)).map_err(fail)?;
+    info.dict_put("ModDate", date).map_err(fail)?;
+    Ok(())
+}
+
+fn field(doc: &Document, name: MetadataName) -> String {
+    doc.metadata(name).unwrap_or_default()
+}
+
+/// What MuPDF reports of any document's information.
+pub(crate) fn plain_info(doc: &Document) -> DocumentInfo {
+    let text = |name| {
+        let value = field(doc, name);
+        Some(value)
+    };
+    DocumentInfo {
+        fields: Metadata {
+            title: text(MetadataName::Title),
+            author: text(MetadataName::Author),
+            subject: text(MetadataName::Subject),
+            keywords: text(MetadataName::Keywords),
+        },
+        creator: field(doc, MetadataName::Creator),
+        producer: field(doc, MetadataName::Producer),
+        created: field(doc, MetadataName::CreationDate),
+        modified: field(doc, MetadataName::ModDate),
+        format: field(doc, MetadataName::Format),
+        has_xmp: false,
+    }
+}
+
+/// A PDF's information, and whether it carries an XMP stream the app leaves as it is.
+pub(crate) fn document_info(doc: &PdfDocument) -> DocumentInfo {
+    let has_xmp = doc
+        .catalog()
+        .ok()
+        .and_then(|catalog| catalog.get_dict("Metadata").ok().flatten())
+        .is_some();
+    DocumentInfo {
+        has_xmp,
+        ..plain_info(doc)
+    }
+}
+
+/// Gives grafted pages their annotations and links back (Plan 0005 Phase 2).
+///
+/// MuPDF's `pdf_graft_page`, behind `insert_pdf` and `copy_page`, copies a page's contents,
+/// resources, boxes and rotation but not its `/Annots` (`pdf-graft.c`, `copy_list`), so a
+/// duplicated, inserted, merged or extracted page lost its markup, notes, ink and links. This copies
+/// each annotation of `from` (in `src`, or in `dst` itself when `src` is `None`) onto page `to` of
+/// `dst`, as a new object:
+///
+/// - `/P` names the new page; `/Popup`, `/Parent` and `/IRT` are left out, since grafting them
+///   would drag the source page and its other annotations along (a note opens without its popup
+///   window object, which readers create);
+/// - a link to a page of the source document is pointed at that page's copy, found through
+///   `target` (source page index to `dst` page index); a link whose page was not copied is
+///   dropped; links by name and to other files are kept as they are;
+/// - form widgets are left out: their fields live in the document's form, which v0.4 handles.
+pub(crate) fn copy_annotations(
+    dst: &mut PdfDocument,
+    src: Option<&PdfDocument>,
+    pairs: &[(i32, i32)],
+    target: &dyn Fn(i32) -> Option<i32>,
+) -> Result<(), mupdf::Error> {
+    let mut map = dst.new_graft_map()?;
+    for &(from, to) in pairs {
+        let src_page = match src {
+            Some(doc) => doc.find_page(from)?,
+            None => dst.find_page(from)?,
+        };
+        let Some(annots) = src_page.get_dict("Annots")? else {
+            continue;
+        };
+        if !annots.is_array()? {
+            continue;
+        }
+        let mut dst_page = dst.find_page(to)?;
+        let mut list = dst.new_array()?;
+        for item in annots.array_iter()? {
+            let annot = item?;
+            if !annot.is_dict()? {
+                continue;
+            }
+            let subtype = annot
+                .get_dict("Subtype")?
+                .and_then(|s| s.as_name().ok())
+                .unwrap_or_default();
+            if subtype == b"Popup" || subtype == b"Widget" {
+                continue;
+            }
+            let mut copy = dst.new_dict()?;
+            let mut keep = true;
+            for entry in annot.dict_iter()? {
+                let (key, value) = entry?;
+                let value = match key.as_name()?.as_slice() {
+                    b"P" | b"Popup" | b"Parent" | b"IRT" => continue,
+                    b"Dest" => match retarget(dst, src, &mut map, &value, target)? {
+                        Some(dest) => dest,
+                        None => {
+                            keep = false;
+                            break;
+                        }
+                    },
+                    b"A" if is_goto(&value)? => {
+                        let Some(d) = value.get_dict("D")? else {
+                            keep = false;
+                            break;
+                        };
+                        match retarget(dst, src, &mut map, &d, target)? {
+                            Some(dest) => {
+                                let mut action = dst.new_dict()?;
+                                action.dict_put("S", PdfObject::new_name("GoTo")?)?;
+                                action.dict_put("D", dest)?;
+                                action
+                            }
+                            None => {
+                                keep = false;
+                                break;
+                            }
+                        }
+                    }
+                    _ => map.graft_object(&value)?,
+                };
+                copy.dict_put(key, value)?;
+            }
+            if !keep {
+                continue;
+            }
+            copy.dict_put("P", dst_page.try_clone()?)?;
+            list.array_push(dst.add_object(&copy)?)?;
+        }
+        if list.len()? > 0 {
+            dst_page.dict_put("Annots", list)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_goto(action: &PdfObject) -> Result<bool, mupdf::Error> {
+    Ok(action.is_dict()?
+        && action
+            .get_dict("S")?
+            .and_then(|s| s.as_name().ok())
+            .is_some_and(|s| s == b"GoTo"))
+}
+
+/// A link destination for the copy: an explicit one (`[page /XYZ ...]`) gets the page's copy, or
+/// `None` when that page was not copied; a named one is kept as it is.
+fn retarget(
+    dst: &PdfDocument,
+    src: Option<&PdfDocument>,
+    map: &mut mupdf::pdf::PdfGraftMap,
+    dest: &PdfObject,
+    target: &dyn Fn(i32) -> Option<i32>,
+) -> Result<Option<PdfObject>, mupdf::Error> {
+    if !dest.is_array()? {
+        return map.graft_object(dest).map(Some);
+    }
+    let Some(page) = dest.get_array(0)? else {
+        return Ok(None);
+    };
+    if !page.is_indirect()? {
+        // A page number: a link into another file (`GoToR`), kept as it is.
+        return map.graft_object(dest).map(Some);
+    }
+    let number = match src {
+        Some(doc) => doc.lookup_page_number(&page),
+        None => dst.lookup_page_number(&page),
+    };
+    let Some(to) = number.ok().and_then(target) else {
+        return Ok(None);
+    };
+    let mut copy = dst.new_array()?;
+    copy.array_push(dst.find_page(to)?)?;
+    for item in dest.array_iter()?.skip(1) {
+        copy.array_push(map.graft_object(&item?)?)?;
+    }
+    Ok(Some(copy))
 }
