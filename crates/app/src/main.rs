@@ -53,6 +53,7 @@ use std::time::Instant;
 
 /// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
 mod bench;
+mod tools_ui;
 
 slint::slint! {
     import { Button, LineEdit, ListView, Palette, TextEdit } from "std-widgets.slint";
@@ -154,6 +155,25 @@ slint::slint! {
         in-out property <int> drop-row: -1;
         in-out property <bool> drop-after: false;
         in-out property <int> pages-chosen: 0;
+        // A tool job running on the engine's tool thread, and what the status bar says of it.
+        in-out property <bool> tool-running: false;
+        // The merge panel: its file list, in order, and the chosen row.
+        in-out property <bool> merge-visible: false;
+        in-out property <[string]> merge-files;
+        in-out property <int> merge-selected: -1;
+        // The split panel: every N pages (mode 0) or page ranges (mode 1).
+        in-out property <bool> split-visible: false;
+        in-out property <int> split-mode: 0;
+        in-out property <string> split-every: "1";
+        in-out property <string> split-ranges: "";
+        in-out property <string> split-error: "";
+        // The document properties panel.
+        in-out property <bool> props-visible: false;
+        in-out property <string> props-title: "";
+        in-out property <string> props-author: "";
+        in-out property <string> props-subject: "";
+        in-out property <string> props-keywords: "";
+        in-out property <string> props-info: "";
         // Where the thumbnail list is in the window, for the bench harness's drags.
         in-out property <length> thumb-list-x: 0px;
         in-out property <length> thumb-list-y: 0px;
@@ -273,6 +293,23 @@ slint::slint! {
         // 6 insert a blank page after.
         callback page_op(int);
         callback thumb_drag_started(int);
+        // Tools that write new files, and the document's properties (Plan 0005 Phase 2).
+        callback merge_open();
+        callback merge_add();
+        callback merge_add_current();
+        callback merge_move(int);
+        callback merge_remove();
+        callback merge_run();
+        callback merge_close();
+        callback split_open();
+        callback split_run();
+        callback split_close();
+        callback extract_pages();
+        callback insert_from_file();
+        callback props_open();
+        callback props_save();
+        callback props_close();
+        callback cancel_tool();
         callback thumb_dropped(int, bool);
         callback outline_clicked(int);
         callback outline_toggled(int);
@@ -394,9 +431,43 @@ slint::slint! {
                 }
                 MenuSeparator {}
                 MenuItem {
+                    title: "Insert Pages from File...";
+                    enabled: root.editable && root.total_pages > 0;
+                    activated => { root.insert_from_file(); }
+                }
+                MenuItem {
                     title: "Insert Blank Page";
                     enabled: root.editable && root.total_pages > 0;
                     activated => { root.page_op(6); }
+                }
+            }
+            Menu {
+                title: "Tools";
+                MenuItem {
+                    title: "Merge Files...";
+                    enabled: !root.tool-running;
+                    activated => { root.merge_open(); }
+                }
+                MenuItem {
+                    title: "Split...";
+                    enabled: root.editable && !root.tool-running;
+                    activated => { root.split_open(); }
+                }
+                MenuItem {
+                    title: "Extract Pages...";
+                    enabled: root.editable && !root.tool-running;
+                    activated => { root.extract_pages(); }
+                }
+                MenuItem {
+                    title: "Insert Pages from File...";
+                    enabled: root.editable;
+                    activated => { root.insert_from_file(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Document Properties...";
+                    enabled: root.total_pages > 0;
+                    activated => { root.props_open(); }
                 }
             }
             Menu {
@@ -1097,6 +1168,261 @@ slint::slint! {
                     }
                 }
 
+                // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
+                // document; the open one can be among them, as it is now.
+                if root.merge-visible : FocusScope {
+                    x: (parent.width - self.width) / 2;
+                    y: 16px;
+                    width: min(parent.width - 32px, 460px);
+                    height: min(parent.height - 32px, 360px);
+                    init => { self.focus(); }
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.merge_close();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000040;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Merge files - in this order";
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+                            ListView {
+                                vertical-stretch: 1;
+                                for name[index] in root.merge-files : Rectangle {
+                                    height: 26px;
+                                    background: index == root.merge-selected
+                                        ? Palette.selection-background : transparent;
+                                    Text {
+                                        x: 6px;
+                                        text: (index + 1) + ". " + name;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        color: index == root.merge-selected
+                                            ? Palette.selection-foreground : Palette.foreground;
+                                    }
+                                    TouchArea { clicked => { root.merge-selected = index; } }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Button { text: "Add files..."; clicked => { root.merge_add(); } }
+                                Button {
+                                    text: "Add open document";
+                                    enabled: root.total_pages > 0;
+                                    clicked => { root.merge_add_current(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Button {
+                                    text: "Up";
+                                    enabled: root.merge-selected > 0;
+                                    clicked => { root.merge_move(-1); }
+                                }
+                                Button {
+                                    text: "Down";
+                                    enabled: root.merge-selected >= 0
+                                        && root.merge-selected + 1 < root.merge-files.length;
+                                    clicked => { root.merge_move(1); }
+                                }
+                                Button {
+                                    text: "Remove";
+                                    enabled: root.merge-selected >= 0;
+                                    clicked => { root.merge_remove(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.merge_close(); } }
+                                Button {
+                                    text: "Merge...";
+                                    primary: true;
+                                    enabled: root.merge-files.length >= 1 && !root.tool-running;
+                                    clicked => { root.merge_run(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Split: the open document, as it is now, into files of N pages or by ranges.
+                if root.split-visible : FocusScope {
+                    x: (parent.width - self.width) / 2;
+                    y: 16px;
+                    width: min(parent.width - 32px, 420px);
+                    height: 220px;
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.split_close();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000040;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Split into files";
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Button {
+                                    text: "Every";
+                                    checkable: true;
+                                    checked: root.split-mode == 0;
+                                    clicked => { root.split-mode = 0; }
+                                }
+                                LineEdit {
+                                    width: 60px;
+                                    text <=> root.split-every;
+                                    enabled: root.split-mode == 0;
+                                }
+                                Text {
+                                    text: "pages";
+                                    vertical-alignment: center;
+                                    color: Palette.foreground;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Button {
+                                    text: "Ranges";
+                                    checkable: true;
+                                    checked: root.split-mode == 1;
+                                    clicked => { root.split-mode = 1; }
+                                }
+                                LineEdit {
+                                    placeholder-text: "1-3, 4, 5-";
+                                    text <=> root.split-ranges;
+                                    enabled: root.split-mode == 1;
+                                }
+                            }
+                            Text {
+                                text: root.split-error;
+                                color: #b42318;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.split_close(); } }
+                                Button {
+                                    text: "Split...";
+                                    primary: true;
+                                    enabled: !root.tool-running;
+                                    clicked => { root.split_run(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Document Properties: the fields readers show, and what else the file says.
+                if root.props-visible : FocusScope {
+                    x: (parent.width - self.width) / 2;
+                    y: 16px;
+                    width: min(parent.width - 32px, 460px);
+                    height: min(parent.height - 32px, 380px);
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.props_close();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 4px;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000040;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 6px;
+                            Text {
+                                text: "Document properties";
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 70px; text: "Title"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit {
+                                    text <=> root.props-title;
+                                    read-only: !root.editable;
+                                    init => { self.focus(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 70px; text: "Author"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit { text <=> root.props-author; read-only: !root.editable; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit { text <=> root.props-subject; read-only: !root.editable; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 30px;
+                                Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Palette.foreground; }
+                                LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.props-info;
+                                wrap: word-wrap;
+                                font-size: 12px;
+                                color: Palette.foreground;
+                                opacity: 0.75;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 28px;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Close"; clicked => { root.props_close(); } }
+                                if root.editable : Button {
+                                    text: "Save";
+                                    primary: true;
+                                    clicked => { root.props_save(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (root.total_pages == 0 && !root.has_error) : Text {
                     text: "Open a PDF with File > Open (Ctrl+O)";
                     color: Palette.foreground;
@@ -1118,6 +1444,14 @@ slint::slint! {
                     opacity: 0.8;
                     font-size: 12px;
                     vertical-alignment: center;
+                }
+                // A running tool can be stopped from here.
+                if root.tool-running : Text {
+                    text: "  Cancel";
+                    color: Palette.accent-background;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    TouchArea { clicked => { root.cancel_tool(); } }
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Text {
@@ -1407,6 +1741,14 @@ struct AppState {
     /// Counts layouts: opens and structural edits. Text lines and annotations are asked for with it,
     /// so an answer about a page index from before a structural edit is dropped.
     layout_generation: u64,
+    /// The tool job running on the engine's tool thread, the next job's id, the merge panel's
+    /// files and rows, and the properties panel's state (Plan 0005 Phase 2).
+    running_tool: Option<tools_ui::RunningTool>,
+    next_job_id: u64,
+    merge_inputs: Vec<pdf_core::tools::MergeInput>,
+    merge_model: Rc<VecModel<SharedString>>,
+    props_wanted: bool,
+    props_shown: pdf_core::tools::Metadata,
     /// Silent unless `FA_PDF_TRACE` is set or a `--bench-*` flag asked for a run.
     bench: bench::Trace,
 }
@@ -4173,6 +4515,8 @@ fn main() -> Result<(), slint::PlatformError> {
         .map(|c| slint::Color::from_rgb_f32(c.r, c.g, c.b))
         .collect();
     main_window.set_swatches(ModelRc::new(VecModel::from(swatches)));
+    let merge_model = Rc::new(VecModel::<SharedString>::default());
+    main_window.set_merge_files(ModelRc::from(merge_model.clone()));
 
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -4257,6 +4601,12 @@ fn main() -> Result<(), slint::PlatformError> {
             page_sel_anchor: None,
             drag_pages: Vec::new(),
             layout_generation: 0,
+            running_tool: None,
+            next_job_id: 0,
+            merge_inputs: Vec::new(),
+            merge_model: merge_model.clone(),
+            props_wanted: false,
+            props_shown: pdf_core::tools::Metadata::default(),
             bench: bench::Trace::new(trace_on),
         });
     });
@@ -4395,6 +4745,21 @@ fn main() -> Result<(), slint::PlatformError> {
                     with_state(|state| {
                         state.restructured(&ui, generation, page_sizes, revision, map)
                     });
+                }
+                EngineEvent::ToolProgress {
+                    job_id,
+                    done,
+                    total,
+                } => {
+                    with_state(|state| state.tool_progress(&ui, job_id, done, total));
+                }
+                EngineEvent::ToolDone { job_id, result } => {
+                    let outcome =
+                        with_state_ret(|state| state.tool_done(&ui, job_id, result)).flatten();
+                    tools_ui::tool_finished(&ui, outcome);
+                }
+                EngineEvent::DocumentInfo { generation, info } => {
+                    with_state(|state| state.document_info(&ui, generation, info));
                 }
                 EngineEvent::Edited {
                     generation, result, ..
@@ -4696,6 +5061,95 @@ fn main() -> Result<(), slint::PlatformError> {
                 with_state(|state| state.thumb_drag_started(&ui, row));
             }
         });
+    }
+    {
+        let weak = main_window.as_weak();
+        main_window.on_merge_open(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.merge_open(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_merge_add(move || {
+            if let Some(ui) = weak.upgrade() {
+                tools_ui::merge_add(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_merge_add_current(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.merge_add_current(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_merge_move(move |by| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.merge_move(&ui, by));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_merge_remove(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.merge_remove(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_merge_run(move || {
+            if let Some(ui) = weak.upgrade() {
+                tools_ui::merge_run(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_merge_close(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.merge_close(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_split_open(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_split_error(SharedString::new());
+                ui.set_split_visible(true);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_split_run(move || {
+            if let Some(ui) = weak.upgrade() {
+                tools_ui::split_run(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_split_close(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_split_visible(false);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_extract_pages(move || {
+            if let Some(ui) = weak.upgrade() {
+                tools_ui::extract_pages(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_insert_from_file(move || {
+            if let Some(ui) = weak.upgrade() {
+                tools_ui::insert_from_file(&ui);
+            }
+        });
+        main_window.on_props_open(|| with_state(|state| state.props_open()));
+        let weak = main_window.as_weak();
+        main_window.on_props_save(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.props_save(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_props_close(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_props_visible(false);
+            }
+        });
+        main_window.on_cancel_tool(|| with_state(|state| state.cancel_tool()));
     }
     main_window.on_thumb_dropped(move |row, after| {
         if let Ok(row) = u32::try_from(row) {

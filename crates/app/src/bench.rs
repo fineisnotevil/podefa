@@ -139,6 +139,11 @@ pub struct Cfg {
     /// step; reports `t_restructure` (Plan 0005 Phase 1, rows AA and AB). Needs a document whose
     /// pages tell themselves apart by height, as `pages_test.rs` writes (`pages_bench_*.pdf`).
     pub pages: bool,
+    /// `--bench-tools`: merge the open document with itself and extract two parts on the tool
+    /// thread, open each output in the window and check its pages; reports `t_tool` and the working
+    /// set around the merge (Plan 0005 Phase 2, rows AC and AG). Same documents as `--bench-pages`;
+    /// writes `bench_merged.pdf` and `bench_part_*.pdf` next to the document.
+    pub tools: bool,
 }
 
 impl Default for Cfg {
@@ -173,6 +178,7 @@ impl Default for Cfg {
             note: false,
             ink: false,
             pages: false,
+            tools: false,
         }
     }
 }
@@ -194,6 +200,7 @@ impl Cfg {
             && !self.note
             && !self.ink
             && !self.pages
+            && !self.tools
     }
 }
 
@@ -299,6 +306,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             "--bench-pages" => {
                 cfg.pages = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-tools" => {
+                cfg.tools = number.is_none_or(|on| on != 0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-edit-burst" => {
@@ -656,6 +667,7 @@ pub struct Trace {
     restructure_ms: Vec<u128>,
     rebuild_us: Vec<u128>,
     restructure_timed: bool,
+    tools_done: u32,
 }
 
 impl Trace {
@@ -696,6 +708,7 @@ impl Trace {
             restructure_ms: Vec::new(),
             rebuild_us: Vec::new(),
             restructure_timed: true,
+            tools_done: 0,
         }
     }
 
@@ -747,6 +760,34 @@ impl Trace {
         let ws = process_memory().map_or(0, |mem| mem.ws);
         self.edit_ws.push((n, ws));
         println!("[bench] ws_after_edits n={n} ws={}", mem_str(Some(ws)));
+    }
+
+    /// A tool job ended (`t_tool`, benchmarks §11.2).
+    pub fn tool_done(
+        &mut self,
+        title: &str,
+        took: Duration,
+        result: &Result<Vec<std::path::PathBuf>, String>,
+    ) {
+        if !self.on {
+            return;
+        }
+        let ws = process_memory().map(|mem| mem.ws);
+        let outcome = match result {
+            Ok(files) => format!("{} file(s)", files.len()),
+            Err(err) => format!("failed: {err}"),
+        };
+        println!(
+            "[bench] tool {title} t_tool={}ms {outcome} ws={}",
+            took.as_millis(),
+            mem_str(ws)
+        );
+        self.tools_done += 1;
+    }
+
+    /// Tool jobs ended so far.
+    pub fn tools_done(&self) -> u32 {
+        self.tools_done
     }
 
     /// The working set after `n` structural edits (row AG).
@@ -1498,6 +1539,8 @@ enum Phase {
     Ink,
     /// Page operations through the sidebar, each undone (Plan 0005 Phase 1).
     Pages,
+    /// Merge and extract on the tool thread, each output opened and checked (Plan 0005 Phase 2).
+    Tools,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1519,6 +1562,7 @@ struct Pending {
     note: bool,
     ink: bool,
     pages: bool,
+    tools: bool,
 }
 
 impl Pending {
@@ -1539,6 +1583,7 @@ impl Pending {
             note: cfg.note,
             ink: cfg.ink,
             pages: cfg.pages,
+            tools: cfg.tools,
         }
     }
 
@@ -1559,6 +1604,7 @@ impl Pending {
             (&mut self.note, Phase::Note),
             (&mut self.ink, Phase::Ink),
             (&mut self.pages, Phase::Pages),
+            (&mut self.tools, Phase::Tools),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1599,6 +1645,9 @@ struct Driver {
     /// The page count `--bench-pages` started from, and the layout rebuilds its burst waits for.
     pages_base: u32,
     pages_rebuilds: usize,
+    /// `--bench-tools` waits for this many finished jobs, or for an open of this many pages.
+    tools_wait: u32,
+    open_wait: Option<i32>,
 }
 
 /// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
@@ -1982,6 +2031,7 @@ impl Driver {
             Phase::Note => "note",
             Phase::Ink => "ink",
             Phase::Pages => "pages",
+            Phase::Tools => "tools",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -2347,6 +2397,120 @@ impl Driver {
                     }
                     4 => {
                         check("Ctrl+Z puts it back", "(300,399)".to_owned(), at(&note()));
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                }
+                self.step += 1;
+                false
+            }
+            Phase::Tools => {
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                // Wait for the job or the open the last step started.
+                let mut done = 0;
+                let mut path = None;
+                with_state(|state| {
+                    done = state.bench.tools_done();
+                    path = state.doc_path.clone();
+                });
+                if done < self.tools_wait {
+                    return false;
+                }
+                if let Some(pages) = self.open_wait {
+                    if ui.get_total_pages() != pages || ui.get_is_loading() {
+                        return false;
+                    }
+                    self.open_wait = None;
+                }
+                let Some(dir) = path.as_deref().and_then(std::path::Path::parent) else {
+                    self.settle();
+                    return false;
+                };
+                let merged = dir.join("bench_merged.pdf");
+                let part_a = dir.join("bench_part_a.pdf");
+                let part_b = dir.join("bench_part_b.pdf");
+                let n = ui.get_total_pages();
+                match self.step {
+                    0 => {
+                        self.pages_base = n as u32;
+                        with_state(|state| {
+                            state.bench.pages_memory(0);
+                            state.start_tool(
+                                ui,
+                                pdf_core::tools::ToolJob::Merge {
+                                    inputs: vec![
+                                        pdf_core::tools::MergeInput::Current,
+                                        pdf_core::tools::MergeInput::Current,
+                                    ],
+                                    output: merged.clone(),
+                                },
+                                false,
+                            );
+                        });
+                        self.tools_wait = done + 1;
+                    }
+                    1 => {
+                        let base = self.pages_base as i32;
+                        with_state(|state| state.open_path(ui, merged.clone()));
+                        self.open_wait = Some(2 * base);
+                    }
+                    2 => {
+                        let base = self.pages_base as usize;
+                        let all: Vec<String> = (0..base).map(|p| p.to_string()).collect();
+                        let mut twice = all.clone();
+                        twice.extend(all.iter().cloned());
+                        let mut second_half = String::new();
+                        with_state(|state| {
+                            if let Some(size) = state.page_sizes.get(base) {
+                                second_half = format!("{}", size.height.round() as i64 - 800);
+                            }
+                        });
+                        check(
+                            "merged with itself",
+                            format!("{} second half starts at 0", order_str(twice.len(), twice)),
+                            format!("{} second half starts at {second_half}", page_order()),
+                        );
+                        // Two parts of the merged document: its last page then its first, and
+                        // page 6 alone.
+                        let last = (2 * base - 1) as u32;
+                        with_state(|state| {
+                            state.start_tool(
+                                ui,
+                                pdf_core::tools::ToolJob::Extract {
+                                    parts: vec![
+                                        (vec![last, 0], part_a.clone()),
+                                        (vec![5], part_b.clone()),
+                                    ],
+                                },
+                                false,
+                            );
+                        });
+                        self.tools_wait = done + 1;
+                    }
+                    3 => {
+                        with_state(|state| state.open_path(ui, part_a.clone()));
+                        self.open_wait = Some(2);
+                    }
+                    4 => {
+                        let last = (self.pages_base - 1).to_string();
+                        check(
+                            "part a: last page, then first",
+                            order_str(2, vec![last, "0".to_owned()]),
+                            page_order(),
+                        );
+                        with_state(|state| state.open_path(ui, part_b.clone()));
+                        self.open_wait = Some(1);
+                    }
+                    5 => {
+                        check(
+                            "part b: page 6",
+                            order_str(1, vec!["5".to_owned()]),
+                            page_order(),
+                        );
                     }
                     _ => {
                         self.settle();
@@ -3039,6 +3203,8 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             edit_hold: None,
             pages_base: 0,
             pages_rebuilds: 0,
+            tools_wait: 0,
+            open_wait: None,
         });
     });
 
