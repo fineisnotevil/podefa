@@ -18,6 +18,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 pub mod annot;
+pub mod form;
 pub mod layout;
 pub mod nav;
 pub mod pages;
@@ -180,6 +181,8 @@ pub enum EngineCmd {
     /// List a page's annotations (Plan 0004, §4.1), answered with [`EngineEvent::Annotations`].
     /// `generation` is echoed back, so an answer about a previous document can be recognised.
     Annotations { page: u32, generation: u64 },
+    /// List a page's form field widgets (Plan 0006). Answered with [`EngineEvent::Fields`].
+    Fields { page: u32, generation: u64 },
     /// Apply one edit to the document. The engine answers with [`EngineEvent::PageChanged`] for
     /// the page it changed, then [`EngineEvent::Edited`]; `generation` is the document's, so an
     /// answer about a previous document can be recognised.
@@ -257,6 +260,8 @@ pub enum EngineEvent {
         /// MuPDF had to repair the file to open it (Plan 0005 Phase 4): it cannot be saved in
         /// place, and a full copy written with Save As is a clean, repaired file.
         repaired: bool,
+        /// What its form has (Plan 0006).
+        form: form::FormSummary,
     },
     /// One tile has been rendered.
     ///
@@ -323,6 +328,12 @@ pub enum EngineEvent {
         page: u32,
         generation: u64,
         items: Vec<annot::AnnotInfo>,
+    },
+    /// A page's form field widgets (answer to [`EngineCmd::Fields`]).
+    Fields {
+        page: u32,
+        generation: u64,
+        items: Vec<form::FieldInfo>,
     },
     /// An edit changed a page: it is now at `revision`, with these annotations. Every tile, base
     /// layer and thumbnail of the page rendered from an older revision is out of date.

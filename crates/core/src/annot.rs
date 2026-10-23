@@ -222,6 +222,14 @@ pub enum EditOp {
         width: f32,
         author: Option<String>,
     },
+    /// Sets a form field's value (Plan 0006): text, a choice's export value, or a button's state.
+    /// `page` is the page of the widget it was set from; the engine reports every page with a
+    /// widget of the field.
+    SetField {
+        page: u32,
+        name: String,
+        value: String,
+    },
 }
 
 impl EditOp {
@@ -242,6 +250,7 @@ impl EditOp {
             Self::AddInk { .. } => "Ink",
             Self::Pages(op) => op.title(),
             Self::SetMetadata(_) => "Document properties",
+            Self::SetField { .. } => "Fill field",
         }
     }
 
@@ -256,7 +265,8 @@ impl EditOp {
             | Self::AddNote { page, .. }
             | Self::SetContents { page, .. }
             | Self::MoveNote { page, .. }
-            | Self::AddInk { page, .. } => *page,
+            | Self::AddInk { page, .. }
+            | Self::SetField { page, .. } => *page,
         }
     }
 }
