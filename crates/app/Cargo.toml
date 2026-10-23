@@ -14,6 +14,10 @@ description = "Desktop PDF viewer application for PODEFA"
 [lints]
 workspace = true
 
+[features]
+# Export as Word (Plan 0005 Phase 5): off until a writer keeps the layout; see engine-mupdf's feature.
+docx = ["engine-mupdf/docx"]
+
 [dependencies]
 pdf-core = { workspace = true }
 engine-mupdf = { workspace = true }

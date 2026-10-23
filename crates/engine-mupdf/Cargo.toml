@@ -18,3 +18,17 @@ workspace = true
 pdf-core = { workspace = true }
 mupdf = { workspace = true }
 thiserror = { workspace = true }
+
+[features]
+# Export as Word through MuPDF's DOCX writer (Plan 0005 Phase 5). Off: MuPDF's writer keeps neither
+# columns nor tables (plan §5, Phase 5 gate), so it waits for a writer that does; without the
+# feature no document writer is linked into the app.
+docx = []
+
+[[test]]
+name = "word_test"
+required-features = ["docx"]
+
+[[test]]
+name = "docx_bench"
+required-features = ["docx"]

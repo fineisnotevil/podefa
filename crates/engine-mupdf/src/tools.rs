@@ -12,11 +12,13 @@
 //! chose: a cancelled or failed job deletes its `.part` files and leaves any file it would have
 //! replaced untouched.
 
+#[cfg(feature = "docx")]
+use mupdf::DocumentWriter;
 use mupdf::pdf::{
     InsertImageOptions, InsertPdfOptions, PageImageSource, PageSelection, PdfDocument,
     PdfWriteOptions,
 };
-use mupdf::{Colorspace, DocumentWriter, Image, Matrix, Rect, Size};
+use mupdf::{Colorspace, Image, Matrix, Rect, Size};
 use pdf_core::EngineEvent;
 use pdf_core::tools::{ImageFormat, MergeInput, ToolJob, ToolSizes};
 use std::path::{Path, PathBuf};
@@ -208,7 +210,9 @@ fn add_image_page(doc: &mut PdfDocument, path: &Path) -> Result<(), String> {
 /// Writes every page of `doc` to the `.part` file of `output` as DOCX, through MuPDF's DOCX writer
 /// (the `extract` library): text in reading order, with images. `progress` follows each page and
 /// `stop` is asked between pages. The writer is always closed through the `fz_try` wrapper, also
-/// when stopping, and a part file left by a stop or a failure is deleted.
+/// when stopping, and a part file left by a stop or a failure is deleted. Built with the `docx`
+/// feature only.
+#[cfg(feature = "docx")]
 fn export_word(
     doc: &PdfDocument,
     output: &Path,
@@ -434,6 +438,11 @@ fn execute(
                 });
                 progress(2, 2);
             }
+            #[cfg(not(feature = "docx"))]
+            ToolJob::ExportWord { .. } => {
+                return Err("Export as Word is not part of this build".to_owned());
+            }
+            #[cfg(feature = "docx")]
             ToolJob::ExportWord { output } => {
                 let source = open(&MergeInput::Current, run.current.as_ref())?;
                 let part =

@@ -581,3 +581,26 @@ Report both to mupdf-rs with a reproduction. For the first, the helpers could sk
 operation when one is already open (MuPDF's journal tells through `pdf_undoredo_state`'s nesting
 only indirectly, so a flag on `PdfDocument` may be simpler); for the second, transform the rectangle
 through the inverse of `pdf_page_transform`, as fa-pdf does.
+
+---
+
+## 16. Export as Word that keeps the page layout
+
+**Labels:** `feature`, `pdf`
+
+### Problem Statement
+
+Export as Word (Plan 0005 Phase 5) goes through MuPDF's DOCX writer, the `extract` library. It
+writes the text as flowing columns: a line with a heading on the left and a date on the right
+becomes two paragraphs far apart, and tables made of positioned text (no rules) come out cell after
+cell. Its layout analysis option (`analyse=yes`) is worse. The maintainer's CV lost its layout. The
+feature is therefore built only with the `docx` Cargo feature, off by default.
+
+### Proposed Solution
+
+A plan of its own, starting with research: a DOCX writer of ours built from MuPDF's structured text
+(lines with positions, fonts and sizes) and its vector paths (rules, cell borders), which keeps
+lines on one baseline together with tab stops, detects tables from rules and from aligned
+columns, tells real text columns apart, and keeps fonts, sizes and bold. Measure it against real
+documents (CVs, reports, forms, two-column articles) before switching the feature on.
+

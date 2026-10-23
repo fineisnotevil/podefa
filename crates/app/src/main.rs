@@ -226,6 +226,8 @@ slint::slint! {
         in-out property <bool> editable: false;
         // MuPDF repaired the open file (Plan 0005 Phase 4): File offers a repaired copy.
         in-out property <bool> repaired: false;
+        // Export as Word is in the build only with the `docx` feature (Plan 0005 Phase 5).
+        in-out property <bool> word-export: false;
         in-out property <bool> dirty: false;
         in-out property <int> tool: 0;
         in-out property <int> colour-index: 0;
@@ -536,7 +538,7 @@ slint::slint! {
                     enabled: !root.tool-running;
                     activated => { root.images_to_pdf(); }
                 }
-                MenuItem {
+                if root.word-export : MenuItem {
                     title: "Export as Word...";
                     enabled: root.total_pages > 0 && root.editable && !root.tool-running;
                     activated => { root.export_word(); }
@@ -4893,6 +4895,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .map(|c| slint::Color::from_rgb_f32(c.r, c.g, c.b))
         .collect();
     main_window.set_swatches(ModelRc::new(VecModel::from(swatches)));
+    main_window.set_word_export(cfg!(feature = "docx"));
     let merge_model = Rc::new(VecModel::<SharedString>::default());
     main_window.set_merge_files(ModelRc::from(merge_model.clone()));
 

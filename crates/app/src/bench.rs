@@ -151,7 +151,8 @@ pub struct Cfg {
     /// `--bench-convert`: compress the open document (lossless), export two pages as PNG, make a
     /// PDF of those images and open it, checking the page order from the page sizes; reports
     /// `t_tool` for each (Plan 0005 Phase 4, rows AE and AF); then exports that PDF as Word (Phase
-    /// 5). Same documents as `--bench-pages`; writes `bench_compressed.pdf`, `bench_img_*.png`,
+    /// 5, with the `docx` feature). Same documents as `--bench-pages`; writes `bench_compressed.pdf`,
+    /// `bench_img_*.png`,
     /// `bench_images.pdf` and `bench_images.docx` next to the document.
     pub convert: bool,
 }
@@ -2522,14 +2523,16 @@ impl Driver {
                             order_str(2, vec!["5".to_owned(), "0".to_owned()]),
                             page_order(),
                         );
-                        // Phase 5: that PDF as Word.
-                        let _ = std::fs::remove_file(dir.join("bench_images.docx"));
-                        start(pdf_core::tools::ToolJob::ExportWord {
-                            output: dir.join("bench_images.docx"),
-                        });
-                        self.tools_wait = done + 1;
+                        // Phase 5: that PDF as Word, in a build with it.
+                        if cfg!(feature = "docx") {
+                            let _ = std::fs::remove_file(dir.join("bench_images.docx"));
+                            start(pdf_core::tools::ToolJob::ExportWord {
+                                output: dir.join("bench_images.docx"),
+                            });
+                            self.tools_wait = done + 1;
+                        }
                     }
-                    5 => {
+                    5 if cfg!(feature = "docx") => {
                         let docx = std::fs::read(dir.join("bench_images.docx")).unwrap_or_default();
                         check(
                             "exported as Word",
