@@ -55,6 +55,9 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
     /// Whether the sidebar (thumbnails and outline) is shown.
     pub sidebar: bool,
+    /// Whether form fields are left unshaded. By default they are shaded on the page, so they can
+    /// be seen before they are touched (Plan 0006).
+    pub plain_fields: bool,
     /// The author written into new annotations. `None` writes none: nothing personal goes into a
     /// shared file unless the user typed it here (Plan 0004 §0, question 5).
     pub author: Option<String>,
@@ -77,6 +80,11 @@ impl Settings {
                 "sidebar" => match value.trim() {
                     "1" | "true" => settings.sidebar = true,
                     "0" | "false" => settings.sidebar = false,
+                    _ => {}
+                },
+                "field_highlight" => match value.trim() {
+                    "1" | "true" => settings.plain_fields = false,
+                    "0" | "false" => settings.plain_fields = true,
                     _ => {}
                 },
                 "theme" => {
@@ -112,6 +120,11 @@ impl Settings {
             "sidebar=1\n"
         } else {
             "sidebar=0\n"
+        });
+        out.push_str(if self.plain_fields {
+            "field_highlight=0\n"
+        } else {
+            "field_highlight=1\n"
         });
         if let Some(author) = self.author.as_deref().filter(|a| !a.contains(['\n', '\r'])) {
             out.push_str("author=");
@@ -150,6 +163,7 @@ mod tests {
         let mut settings = Settings {
             theme: Theme::Dark,
             sidebar: true,
+            plain_fields: true,
             ..Settings::default()
         };
         settings.opened(Path::new("C:\\docs\\a.pdf"));

@@ -137,6 +137,7 @@ pub(crate) fn fields(page: &PdfPage) -> Vec<FieldInfo> {
                     .flatten()
                     .and_then(|m| m.as_int().ok())
                     .and_then(|m| u32::try_from(m).ok()),
+                comb: flags.contains(F::COMB),
                 font_size: font_size(&da),
                 tooltip: text(dict.get_dict_inheritable("TU").ok().flatten()),
             })

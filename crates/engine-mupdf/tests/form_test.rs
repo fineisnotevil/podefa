@@ -86,8 +86,12 @@ fn the_fields_are_read_with_their_kinds_options_and_states() {
             ("total", FieldKind::Text),
             ("signature", FieldKind::Signature),
             ("shared", FieldKind::Text),
+            ("code", FieldKind::Text),
         ]
     );
+    let code = field(&fields, "code");
+    assert_eq!((code.comb, code.comb_cells()), (true, Some(6)));
+    assert!(!field(&fields, "name").comb);
     // Rectangles in page space: "name" is 20 points high, 72 from the top.
     let name = field(&fields, "name");
     assert_eq!(

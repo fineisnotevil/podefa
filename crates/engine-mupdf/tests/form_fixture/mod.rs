@@ -4,8 +4,8 @@
 //! A generated AcroForm for the form tests and `forms_bench` (Plan 0006). Page 1 has every field
 //! type: a text field, a multi-line one, a check box, a radio group of two, a combo box with
 //! Turkish options, a multi-select list, two numbers and a read-only total with a calculation
-//! script, an unsigned signature field and the first widget of "shared"; page 2 has the second
-//! widget of "shared" (a field on two pages).
+//! script, an unsigned signature field, the first widget of "shared" and a comb field of six boxes
+//! ("code"); page 2 has the second widget of "shared" (a field on two pages).
 
 #![allow(dead_code)]
 
@@ -44,13 +44,13 @@ pub fn form_pdf() -> Vec<u8> {
         // 1 catalog, 2 pages, 3 form, 4 page.
         "<< /Type /Catalog /Pages 2 0 R /AcroForm 3 0 R >>".into(),
         "<< /Type /Pages /Kids [4 0 R 23 0 R] /Count 2 >>".into(),
-        "<< /Fields [5 0 R 6 0 R 7 0 R 19 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 20 0 R 24 0 R] \
+        "<< /Fields [5 0 R 6 0 R 7 0 R 19 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 20 0 R 24 0 R 27 0 R] \
          /DR << /Font << /Helv 15 0 R >> >> /DA (/Helv 0 Tf 0 g) /CO [14 0 R] >>"
             .into(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 16 0 R \
          /Resources << /Font << /Helv 15 0 R >> >> \
          /Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 20 0 R \
-         25 0 R] >>"
+         25 0 R 27 0 R] >>"
             .into(),
         // 5 name, 6 notes (multi-line), 7 agree (check box).
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /Rect [150 700 400 720] /P 4 0 R /F 4 \
@@ -121,6 +121,10 @@ pub fn form_pdf() -> Vec<u8> {
         "<< /Type /Annot /Subtype /Widget /Parent 24 0 R /Rect [150 220 400 240] /P 4 0 R /F 4 >>"
             .into(),
         "<< /Type /Annot /Subtype /Widget /Parent 24 0 R /Rect [150 700 400 720] /P 23 0 R /F 4 >>"
+            .into(),
+        // 27 code: a comb field, six characters in six boxes.
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (code) /Ff 16777216 /MaxLen 6 \
+         /Rect [420 700 570 720] /P 4 0 R /F 4 /DA (/Helv 11 Tf 0 g) >>"
             .into(),
     ];
     let mut out = b"%PDF-1.7\n".to_vec();

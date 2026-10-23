@@ -113,6 +113,15 @@ slint::slint! {
         current: bool,
     }
 
+    // One form field's shading on the page, in canvas logical pixels (Plan 0006).
+    export struct FieldView {
+        x: length,
+        y: length,
+        w: length,
+        h: length,
+        required: bool,
+    }
+
     export component MainWindow inherits Window {
         title: root.doc-title == "" ? "PODEFA - PDF Viewer"
             : (root.dirty ? "*" : "") + root.doc-title + " - PODEFA";
@@ -211,6 +220,12 @@ slint::slint! {
         in-out property <string> field-editor-text;
         in-out property <bool> field-editor-multiline: false;
         in-out property <bool> field-editor-password: false;
+        // A comb field's boxes (0: not a comb field) and the character in each.
+        in-out property <int> field-editor-cells: 0;
+        in-out property <[string]> field-editor-chars;
+        // Every fillable field of the near pages, shaded unless the user turned it off.
+        in-out property <[FieldView]> field-rects;
+        in-out property <bool> field-highlight: true;
         in-out property <bool> field-choices-visible: false;
         in-out property <[string]> field-choices;
         in-out property <int> field-choice-selected: -1;
@@ -367,6 +382,8 @@ slint::slint! {
         callback field_commit();
         callback field_cancel();
         callback field_choose(int);
+        callback field_edited(string);
+        callback toggle_field_highlight();
         callback stamp_open(int);
         callback stamp_apply();
         callback stamp_close();
@@ -588,6 +605,12 @@ slint::slint! {
                     checked: root.sidebar-visible;
                     shortcut: @keys(F4);
                     activated => { root.toggle_sidebar(); }
+                }
+                MenuItem {
+                    title: "Highlight Form Fields";
+                    checkable: true;
+                    checked: root.field-highlight;
+                    activated => { root.toggle_field_highlight(); }
                 }
                 Menu {
                     title: "Theme";
@@ -1085,6 +1108,16 @@ slint::slint! {
                         x: tile.x; y: tile.y; width: tile.w; height: tile.h;
                     }
 
+                    // Form fields over the tiles, so they show before they are touched; a required
+                    // field has a red edge.
+                    for field in root.field-rects : Rectangle {
+                        visible: root.field-highlight;
+                        x: field.x; y: field.y; width: field.w; height: field.h;
+                        background: rgba(64, 128, 255, 0.16);
+                        border-width: 1px;
+                        border-color: field.required ? rgba(220, 38, 38, 0.85) : rgba(64, 128, 255, 0.5);
+                    }
+
                     // Search hits over the tiles: page-relative rectangles placed like tiles.
                     for hit in root.hit-rects : Rectangle {
                         x: hit.x; y: hit.y; width: hit.w; height: hit.h;
@@ -1270,10 +1303,39 @@ slint::slint! {
                             vertical-alignment: root.field-editor-multiline
                                 ? TextVerticalAlignment.top : TextVerticalAlignment.center;
                             input-type: root.field-editor-password ? InputType.password : InputType.text;
-                            color: #000000;
+                            // A comb field's characters are drawn in their boxes below.
+                            color: root.field-editor-cells > 0 ? transparent : #000000;
+                            selection-background-color: root.field-editor-cells > 0
+                                ? transparent : Palette.selection-background;
+                            edited => { root.field_edited(self.text); }
                             init => {
                                 self.focus();
                                 self.select-all();
+                            }
+                        }
+                        // A comb field: one character in each box, the next box to fill outlined.
+                        if root.field-editor-cells > 0 : Rectangle {
+                            property <length> cell: self.width / root.field-editor-cells;
+                            for i in root.field-editor-cells - 1 : Rectangle {
+                                x: (i + 1) * parent.cell;
+                                width: 1px;
+                                background: rgba(37, 99, 235, 0.25);
+                            }
+                            for ch[i] in root.field-editor-chars : Text {
+                                x: i * parent.cell;
+                                width: parent.cell;
+                                height: parent.height;
+                                text: ch;
+                                font-size: root.field-editor-font-size;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                color: #000000;
+                            }
+                            Rectangle {
+                                x: min(root.field-editor-chars.length, root.field-editor-cells - 1) * parent.cell;
+                                width: parent.cell;
+                                border-width: 2px;
+                                border-color: Palette.accent-background;
                             }
                         }
                     }
@@ -2226,6 +2288,8 @@ struct AppState {
     fields_pending: HashSet<u32>,
     field_edit: Option<fields_ui::FieldEdit>,
     form: pdf_core::form::FormSummary,
+    field_model: Rc<VecModel<FieldView>>,
+    field_rows: Vec<(f32, f32, f32, f32, bool)>,
     /// Pages chosen in the thumbnails for a page operation (Plan 0005 Phase 1), the row a Shift+click
     /// range starts from, and the pages a thumbnail drag is moving.
     page_sel: std::collections::BTreeSet<u32>,
@@ -2403,6 +2467,7 @@ impl AppState {
         self.apply(ui, actions);
         self.update_pages(ui);
         self.update_hits(ui);
+        self.update_field_rects(ui);
         self.update_selection(ui);
         self.update_annot_selection(ui);
 
@@ -5025,6 +5090,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .unwrap_or_default();
     main_window.set_theme(theme_index(settings.theme));
     main_window.set_sidebar_visible(settings.sidebar);
+    main_window.set_field_highlight(!settings.plain_fields);
     let thumbs_model = Rc::new(VecModel::<ThumbRow>::default());
     main_window.set_thumbs(ModelRc::from(thumbs_model.clone()));
     let outline_model = Rc::new(VecModel::<OutlineRow>::default());
@@ -5035,6 +5101,8 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.set_sel_rects(ModelRc::from(sel_model.clone()));
     let annot_sel_model = Rc::new(VecModel::<HitView>::default());
     main_window.set_annot_sel_rects(ModelRc::from(annot_sel_model.clone()));
+    let field_model = Rc::new(VecModel::<FieldView>::default());
+    main_window.set_field_rects(ModelRc::from(field_model.clone()));
     let swatches: Vec<slint::Color> = PALETTE
         .iter()
         .map(|c| slint::Color::from_rgb_f32(c.r, c.g, c.b))
@@ -5126,6 +5194,8 @@ fn main() -> Result<(), slint::PlatformError> {
             fields_pending: HashSet::new(),
             field_edit: None,
             form: pdf_core::form::FormSummary::default(),
+            field_model,
+            field_rows: Vec::new(),
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             page_sel: std::collections::BTreeSet::new(),
@@ -5284,7 +5354,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     generation,
                     items,
                 } => {
-                    with_state(|state| state.apply_fields(page, generation, items));
+                    with_state(|state| state.apply_fields(&ui, page, generation, items));
                 }
                 EngineEvent::PageChanged {
                     generation,
@@ -5714,21 +5784,37 @@ fn main() -> Result<(), slint::PlatformError> {
         });
         main_window.on_cancel_tool(|| with_state(|state| state.cancel_tool()));
         let weak = main_window.as_weak();
+        // When the editor or the options close, the keys go back to the page (Ctrl+Z, arrows).
         main_window.on_field_commit(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.field_commit(&ui));
+                ui.invoke_focus_viewport();
             }
         });
         let weak = main_window.as_weak();
         main_window.on_field_cancel(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.field_cancel(&ui));
+                ui.invoke_focus_viewport();
             }
         });
         let weak = main_window.as_weak();
         main_window.on_field_choose(move |index| {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.field_choose(&ui, index));
+                ui.invoke_focus_viewport();
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_field_edited(move |text| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.field_edited(&ui, &text));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_toggle_field_highlight(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.toggle_field_highlight(&ui));
             }
         });
         let weak = main_window.as_weak();

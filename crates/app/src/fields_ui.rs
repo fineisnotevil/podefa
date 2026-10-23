@@ -9,7 +9,7 @@
 //! click on a choice field opens its options under it. Each committed value is one edit, so one
 //! undo step.
 
-use crate::{AppState, MainWindow, Tool};
+use crate::{AppState, FieldView, MainWindow, Tool};
 use pdf_core::EngineCmd;
 use pdf_core::annot::EditOp;
 use pdf_core::form::{FieldInfo, FieldKind, clip_to_max_len, editor_font_size, hit};
@@ -44,21 +44,80 @@ impl AppState {
 
     /// A page's fields arrived; one about a previous layout, or a page no longer asked for, is
     /// dropped.
-    pub(crate) fn apply_fields(&mut self, page: u32, generation: u64, items: Vec<FieldInfo>) {
+    pub(crate) fn apply_fields(
+        &mut self,
+        ui: &MainWindow,
+        page: u32,
+        generation: u64,
+        items: Vec<FieldInfo>,
+    ) {
         if generation == self.layout_generation && self.fields_pending.remove(&page) {
             self.fields.insert(page, items);
+            self.update_field_rects(ui);
         }
     }
 
-    /// A page's content changed (a fill, an undo): its fields are asked for again.
+    /// A page's content changed (a fill, an undo): its fields are asked for again. The ones known
+    /// stay until the answer, so the page's shading does not blink.
     pub(crate) fn fields_changed(&mut self, page: u32) {
-        if self.fields.remove(&page).is_some() || self.fields_pending.remove(&page) {
+        if self.fields.contains_key(&page) || self.fields_pending.remove(&page) {
             self.fields_pending.insert(page);
             let _ = self.cmd_tx.send(EngineCmd::Fields {
                 page,
                 generation: self.layout_generation,
             });
         }
+    }
+
+    /// The shading of every fillable field on the near pages, placed like the search hits.
+    pub(crate) fn update_field_rects(&mut self, ui: &MainWindow) {
+        let near = self.near_pages(ui);
+        let s = self.scale_milli as f64 / 1000.0;
+        let sf = self.sf() as f32;
+        let mut rows = Vec::new();
+        let mut pages: Vec<_> = self
+            .fields
+            .iter()
+            .filter(|(page, _)| near.contains(&(**page as usize)))
+            .collect();
+        pages.sort_unstable_by_key(|(page, _)| **page);
+        for (&page, fields) in pages {
+            let Some(slot) = self.layout.slot(page as usize) else {
+                continue;
+            };
+            for field in fields.iter().filter(|f| f.fillable()) {
+                let r = field.rect;
+                rows.push((
+                    self.canvas_x(slot.x as f64 + r.x as f64 * s),
+                    self.canvas_y(slot.y as f64 + r.y as f64 * s),
+                    (r.width as f64 * s) as f32 / sf,
+                    (r.height as f64 * s) as f32 / sf,
+                    field.required,
+                ));
+            }
+        }
+        if rows == self.field_rows {
+            return;
+        }
+        let views: Vec<FieldView> = rows
+            .iter()
+            .map(|&(x, y, w, h, required)| FieldView {
+                x,
+                y,
+                w,
+                h,
+                required,
+            })
+            .collect();
+        self.field_model.set_vec(views);
+        self.field_rows = rows;
+    }
+
+    /// View > Highlight Form Fields: shows or hides the shading, and remembers the choice.
+    pub(crate) fn toggle_field_highlight(&mut self, ui: &MainWindow) {
+        self.settings.plain_fields = !self.settings.plain_fields;
+        ui.set_field_highlight(!self.settings.plain_fields);
+        self.save_settings();
     }
 
     /// The fillable field widget under a page point.
@@ -157,6 +216,8 @@ impl AppState {
         ui.set_field_editor_text(SharedString::from(field.value.as_str()));
         ui.set_field_editor_multiline(field.multiline);
         ui.set_field_editor_password(field.password);
+        ui.set_field_editor_cells(field.comb_cells().map_or(0, |n| n as i32));
+        set_comb_chars(ui, &field.value);
         self.field_edit = Some(FieldEdit { page, field });
         self.place_field_editor(ui);
         ui.set_field_editor_visible(true);
@@ -181,6 +242,7 @@ impl AppState {
             ui.set_field_editor_text(SharedString::from(field.value.as_str()));
             ui.set_field_editor_multiline(false);
             ui.set_field_editor_password(false);
+            ui.set_field_editor_cells(0);
         }
         self.field_edit = Some(FieldEdit { page, field });
         self.place_field_editor(ui);
@@ -227,6 +289,21 @@ impl AppState {
         }
     }
 
+    /// The editor's text changed: it is held to the field's maximum length as it is typed, and a
+    /// comb field's boxes follow it.
+    pub(crate) fn field_edited(&mut self, ui: &MainWindow, text: &str) {
+        let Some(edit) = self.field_edit.as_ref() else {
+            return;
+        };
+        let clipped = clip_to_max_len(text, edit.field.max_len);
+        if clipped != text {
+            ui.set_field_editor_text(SharedString::from(clipped.as_str()));
+        }
+        if ui.get_field_editor_cells() > 0 {
+            set_comb_chars(ui, &clipped);
+        }
+    }
+
     /// Esc: the field keeps its value.
     pub(crate) fn field_cancel(&mut self, ui: &MainWindow) {
         self.field_edit = None;
@@ -249,4 +326,13 @@ impl AppState {
             self.fill_field(edit.page, &edit.field.name, option.export.clone());
         }
     }
+}
+
+/// The characters of a comb field's text, one per box.
+fn set_comb_chars(ui: &MainWindow, text: &str) {
+    let chars: Vec<SharedString> = text
+        .chars()
+        .map(|c| SharedString::from(c.to_string()))
+        .collect();
+    ui.set_field_editor_chars(Rc::new(VecModel::from(chars)).into());
 }

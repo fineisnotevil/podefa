@@ -56,6 +56,8 @@ pub struct FieldInfo {
     pub multi_select: bool,
     /// The most characters a text field takes.
     pub max_len: Option<u32>,
+    /// A text field drawn as a row of boxes, one character in each (`Comb`, with `max_len` boxes).
+    pub comb: bool,
     /// The text size in points the field's appearance uses; 0 means "fit the field".
     pub font_size: f32,
     /// The field's description for the user (`/TU`).
@@ -91,6 +93,15 @@ impl FieldInfo {
             FieldKind::CheckBox | FieldKind::Radio => Some(on),
             _ => None,
         }
+    }
+
+    /// The number of boxes of a comb field: one character in each, the field's width split evenly.
+    /// `None` for any other field; PDF ignores the flag on multi-line and password fields and
+    /// without a maximum length (ISO 32000-2, 12.7.5.3).
+    pub fn comb_cells(&self) -> Option<u32> {
+        self.max_len.filter(|&n| {
+            n > 0 && self.comb && self.kind == FieldKind::Text && !self.multiline && !self.password
+        })
     }
 
     /// The text a choice field shows for its value: the option's label, or the value itself.
@@ -166,9 +177,24 @@ mod tests {
             editable: false,
             multi_select: false,
             max_len: None,
+            comb: false,
             font_size: 0.0,
             tooltip: None,
         }
+    }
+
+    #[test]
+    fn a_comb_field_has_one_box_per_character_it_takes() {
+        let mut vin = field(FieldKind::Text, "", None);
+        vin.comb = true;
+        assert_eq!(vin.comb_cells(), None, "no maximum length, no boxes");
+        vin.max_len = Some(17);
+        assert_eq!(vin.comb_cells(), Some(17));
+        vin.multiline = true;
+        assert_eq!(vin.comb_cells(), None);
+        vin.multiline = false;
+        vin.comb = false;
+        assert_eq!(vin.comb_cells(), None);
     }
 
     #[test]

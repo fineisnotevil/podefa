@@ -1493,3 +1493,7 @@ target\release\app.exe target\tmp\bench_form.pdf --bench-forms --bench-step-ms 4
 of `tests/form_fixture`.) Clicking the check box, the second radio button, typing
 "Öğüt Şükrü İnce" into the editor over the name field and choosing the third city, then undoing all
 four: 8 of 8 checks. `t_fill` min 3, median 7, max 13 ms (n = 4).
+
+After the maintainer's review (same day): the bench clicks and types through the window's input
+path (`dispatch_event`, the button held 150 ms on the text field) and checks the field shading and
+a comb field: 11 of 11, in three runs.

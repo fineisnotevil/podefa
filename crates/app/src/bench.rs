@@ -1703,6 +1703,8 @@ struct Driver {
     /// how long it waits.
     form_expect: Option<(&'static str, &'static str, String)>,
     form_deadline: Instant,
+    /// Where and when the forms bench pressed the button down.
+    form_press: Option<(LogicalPosition, Instant)>,
 }
 
 /// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
@@ -2498,9 +2500,13 @@ impl Driver {
                     });
                     out
                 };
+                // One click through the window's input path, as the user's reaches the page.
                 let click = |(x, y): (f32, f32)| {
-                    ui.invoke_select_pointer(0, x, y, false, false);
-                    ui.invoke_select_pointer(1, x, y, false, false);
+                    let position = LogicalPosition::new(
+                        ui.get_viewport_abs_x() + x,
+                        ui.get_viewport_abs_y() + y,
+                    );
+                    click_at(ui, position);
                 };
                 // Each step waits for the value the last one expects.
                 if let Some((name, field, expected)) = self.form_expect.take() {
@@ -2522,6 +2528,13 @@ impl Driver {
                         if value("agree").is_none() {
                             return false;
                         }
+                        // Every fillable field of the near pages is shaded before anything is clicked: 11 on
+                        // page 1 and "shared" on page 2.
+                        check(
+                            "fields shaded before a click",
+                            "12".into(),
+                            ui.get_field_rects().row_count().to_string(),
+                        );
                         let Some(at) = centre("agree", 0) else {
                             self.settle();
                             return false;
@@ -2537,23 +2550,52 @@ impl Driver {
                         click(at);
                         expect(self, "click the second radio button", "choice", "b");
                     }
+                    // A click as a hand makes one: the button stays down for 150 ms, longer than
+                    // the Flickable holds a press back to see whether it becomes a drag.
                     2 => {
-                        let Some(at) = centre("name", 0) else {
+                        let Some((x, y)) = centre("name", 0) else {
                             self.settle();
                             return false;
                         };
-                        click(at);
+                        let position = LogicalPosition::new(
+                            ui.get_viewport_abs_x() + x,
+                            ui.get_viewport_abs_y() + y,
+                        );
+                        ui.window()
+                            .dispatch_event(WindowEvent::PointerMoved { position });
+                        ui.window().dispatch_event(WindowEvent::PointerPressed {
+                            position,
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                        self.form_press = Some((position, Instant::now()));
+                    }
+                    3 => {
+                        let Some((position, at)) = self.form_press else {
+                            return false;
+                        };
+                        if at.elapsed() < Duration::from_millis(150) {
+                            return false;
+                        }
+                        ui.window().dispatch_event(WindowEvent::PointerReleased {
+                            position,
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                    }
+                    4 => {
                         let open = ui.get_field_editor_visible();
                         check(
                             "the editor opens over the field",
                             "true".into(),
                             open.to_string(),
                         );
-                        ui.set_field_editor_text("Öğüt Şükrü İnce".into());
-                        ui.invoke_field_commit();
+                        // Typed through the window: the editor has the keyboard after one click.
+                        for c in "Öğüt Şükrü İnce".chars() {
+                            press(ui, c.to_string().into());
+                        }
+                        press(ui, Key::Return.into());
                         expect(self, "type Turkish text, Enter", "name", "Öğüt Şükrü İnce");
                     }
-                    3 => {
+                    5 => {
                         let Some(at) = centre("city", 0) else {
                             self.settle();
                             return false;
@@ -2568,13 +2610,37 @@ impl Driver {
                         ui.invoke_field_choose(2);
                         expect(self, "choose the third city", "city", "Muğla");
                     }
-                    4 => {
+                    // A comb field: the typed characters land one per box, and no more than it takes.
+                    6 => {
+                        let Some(at) = centre("code", 0) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        for c in "AB12345".chars() {
+                            press(ui, c.to_string().into());
+                        }
+                        let boxes: Vec<String> = ui
+                            .get_field_editor_chars()
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect();
+                        check(
+                            "comb boxes as typed",
+                            "6:A,B,1,2,3,4".into(),
+                            format!("{}:{}", ui.get_field_editor_cells(), boxes.join(",")),
+                        );
+                        press(ui, Key::Return.into());
+                        expect(self, "comb field filled", "code", "AB1234");
+                    }
+                    7 => {
+                        with_modifier(ui, Key::Control, || press(ui, "z".into()));
                         for _ in 0..4 {
                             with_modifier(ui, Key::Control, || press(ui, "z".into()));
                         }
                         expect(self, "undo all four (check box off)", "agree", "Off");
                     }
-                    5 => {
+                    8 => {
                         check(
                             "undo all four (name empty)",
                             String::new(),
@@ -3588,6 +3654,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             base_size: String::new(),
             form_expect: None,
             form_deadline: Instant::now(),
+            form_press: None,
         });
     });
 
