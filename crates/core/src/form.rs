@@ -39,7 +39,11 @@ pub struct FieldInfo {
     pub name: String,
     pub kind: FieldKind,
     /// The field's value: text, a choice's export value, or a button's state (`Off` when off).
+    /// For a list with several choices, the first of them.
     pub value: String,
+    /// A choice field's chosen export values, in the file's order: one for a combo box or a
+    /// single-choice list, any number for a multi-select list (Plan 0006 Phase 2).
+    pub values: Vec<String>,
     /// The widget's rectangle in page space (points from the page's top left).
     pub rect: Rect,
     /// A check box's or radio button's "on" state for this widget (`Yes`, `1`, a button's own
@@ -62,6 +66,8 @@ pub struct FieldInfo {
     pub font_size: f32,
     /// The field's description for the user (`/TU`).
     pub tooltip: Option<String>,
+    /// The widget's place in its page's tab order (`/Tabs`), from 0.
+    pub tab: u32,
 }
 
 impl FieldInfo {
@@ -127,6 +133,72 @@ pub struct FormSummary {
 /// The state of a check box or radio button that is off.
 pub const OFF: &str = "Off";
 
+/// The order Tab visits a page's widgets in, from the page's `/Tabs` (ISO 32000-2, 12.5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabOrder {
+    /// The order of the page's annotations (no `/Tabs`, or `/S`: structure order, which falls back
+    /// to it here as a tagged document's structure is not read).
+    #[default]
+    Annotations,
+    /// Row by row, top to bottom; left to right in a row (`/R`).
+    Rows,
+    /// Column by column, left to right; top to bottom in a column (`/C`).
+    Columns,
+}
+
+/// Each widget's place in the tab order, given the widgets' rectangles in annotation order.
+/// Widgets whose rectangles overlap by at least half the shorter one's height are on one row (for
+/// columns: width), so fields drawn a fraction of a point apart stay in reading order.
+pub fn tab_places(rects: &[Rect], order: TabOrder) -> Vec<u32> {
+    let mut seq: Vec<usize> = (0..rects.len()).collect();
+    // (across, along): rows are found down the page and read across it; columns the other way.
+    let key = |r: &Rect| match order {
+        TabOrder::Rows => (r.y, r.height, r.x),
+        TabOrder::Columns => (r.x, r.width, r.y),
+        TabOrder::Annotations => (0.0, 0.0, 0.0),
+    };
+    if order != TabOrder::Annotations {
+        seq.sort_by(|&a, &b| key(&rects[a]).0.total_cmp(&key(&rects[b]).0));
+        // Group into bands, then read each band along.
+        let mut bands: Vec<Vec<usize>> = Vec::new();
+        let mut band_end = f32::NEG_INFINITY;
+        for i in seq {
+            let (start, size, _) = key(&rects[i]);
+            match bands.last_mut() {
+                Some(band) if band_end - start >= size / 2.0 => {
+                    band.push(i);
+                    band_end = band_end.max(start + size);
+                }
+                _ => {
+                    bands.push(vec![i]);
+                    band_end = start + size;
+                }
+            }
+        }
+        seq = bands
+            .into_iter()
+            .flat_map(|mut band| {
+                band.sort_by(|&a, &b| key(&rects[a]).2.total_cmp(&key(&rects[b]).2));
+                band
+            })
+            .collect();
+    }
+    let mut places = vec![0; rects.len()];
+    for (place, i) in seq.into_iter().enumerate() {
+        places[i] = place as u32;
+    }
+    places
+}
+
+/// The fillable widgets of a page in tab order, as indices into `fields`.
+pub fn tab_sequence(fields: &[FieldInfo]) -> Vec<usize> {
+    let mut seq: Vec<usize> = (0..fields.len())
+        .filter(|&i| fields[i].fillable())
+        .collect();
+    seq.sort_by_key(|&i| fields[i].tab);
+    seq
+}
+
 /// The widget under a page point, the topmost (last drawn) first.
 pub fn hit(fields: &[FieldInfo], x: f32, y: f32) -> Option<usize> {
     fields.iter().rposition(|f| {
@@ -180,7 +252,39 @@ mod tests {
             comb: false,
             font_size: 0.0,
             tooltip: None,
+            values: Vec::new(),
+            tab: 0,
         }
+    }
+
+    #[test]
+    fn rows_read_across_and_tolerate_a_fraction_of_a_point() {
+        // Annotation order: lower right, upper right, upper left (0.2 pt lower), lower left.
+        let rects = [
+            Rect::new(300.0, 100.0, 50.0, 16.0),
+            Rect::new(300.0, 20.0, 50.0, 16.0),
+            Rect::new(10.0, 20.2, 50.0, 16.0),
+            Rect::new(10.0, 100.0, 50.0, 16.0),
+        ];
+        assert_eq!(tab_places(&rects, TabOrder::Annotations), [0, 1, 2, 3]);
+        // Rows: upper left, upper right, lower left, lower right.
+        assert_eq!(tab_places(&rects, TabOrder::Rows), [3, 1, 0, 2]);
+        // Columns: upper left, lower left, upper right, lower right.
+        assert_eq!(tab_places(&rects, TabOrder::Columns), [3, 2, 0, 1]);
+    }
+
+    #[test]
+    fn the_tab_sequence_skips_what_cannot_be_filled() {
+        let mut fields: Vec<FieldInfo> = (0..4)
+            .map(|i| {
+                let mut f = field(FieldKind::Text, "", None);
+                f.tab = 3 - i;
+                f
+            })
+            .collect();
+        fields[1].read_only = true;
+        fields[2].kind = FieldKind::Signature;
+        assert_eq!(tab_sequence(&fields), [3, 0]);
     }
 
     #[test]

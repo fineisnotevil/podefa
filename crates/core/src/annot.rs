@@ -230,6 +230,20 @@ pub enum EditOp {
         name: String,
         value: String,
     },
+    /// Sets the chosen entries of a multi-select list (Plan 0006 Phase 2): export values, in the
+    /// order of the list's options; none clears it.
+    SetChoices {
+        page: u32,
+        name: String,
+        values: Vec<String>,
+    },
+    /// Puts one field back to its default value (`/DV`; empty or off without one).
+    ResetField {
+        page: u32,
+        name: String,
+    },
+    /// Puts every field of the form back to its default value; read-only fields are left alone.
+    ResetForm,
 }
 
 impl EditOp {
@@ -250,7 +264,9 @@ impl EditOp {
             Self::AddInk { .. } => "Ink",
             Self::Pages(op) => op.title(),
             Self::SetMetadata(_) => "Document properties",
-            Self::SetField { .. } => "Fill field",
+            Self::SetField { .. } | Self::SetChoices { .. } => "Fill field",
+            Self::ResetField { .. } => "Reset field",
+            Self::ResetForm => "Reset form",
         }
     }
 
@@ -258,7 +274,7 @@ impl EditOp {
     pub fn page(&self) -> u32 {
         match self {
             Self::Pages(op) => op.first_page(),
-            Self::SetMetadata(_) => 0,
+            Self::SetMetadata(_) | Self::ResetForm => 0,
             Self::AddMarkup { page, .. }
             | Self::Delete { page, .. }
             | Self::SetColour { page, .. }
@@ -266,7 +282,9 @@ impl EditOp {
             | Self::SetContents { page, .. }
             | Self::MoveNote { page, .. }
             | Self::AddInk { page, .. }
-            | Self::SetField { page, .. } => *page,
+            | Self::SetField { page, .. }
+            | Self::SetChoices { page, .. }
+            | Self::ResetField { page, .. } => *page,
         }
     }
 }

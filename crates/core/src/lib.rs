@@ -183,6 +183,14 @@ pub enum EngineCmd {
     Annotations { page: u32, generation: u64 },
     /// List a page's form field widgets (Plan 0006). Answered with [`EngineEvent::Fields`].
     Fields { page: u32, generation: u64 },
+    /// Find the next page after `from` (before it when `back`) with a field that can be filled,
+    /// going round the document's end, `from` itself last (Plan 0006 Phase 2: Tab across pages).
+    /// Answered with [`EngineEvent::FieldPage`].
+    NextFieldPage {
+        from: u32,
+        back: bool,
+        generation: u64,
+    },
     /// Apply one edit to the document. The engine answers with [`EngineEvent::PageChanged`] for
     /// the page it changed, then [`EngineEvent::Edited`]; `generation` is the document's, so an
     /// answer about a previous document can be recognised.
@@ -334,6 +342,13 @@ pub enum EngineEvent {
         page: u32,
         generation: u64,
         items: Vec<form::FieldInfo>,
+    },
+    /// The page Tab goes on to (answer to [`EngineCmd::NextFieldPage`]); `None` when no page has
+    /// a field that can be filled.
+    FieldPage {
+        generation: u64,
+        page: Option<u32>,
+        back: bool,
     },
     /// An edit changed a page: it is now at `revision`, with these annotations. Every tile, base
     /// layer and thumbnail of the page rendered from an older revision is out of date.
