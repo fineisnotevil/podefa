@@ -56,7 +56,7 @@ messense/mupdf-rs#267 proposed it and was closed unmerged.
      its layout is not copied into Rust) and `fz_save_pixmap_as_jpeg`. Exposed as
      `PdfDocument::rewrite_images` and `Pixmap::save_as_jpeg`, refused under the same header
      check. Phase 5 adds `fz_close_document_writer` (`DocumentWriter::close`): mupdf-rs closes
-     writers in `Drop`, outside `fz_try`.
+     writers in `Drop`, outside `fz_try`. Upstream pull request: messense/mupdf-rs#276.
 6. **An upstream pull request** adds the same wrappers to mupdf-sys and mupdf-rs (messense/mupdf-rs#273, merged into mupdf-rs `main` as `7aa360d3` on 2026-10-22; no release
    carries it yet). When a release
    carries them, `journal/`, `build.rs` and the pin go.

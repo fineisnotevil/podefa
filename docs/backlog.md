@@ -437,6 +437,10 @@ Three upstream changes are on mupdf-rs `main` but in no release:
 - `cb732cb3`: `TextPage::copy_selection` and `copy_rectangle`, #272.
 - `7aa360d3`: the PDF undo journal, #273.
 
+And one is open: #276 (2026-10-23), `PdfDocument::rewrite_images`, `Pixmap::save_as_jpeg` and
+`DocumentWriter::close`, which fa-pdf carries in `patches/mupdf/journal/tools.c` (Plan 0005
+Phases 4 and 5).
+
 The last two were merged on 2026-10-22. crates.io still has 0.8.0 (2026-06-22), and `main` is 17
 commits past it. Until a release, fa-pdf carries:
 
@@ -452,8 +456,8 @@ commits past it. Until a release, fa-pdf carries:
 
 When a release after 0.8.0 is published:
 
-1. Depend on it and drop `patches/mupdf` (journal, `build.rs`, the headers, the `=0.8.0` pin) and
-   the `[patch.crates-io]` entry.
+1. Depend on it and drop `patches/mupdf` (journal, `tools.c` once #276 is in the release,
+   `build.rs`, the headers, the `=0.8.0` pin) and the `[patch.crates-io]` entry.
 2. Set `MID_RASTER_ABORT = true` and check `abort_safety_test.rs` and `dense_vector.pdf` (item 7).
 3. Decide whether to take MuPDF's `copy_selection` for the copied text (ADR 0006).
 4. Adapt to the API changes between 0.8.0 and the release. Known so far:
