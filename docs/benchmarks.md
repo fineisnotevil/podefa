@@ -1442,3 +1442,35 @@ the PDF made of two images exported as Word in `t_tool` 17 ms; the working set w
 
 Release `app.exe`: 18 697 216 bytes at `8ec028d`, 20 677 632 bytes with the DOCX writer
 (+1.89 MiB).
+
+## 12. Plan 0006: v0.4 forms
+
+### 12.1 Phase 0: an AcroForm through mupdf-rs 0.8
+
+`crates/engine-mupdf/tests/forms_bench.rs` (ignored), release build, 2026-10-23, the §1 machine.
+The form is generated: a text field, a multi-line one, a check box, a radio group of two, a combo
+box with Turkish options, a multi-select list, two numbers and a total with a calculation script,
+and an unsigned signature field (11 widgets). The engine's font loader is installed, as in the app.
+
+```powershell
+cargo test --release -p engine-mupdf --test forms_bench -- --ignored --nocapture
+```
+
+| Step | Time |
+| :--- | ---: |
+| Read the 11 widgets (type, name, value, flags, rectangle) | 2.1 ms |
+| Fill with ASCII text, check box, radio, list, numbers (one journal operation each) | 0.3-0.8 ms |
+| Fill "Öz" (letters in WinAnsi) | 0.4 ms |
+| Fill "Öğüt Şükrü İnce" | 3540 ms (2756 ms in a second run) |
+| Fill two Turkish lines | 2484 ms |
+| Fill "Muğla" in the combo box | 2676 ms |
+| Flatten the filled form (`bake`) | 917 ms |
+| The same three Turkish fills with `serif` / `sans-serif` / `monospace` mapped to built-in fonts (prototype) | 2.12 / 1.37 / 1.32 ms |
+| Flatten with that mapping | 1.32 ms |
+| Incremental save | 2.0 ms |
+| `enable_js` | 1.5-2.7 ms |
+
+Without the engine's loader (`FA_PDF_FORM_NO_LOADER=1`) the Turkish fills took 5643, 2982 and
+2636 ms. The cause is MuPDF asking for a font named `serif` three times per fill (plan 0006
+§3.2). The calculation script did not run (plan §3.3).
+
