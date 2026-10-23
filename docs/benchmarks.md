@@ -1517,3 +1517,17 @@ target\release\app.exe target\tmp\bench_form2.pdf --bench-forms --bench-step-ms 
 - Reset Form and its undo;
 - Tab and Shift+Tab across pages;
 - Tab from one text field to the next, then typing.
+
+### 12.4 Phase 3: flatten, export and import (rows AM, AN)
+
+Engine: `crates/engine-mupdf/tests/form_test.rs`, 14 tests; core: `crates/core/src/form_data.rs`,
+5 tests (plan §5, Phase 3 results).
+
+Through a real window, release build, 2026-10-24, the §1 machine, with the §12.3 command and file.
+The bench writes `bench_form_data.json` beside the document. It passed 35 of 35 checks, in three
+runs:
+
+- Phases 1 and 2's 27;
+- Export Data (JSON) and the file holding the typed value;
+- Reset Form, then Import Data: the text, the check box and the multi-select list come back;
+- Flatten Form: no field left and none shaded; one undo brings the form back.
