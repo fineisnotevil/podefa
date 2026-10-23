@@ -14,13 +14,15 @@
 //! is outlined and Space or Enter sets it; Esc leaves the field. Form > Reset Field and Reset Form
 //! put values back to their defaults.
 
-use crate::{AppState, FieldView, MainWindow, Tool};
+use crate::{AppState, FieldView, MainWindow, Tool, with_state, with_state_ret};
 use pdf_core::EngineCmd;
 use pdf_core::annot::EditOp;
 use pdf_core::form::{FieldInfo, FieldKind, clip_to_max_len, editor_font_size, hit, tab_sequence};
+use pdf_core::form_data::{self, DataFormat};
 use pdf_core::pages::PageMap;
 use pdf_core::select::PagePoint;
 use slint::{Model as _, SharedString, VecModel};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// The field the editor or the options list is open for.
@@ -408,6 +410,73 @@ impl AppState {
         }
     }
 
+    /// Form > Flatten Form (Plan 0006 Phase 3): every field is drawn into its page and the form
+    /// goes, as one undo step.
+    pub(crate) fn flatten_form(&mut self, ui: &MainWindow) {
+        if self.field_edit.is_some() {
+            self.field_cancel(ui);
+        }
+        if self.editable && self.form.fields {
+            self.set_field_focus(ui, None);
+            self.send_edit(EditOp::FlattenForm);
+        }
+    }
+
+    /// Writes every field's value to `path`, as XFDF unless its name ends in `.json`; the engine
+    /// answers with `FormExported`.
+    pub(crate) fn export_form_to(&mut self, path: PathBuf) {
+        let format = DataFormat::from_path(&path).unwrap_or(DataFormat::Xfdf);
+        let _ = self.cmd_tx.send(EngineCmd::ExportForm {
+            path,
+            format,
+            generation: self.doc_generation,
+        });
+    }
+
+    /// The engine wrote the form's values, or could not.
+    pub(crate) fn form_exported(
+        &mut self,
+        ui: &MainWindow,
+        generation: u64,
+        path: &Path,
+        result: Result<usize, String>,
+    ) {
+        if generation != self.doc_generation {
+            return;
+        }
+        let name = file_name(path);
+        match result {
+            Ok(count) => ui.set_status_text(SharedString::from(format!(
+                "Exported {count} field values to \"{name}\""
+            ))),
+            Err(message) => error_box(&format!("Could not export to \"{name}\": {message}")),
+        }
+    }
+
+    /// Reads values from a data file (XFDF unless its name ends in `.json`) and sets the fields
+    /// that take them, as one undo step. Returns how many values the file had, or why it could
+    /// not be read.
+    pub(crate) fn import_form_from(
+        &mut self,
+        ui: &MainWindow,
+        path: &Path,
+    ) -> Result<usize, String> {
+        if self.field_edit.is_some() {
+            self.field_cancel(ui);
+        }
+        let format = DataFormat::from_path(path).unwrap_or(DataFormat::Xfdf);
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let values = form_data::read(text, format).map_err(|e| e.to_string())?;
+        let count = values.len();
+        self.send_edit(EditOp::ImportForm { values });
+        ui.set_status_text(SharedString::from(format!(
+            "Read {count} field values from \"{}\"",
+            file_name(path)
+        )));
+        Ok(count)
+    }
+
     /// The field's rectangle in viewport logical pixels, and the factor from points to them.
     fn field_view_rect(&self, page: u32, field: &FieldInfo) -> Option<(f32, f32, f32, f32, f32)> {
         let slot = self.layout.slot(page as usize)?;
@@ -606,6 +675,62 @@ impl AppState {
 }
 
 /// The characters of a comb field's text, one per box.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+fn error_box(message: &str) {
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("PODEFA")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// Form > Export Data...: asks where, then writes the values (Plan 0006 Phase 3).
+pub(crate) fn export_form_data() {
+    let Some((name, dir)) =
+        with_state_ret(|state| (format!("{}.xfdf", state.doc_stem()), state.doc_dir()))
+    else {
+        return;
+    };
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Export Form Data")
+        .add_filter("XFDF form data", &["xfdf"])
+        .add_filter("JSON", &["json"])
+        .set_file_name(name);
+    if let Some(dir) = dir {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(path) = dialog.save_file() {
+        with_state(|state| state.export_form_to(path));
+    }
+}
+
+/// Form > Import Data...: asks for a file, then sets the fields from it.
+pub(crate) fn import_form_data(ui: &MainWindow) {
+    let dir = with_state_ret(|state| state.doc_dir()).flatten();
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Import Form Data")
+        .add_filter("Form data", &["xfdf", "json", "xml"]);
+    if let Some(dir) = dir {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(path) = dialog.pick_file() else {
+        return;
+    };
+    if let Some(Err(message)) = with_state_ret(|state| state.import_form_from(ui, &path)) {
+        error_box(&format!(
+            "Could not read \"{}\": {message}",
+            file_name(&path)
+        ));
+    }
+}
+
 fn set_comb_chars(ui: &MainWindow, text: &str) {
     let chars: Vec<SharedString> = text
         .chars()

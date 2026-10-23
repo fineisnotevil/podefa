@@ -401,6 +401,9 @@ slint::slint! {
         callback field_tab(bool);
         callback reset_field();
         callback reset_form();
+        callback import_form_data();
+        callback export_form_data();
+        callback flatten_form();
         callback stamp_open(int);
         callback stamp_apply();
         callback stamp_close();
@@ -625,6 +628,23 @@ slint::slint! {
                     title: "Reset Form";
                     enabled: root.editable && root.form-fields;
                     activated => { root.reset_form(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Import Data...";
+                    enabled: root.editable && root.form-fields;
+                    activated => { root.import_form_data(); }
+                }
+                MenuItem {
+                    title: "Export Data...";
+                    enabled: root.form-fields;
+                    activated => { root.export_form_data(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: "Flatten Form";
+                    enabled: root.editable && root.form-fields;
+                    activated => { root.flatten_form(); }
                 }
             }
             Menu {
@@ -5469,6 +5489,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 } => {
                     with_state(|state| state.field_page(&ui, generation, page, back));
                 }
+                EngineEvent::FormExported {
+                    generation,
+                    path,
+                    result,
+                } => {
+                    with_state(|state| state.form_exported(&ui, generation, &path, result));
+                }
                 EngineEvent::PageChanged {
                     generation,
                     page,
@@ -5946,6 +5973,21 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.invoke_focus_viewport();
             }
         });
+        let weak = main_window.as_weak();
+        main_window.on_flatten_form(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.flatten_form(&ui));
+                ui.invoke_focus_viewport();
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_import_form_data(move || {
+            if let Some(ui) = weak.upgrade() {
+                fields_ui::import_form_data(&ui);
+                ui.invoke_focus_viewport();
+            }
+        });
+        main_window.on_export_form_data(fields_ui::export_form_data);
         let weak = main_window.as_weak();
         main_window.on_field_edited(move |text| {
             if let Some(ui) = weak.upgrade() {

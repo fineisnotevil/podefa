@@ -25,7 +25,7 @@
 //! frames for pan. The first `window run` line is the startup, which on a heavy fixture is the
 //! document's own first render rather than anything the zoom did; the summary leaves it out.
 
-use crate::{MainWindow, viewport_center, with_state};
+use crate::{AppState, MainWindow, viewport_center, with_state, with_state_ret};
 use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, fit_page_milli, fit_width_milli, scroll_target,
     wheel_zoom_milli,
@@ -1707,6 +1707,17 @@ struct Driver {
     form_press: Option<(LogicalPosition, Instant)>,
 }
 
+/// Where the forms bench writes the form's values: beside the document.
+fn form_data_path(state: &AppState) -> Option<std::path::PathBuf> {
+    Some(
+        state
+            .doc_path
+            .as_deref()?
+            .parent()?
+            .join("bench_form_data.json"),
+    )
+}
+
 /// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
 fn window_point(ui: &MainWindow, (x, line): (f32, usize)) -> LogicalPosition {
     page_window_point(ui, x, 42.0 + 12.0 * line as f32 - 3.0)
@@ -2475,6 +2486,10 @@ impl Driver {
                 let value = |name: &str| {
                     let mut out = None;
                     with_state(|state| {
+                        if name == "@fields" {
+                            out = state.fields.get(&0).map(|f| f.len().to_string());
+                            return;
+                        }
                         if name == "@focus" {
                             out = state.field_focus.and_then(|(page, i)| {
                                 let f = state.fields.get(&page)?.get(i)?;
@@ -2771,6 +2786,68 @@ impl Driver {
                         }
                         press(ui, Key::Return.into());
                         expect(self, "Tab to the next text field and type", "b", "77");
+                    }
+                    // Phase 3: export, reset, import, flatten.
+                    21 => {
+                        with_state(|state| {
+                            if let Some(path) = form_data_path(state) {
+                                let _ = std::fs::remove_file(&path);
+                                state.export_form_to(path);
+                            }
+                        });
+                        self.form_deadline = Instant::now() + Duration::from_secs(5);
+                    }
+                    22 => {
+                        let path = with_state_ret(|state| form_data_path(state)).flatten();
+                        let text = path
+                            .as_deref()
+                            .and_then(|p| std::fs::read_to_string(p).ok());
+                        if text.is_none() && Instant::now() < self.form_deadline {
+                            return false;
+                        }
+                        check(
+                            "Export Data writes the values as JSON",
+                            "true".into(),
+                            text.is_some_and(|t| t.contains("\"b\": \"77\""))
+                                .to_string(),
+                        );
+                        ui.invoke_reset_form();
+                        expect(self, "Reset Form before the import", "b", "");
+                    }
+                    23 => {
+                        let read = with_state_ret(|state| {
+                            let path = form_data_path(state)?;
+                            state.import_form_from(ui, &path).ok()
+                        })
+                        .flatten();
+                        check(
+                            "Import Data reads the file",
+                            "true".into(),
+                            read.is_some_and(|n| n > 0).to_string(),
+                        );
+                        expect(self, "Import Data sets the values again", "b", "77");
+                    }
+                    24 => {
+                        check(
+                            "the check box and the list too",
+                            "Yes|tr,de".into(),
+                            format!(
+                                "{}|{}",
+                                value("agree").unwrap_or_default(),
+                                value("langs[]").unwrap_or_default()
+                            ),
+                        );
+                        ui.invoke_flatten_form();
+                        expect(self, "Flatten Form: no fields left", "@fields", "0");
+                    }
+                    25 => {
+                        check(
+                            "no field shaded",
+                            "0".into(),
+                            ui.get_field_rects().row_count().to_string(),
+                        );
+                        with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                        expect(self, "one undo brings the form back", "b", "77");
                     }
                     _ => {
                         self.settle();
