@@ -4,7 +4,9 @@
 //! Plan 0006 Phase 1 through the engine (rows AI, AJ and AK's engine half): a form's fields are
 //! read with their kinds, options and states, every kind is filled as one undo step, the values
 //! survive a save in place and a reopen, a field on two pages changes both, a read-only field
-//! refuses, and Turkish text fills in milliseconds.
+//! refuses, and Turkish text fills in milliseconds. Phase 2 (row AL's engine half): the page's
+//! tab order, a multi-select list's several choices, resetting a field and the form, and the page
+//! Tab goes on to.
 
 use engine_mupdf::{Change, MupdfEngine, MupdfError};
 use pdf_core::annot::EditOp;
@@ -252,4 +254,153 @@ fn single_line_turkish_text_sits_inside_its_field() {
     assert!(name.contains("\n1 0 0 1 0 -7.2 cm\n"), "{name}");
     let notes = appearance("notes");
     assert!(!notes.contains("1 0 0 1 0 -"), "{notes}");
+}
+
+/// A widget's normal appearance stream on page 1, as saved.
+fn appearance(engine: &MupdfEngine, name: &str) -> String {
+    let bytes = engine.snapshot().expect("snapshot");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).expect("snapshot opens");
+    let page = doc.load_pdf_page(0).expect("page");
+    let widget = page
+        .widgets()
+        .find(|w| w.name().ok().flatten().as_deref() == Some(name))
+        .expect("widget");
+    let normal = widget
+        .annotation()
+        .object()
+        .get_dict("AP")
+        .expect("dict")
+        .expect("AP")
+        .get_dict("N")
+        .expect("dict")
+        .expect("N");
+    String::from_utf8_lossy(&normal.read_stream().expect("stream")).into_owned()
+}
+
+fn choices(engine: &MupdfEngine, name: &str) -> Vec<String> {
+    field(&engine.fields(0).expect("fields"), name)
+        .values
+        .clone()
+}
+
+#[test]
+fn tab_follows_the_rows_of_a_page_tabbed_by_rows() {
+    let engine = open(&fixture("form_tabs.pdf"));
+    let fields = engine.fields(0).expect("fields");
+    let order: Vec<&str> = pdf_core::form::tab_sequence(&fields)
+        .into_iter()
+        .map(|i| fields[i].name.as_str())
+        .collect();
+    // "code" sits on the row of "name", to its right, though it is the page's last annotation;
+    // the read-only total and the signature are not visited.
+    assert_eq!(
+        order,
+        [
+            "name", "code", "notes", "agree", "choice", "choice", "city", "langs", "a", "b",
+            "shared"
+        ]
+    );
+}
+
+#[test]
+fn tab_goes_on_to_the_next_page_with_a_field_and_round_the_end() {
+    let engine = open(&fixture("form_pages.pdf"));
+    assert_eq!(engine.next_field_page(0, false), Some(1));
+    assert_eq!(engine.next_field_page(1, false), Some(0));
+    assert_eq!(engine.next_field_page(0, true), Some(1));
+    assert_eq!(engine.next_field_page(1, true), Some(0));
+}
+
+#[test]
+fn a_multi_select_list_takes_several_choices_and_shows_them() {
+    let path = fixture("form_multi.pdf");
+    let mut engine = open(&path);
+    let change = engine
+        .edit(&EditOp::SetChoices {
+            page: 0,
+            name: "langs".to_owned(),
+            values: vec!["de".to_owned(), "tr".to_owned()],
+        })
+        .expect("choose");
+    assert!(matches!(change, Change::Page { page: 0, .. }), "{change:?}");
+    // Kept in the options' order, whatever order they were given in.
+    assert_eq!(choices(&engine, "langs"), ["tr", "de"]);
+    // The chosen rows are marked: MuPDF 1.27.2 draws a list without its value.
+    let ap = appearance(&engine, "langs");
+    assert_eq!(ap.matches("0.6 0.75 0.85 rg").count(), 2, "{ap}");
+    // One step: undo clears both.
+    engine.undo().expect("undo").expect("a step");
+    assert!(choices(&engine, "langs").is_empty());
+    engine.redo().expect("redo").expect("a step");
+    engine.save(None).expect("save in place");
+    drop(engine);
+    let engine = open(&path);
+    assert_eq!(choices(&engine, "langs"), ["tr", "de"]);
+    // A value that is not an option is refused.
+    let mut engine = engine;
+    let refused = engine.edit(&EditOp::SetChoices {
+        page: 0,
+        name: "langs".to_owned(),
+        values: vec!["fr".to_owned(), "tr".to_owned()],
+    });
+    assert!(
+        matches!(refused, Err(MupdfError::FieldRefused(_))),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_field_resets_to_its_default_as_one_step() {
+    let mut engine = open(&fixture("form_reset_field.pdf"));
+    fill(&mut engine, 0, "city", "Muğla");
+    fill(&mut engine, 0, "name", "Öğüt");
+    let reset = |engine: &mut MupdfEngine, name: &str| {
+        engine
+            .edit(&EditOp::ResetField {
+                page: 0,
+                name: name.to_owned(),
+            })
+            .expect("reset")
+    };
+    reset(&mut engine, "city");
+    assert_eq!(value(&engine, 0, "city"), "Ankara", "its /DV");
+    reset(&mut engine, "name");
+    assert_eq!(value(&engine, 0, "name"), "", "no /DV: empty");
+    engine.undo().expect("undo").expect("a step");
+    assert_eq!(value(&engine, 0, "name"), "Öğüt");
+}
+
+#[test]
+fn the_form_resets_as_one_step_and_a_second_reset_adds_none() {
+    let mut engine = open(&fixture("form_reset.pdf"));
+    fill(&mut engine, 0, "name", "Öğüt");
+    fill(&mut engine, 0, "agree", "Yes");
+    fill(&mut engine, 1, "shared", "Muğla");
+    engine
+        .edit(&EditOp::SetChoices {
+            page: 0,
+            name: "langs".to_owned(),
+            values: vec!["tr".to_owned(), "en".to_owned()],
+        })
+        .expect("choose");
+    let change = engine.edit(&EditOp::ResetForm).expect("reset");
+    // "shared" is on both pages, so both changed.
+    assert!(matches!(change, Change::Pages { .. }), "{change:?}");
+    assert_eq!(value(&engine, 0, "name"), "");
+    assert_eq!(value(&engine, 0, "agree"), "Off");
+    assert_eq!(value(&engine, 1, "shared"), "");
+    assert!(choices(&engine, "langs").is_empty());
+    assert_eq!(value(&engine, 0, "city"), "Ankara");
+    // Already reset: refused, no step.
+    let again = engine.edit(&EditOp::ResetForm);
+    assert!(
+        matches!(again, Err(MupdfError::NothingToReset)),
+        "{again:?}"
+    );
+    // One undo brings every value back.
+    engine.undo().expect("undo").expect("a step");
+    assert_eq!(value(&engine, 0, "name"), "Öğüt");
+    assert_eq!(value(&engine, 0, "agree"), "Yes");
+    assert_eq!(value(&engine, 1, "shared"), "Muğla");
+    assert_eq!(choices(&engine, "langs"), ["tr", "en"]);
 }

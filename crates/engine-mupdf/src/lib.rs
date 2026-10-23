@@ -59,6 +59,9 @@ pub enum MupdfError {
     #[error("the field \"{0}\" does not take that value")]
     FieldRefused(String),
 
+    #[error("every field already has its default value")]
+    NothingToReset,
+
     /// Password authentication failed.
     #[error("Invalid password provided")]
     InvalidPassword,
@@ -615,10 +618,21 @@ impl MupdfEngine {
         self.pdf().map(form::summary).unwrap_or_default()
     }
 
-    /// Sets a form field's value as one journal operation (Plan 0006). A field with widgets on one
-    /// page is a page edit; one with widgets on several pages changes them all, reported like a
+    /// The next page after `from` (before it when `back`) with a field that can be filled, going
+    /// round the document (Plan 0006 Phase 2: Tab across pages).
+    pub fn next_field_page(&self, from: u32, back: bool) -> Option<u32> {
+        form::next_field_page(self.pdf().ok()?, from, back)
+    }
+
+    /// Changes form fields as one journal operation (Plan 0006): a fill, a list's choices, a
+    /// reset. Changes on one page are a page edit; on several pages they are reported like a
     /// stamp (every page keeps its place, the changed ones map to none).
-    fn fill(&mut self, page: u32, name: &str, value: &str) -> Result<Change, MupdfError> {
+    fn fill(
+        &mut self,
+        page: u32,
+        title: &str,
+        change: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>, MupdfError>,
+    ) -> Result<Change, MupdfError> {
         if page as usize >= self.revisions.len() {
             return Err(MupdfError::PageOutOfBounds {
                 page_index: page as usize,
@@ -629,8 +643,14 @@ impl MupdfEngine {
         let pdf = self.pdf_mut()?;
         let journal = |source| MupdfError::EditFailed { page, source };
         let before = journal_position(pdf);
-        pdf.begin_operation("Fill field").map_err(journal)?;
-        let pages = match form::set_field(pdf, page, name, value) {
+        pdf.begin_operation(title).map_err(journal)?;
+        let pages = match change(pdf).and_then(|pages| {
+            if pages.is_empty() {
+                Err(MupdfError::NothingToReset)
+            } else {
+                Ok(pages)
+            }
+        }) {
             Ok(pages) => pages,
             Err(err) => {
                 let _ = pdf.abandon_operation();
@@ -676,8 +696,22 @@ impl MupdfEngine {
         if let EditOp::SetMetadata(fields) = op {
             return self.set_metadata(fields);
         }
-        if let EditOp::SetField { page, name, value } = op {
-            return self.fill(*page, name, value);
+        match op {
+            EditOp::SetField { page, name, value } => {
+                return self.fill(*page, op.title(), |pdf| {
+                    form::set_field(pdf, *page, name, value)
+                });
+            }
+            EditOp::SetChoices { page, name, values } => {
+                return self.fill(*page, op.title(), |pdf| {
+                    form::set_field_values(pdf, *page, name, values)
+                });
+            }
+            EditOp::ResetField { page, name } => {
+                return self.fill(*page, op.title(), |pdf| form::reset_field(pdf, *page, name));
+            }
+            EditOp::ResetForm => return self.fill(0, op.title(), form::reset_form),
+            _ => {}
         }
         let page = op.page();
         if page as usize >= self.revisions.len() {
@@ -1244,6 +1278,17 @@ impl EngineHandle {
                             }
                             Err(err) => Self::report(&event_tx, &err),
                         },
+                        EngineCmd::NextFieldPage {
+                            from,
+                            back,
+                            generation,
+                        } => {
+                            let _ = event_tx.send(EngineEvent::FieldPage {
+                                generation,
+                                page: engine.next_field_page(from, back),
+                                back,
+                            });
+                        }
                         EngineCmd::Annotations { page, generation } => {
                             match engine.annotations(page) {
                                 Ok(items) => {

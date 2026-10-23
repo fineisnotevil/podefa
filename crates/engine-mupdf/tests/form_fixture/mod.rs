@@ -5,7 +5,8 @@
 //! type: a text field, a multi-line one, a check box, a radio group of two, a combo box with
 //! Turkish options, a multi-select list, two numbers and a read-only total with a calculation
 //! script, an unsigned signature field, the first widget of "shared" and a comb field of six boxes
-//! ("code"); page 2 has the second widget of "shared" (a field on two pages).
+//! ("code"); page 2 has the second widget of "shared" (a field on two pages). Page 1 is tabbed by
+//! rows (`/Tabs /R`); "city" has a default value (Ankara) to reset to.
 
 #![allow(dead_code)]
 
@@ -47,7 +48,7 @@ pub fn form_pdf() -> Vec<u8> {
         "<< /Fields [5 0 R 6 0 R 7 0 R 19 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 20 0 R 24 0 R 27 0 R] \
          /DR << /Font << /Helv 15 0 R >> >> /DA (/Helv 0 Tf 0 g) /CO [14 0 R] >>"
             .into(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 16 0 R \
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 16 0 R /Tabs /R \
          /Resources << /Font << /Helv 15 0 R >> >> \
          /Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 20 0 R \
          25 0 R 27 0 R] >>"
@@ -73,7 +74,7 @@ pub fn form_pdf() -> Vec<u8> {
         // 10 city (combo box, Turkish options), 11 langs (multi-select list).
         format!(
             "<< /Type /Annot /Subtype /Widget /FT /Ch /T (city) /Ff 131072 /Rect [150 500 400 520] \
-             /P 4 0 R /F 4 /DA (/Helv 11 Tf 0 g) /Opt [{} {} {}] >>",
+             /P 4 0 R /F 4 /DA (/Helv 11 Tf 0 g) /DV (Ankara) /Opt [{} {} {}] >>",
             utf16("İstanbul"),
             utf16("Ankara"),
             utf16("Muğla")
