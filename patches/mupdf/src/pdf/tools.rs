@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! Image rewriting and JPEG output (fa-pdf addition, Plan 0005 Phase 4).
+//! Image rewriting, JPEG output (fa-pdf addition, Plan 0005 Phase 4) and closing a document writer
+//! (Phase 5).
 //!
 //! The wrappers live in `journal/tools.c`, compiled next to the journal's and against the same
 //! copy of the MuPDF headers, so they are refused under the same check
-//! ([`journal_headers_match`]). A release of mupdf-rs that wraps `pdf_rewrite_images` and
-//! `fz_save_pixmap_as_jpeg` replaces this module.
+//! ([`journal_headers_match`]). A release of mupdf-rs that wraps `pdf_rewrite_images`,
+//! `fz_save_pixmap_as_jpeg` and closes its writers inside `fz_try` replaces this module.
 
 use std::ffi::{c_char, c_int, CString};
 
-use mupdf_sys::{fz_context, fz_pixmap, mupdf_error_t, pdf_document};
+use mupdf_sys::{fz_context, fz_document_writer, fz_pixmap, mupdf_error_t, pdf_document};
 
 use crate::pdf::journal::journal_headers_match;
 use crate::pdf::PdfDocument;
-use crate::{context, Error, Pixmap};
+use crate::{context, DocumentWriter, Error, Pixmap};
 
 extern "C" {
     fn fa_pdf_rewrite_images(
@@ -30,6 +31,11 @@ extern "C" {
         pix: *mut fz_pixmap,
         filename: *const c_char,
         quality: c_int,
+        errptr: *mut *mut mupdf_error_t,
+    );
+    fn fa_close_document_writer(
+        ctx: *mut fz_context,
+        wri: *mut fz_document_writer,
         errptr: *mut *mut mupdf_error_t,
     );
 }
@@ -82,5 +88,19 @@ impl Pixmap {
                 c_int::from(quality.clamp(1, 100))
             ))
         }
+    }
+}
+
+impl DocumentWriter {
+    /// Finishes the document - for DOCX, this is when the file is written - and reports a failure,
+    /// which dropping the writer would hide (or turn into undefined behaviour: mupdf-rs' `Drop`
+    /// closes it outside `fz_try`). The writer is gone afterwards either way.
+    pub fn close(mut self) -> Result<(), Error> {
+        headers()?;
+        let inner = std::mem::replace(&mut self.inner, std::ptr::null_mut());
+        if inner.is_null() {
+            return Ok(());
+        }
+        unsafe { ffi_try!(fa_close_document_writer(context(), inner)) }
     }
 }

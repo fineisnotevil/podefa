@@ -69,3 +69,17 @@ void fa_save_pixmap_as_jpeg(fz_context *ctx, fz_pixmap *pix, const char *filenam
     fz_catch(ctx)
         mupdf_save_error(ctx, errptr);
 }
+
+/* Finishes a document writer: for DOCX and the other zip-based formats this is when the file is
+ * written. mupdf-rs 0.8 calls fz_close_document_writer from Drop, outside fz_try, so a failure
+ * there (a full disk) would unwind through Rust; this lets the caller close it and see the error.
+ * The writer is dropped either way. */
+void fa_close_document_writer(fz_context *ctx, fz_document_writer *wri, mupdf_error_t **errptr)
+{
+    fz_try(ctx)
+        fz_close_document_writer(ctx, wri);
+    fz_always(ctx)
+        fz_drop_document_writer(ctx, wri);
+    fz_catch(ctx)
+        mupdf_save_error(ctx, errptr);
+}
