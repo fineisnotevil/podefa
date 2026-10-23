@@ -16,13 +16,23 @@ use std::time::Instant;
 
 fn convert(input: &Path, out_dir: &Path) {
     let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-    let output = out_dir.join(format!("{name}.docx"));
+    // `FA_PDF_DOCX_OPTIONS`: the writer's options, such as `analyse=yes` (MuPDF's
+    // `output-docx.c`), and a tag for the output's name.
+    let options = std::env::var("FA_PDF_DOCX_OPTIONS").unwrap_or_default();
+    let tag: String = options
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let output = out_dir.join(format!(
+        "{name}{}{tag}.docx",
+        if tag.is_empty() { "" } else { "_" }
+    ));
     let start = Instant::now();
     let doc = Document::open(input.to_str().expect("utf-8")).expect("open");
     let pages = doc.page_count().expect("count");
     {
         let mut writer =
-            DocumentWriter::new(output.to_str().expect("utf-8"), "docx", "").expect("writer");
+            DocumentWriter::new(output.to_str().expect("utf-8"), "docx", &options).expect("writer");
         for p in 0..pages {
             let page = doc.load_page(p).expect("page");
             let bounds = page.bounds().expect("bounds");
