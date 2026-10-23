@@ -380,6 +380,14 @@ crates (below); the app crate has not been built for either:
     - New since the first run: `undo_test` 5 (the journal shim on Android), `note_test` 3,
       `ink_test` 2, and 8 more `pdf_core` unit tests (90).
     - The 7 ignored measurement tests were not run. `abort_safety_test` took 18 s.
+  - **Run again on the same phone, 2026-10-23, at `ef11da6` (Plan 0005 Phases 1-5): 185 of 185
+    tests pass** in 23 test executables, the same method.
+    - New since the last run: `pages_test` 3, `tools_test` 8, `stamps_test` 4 and `convert_test` 5
+      (compress, the image rewrite and JPEG wrappers, images to PDF, the repaired copy), and 19
+      more `pdf_core` unit tests (109). Export as Word is off (the `docx` feature), so `word_test`
+      was not built.
+    - The ignored measurement tests were not run. `abort_safety_test` took 18 s, `convert_test`
+      15 s.
 
   **To do in the mobile plan:**
   - Make the libc++ link part of the build, not an environment variable: a `build.rs` line in
