@@ -11,6 +11,11 @@
 //! Symbol, ZapfDingbats and their styles) are the most common unembedded fonts, and MuPDF has
 //! metric-compatible versions of all of them built in; this loader hands MuPDF those first, and
 //! leaves every other name to the lookups behind it.
+//!
+//! MuPDF also asks the loaders for the generic names `serif`, `sans-serif` and `monospace` when it
+//! draws a form field's text with letters the field's font cannot encode (Turkish ğ, ş, İ, ı in a
+//! WinAnsi Helvetica): three requests per fill, each a system font search of 0.8-1.2 s (Plan 0006
+//! §3.2). Those names get MuPDF's Times, Helvetica and Courier too.
 
 use mupdf::{Font, FontHints, FontLoader};
 use std::sync::Once;
@@ -21,7 +26,7 @@ struct Base14First;
 
 impl FontLoader for Base14First {
     fn load_font(&self, name: &str, hints: FontHints) -> Option<Font> {
-        if let Some(font) = base14(name) {
+        if let Some(font) = base14(generic(name)) {
             return Some(font);
         }
         #[cfg(target_os = "android")]
@@ -48,6 +53,16 @@ impl FontLoader for Base14First {
     #[cfg(target_os = "android")]
     fn load_fallback_font(&self, script: u32, language: u32, hints: FontHints) -> Option<Font> {
         mupdf::AndroidFontLoader.load_fallback_font(script, language, hints)
+    }
+}
+
+/// The standard font a generic family name stands for; any other name as it is.
+pub(crate) fn generic(name: &str) -> &str {
+    match name {
+        "serif" => "Times-Roman",
+        "sans-serif" => "Helvetica",
+        "monospace" => "Courier",
+        other => other,
     }
 }
 
@@ -81,5 +96,13 @@ mod tests {
             assert!(base14(name).is_some(), "{name}");
         }
         assert!(base14("NoSuchFont-Regular").is_none());
+    }
+
+    #[test]
+    fn generic_families_are_standard_fonts() {
+        for name in ["serif", "sans-serif", "monospace"] {
+            assert!(base14(generic(name)).is_some(), "{name}");
+        }
+        assert_eq!(generic("Arial"), "Arial");
     }
 }
