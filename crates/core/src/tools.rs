@@ -48,6 +48,9 @@ pub enum ToolJob {
         preset: Preset,
         output: PathBuf,
     },
+    /// The open document, as it is now, as a Word (DOCX) file through MuPDF's DOCX writer
+    /// (Phase 5).
+    ExportWord { output: PathBuf },
 }
 
 /// The file format of exported pages.
@@ -116,6 +119,7 @@ impl ToolJob {
             Self::ExportImages { .. } => "Exporting images",
             Self::ImagesToPdf { .. } => "Making a PDF of images",
             Self::Compress { .. } => "Compressing",
+            Self::ExportWord { .. } => "Exporting as Word",
         }
     }
 
@@ -127,9 +131,9 @@ impl ToolJob {
             Self::ExportImages { pages, .. } => {
                 pages.iter().map(|(_, path)| path.clone()).collect()
             }
-            Self::ImagesToPdf { output, .. } | Self::Compress { output, .. } => {
-                vec![output.clone()]
-            }
+            Self::ImagesToPdf { output, .. }
+            | Self::Compress { output, .. }
+            | Self::ExportWord { output } => vec![output.clone()],
         }
     }
 }
