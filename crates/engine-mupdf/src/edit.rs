@@ -328,7 +328,7 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
         }
         // Structural edits go through `apply_pages`, and the information fields through
         // `set_metadata`; the engine never sends them here.
-        EditOp::Pages(_) | EditOp::SetMetadata(_) => {}
+        EditOp::Pages(_) | EditOp::SetMetadata(_) | EditOp::SetField { .. } => {}
         EditOp::SetColour { id, colour, .. } => {
             let mut annot =
                 find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;

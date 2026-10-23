@@ -14,6 +14,7 @@
 
 mod edit;
 mod fonts;
+mod form;
 mod pool;
 mod search;
 mod tools;
@@ -48,6 +49,15 @@ pub enum MupdfError {
     /// The document is password protected and requires authentication.
     #[error("Document is password protected")]
     PasswordRequired,
+
+    #[error("page {} has no field \"{name}\"", page + 1)]
+    FieldNotFound { page: u32, name: String },
+
+    #[error("the field \"{0}\" is read-only")]
+    FieldReadOnly(String),
+
+    #[error("the field \"{0}\" does not take that value")]
+    FieldRefused(String),
 
     /// Password authentication failed.
     #[error("Invalid password provided")]
@@ -584,6 +594,74 @@ impl MupdfEngine {
         }
     }
 
+    /// A page's form field widgets (Plan 0006); none for a document that is not a PDF.
+    pub fn fields(&self, page: u32) -> Result<Vec<pdf_core::form::FieldInfo>, MupdfError> {
+        let pdf = match self.pdf() {
+            Ok(pdf) => pdf,
+            Err(MupdfError::NotEditable) => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        let pdf_page =
+            pdf.load_pdf_page(page as i32)
+                .map_err(|source| MupdfError::PageLoadFailed {
+                    page_index: page as usize,
+                    source,
+                })?;
+        Ok(form::fields(&pdf_page))
+    }
+
+    /// What the open document's form has (Plan 0006): fields, scripts, XFA.
+    pub fn form_summary(&self) -> pdf_core::form::FormSummary {
+        self.pdf().map(form::summary).unwrap_or_default()
+    }
+
+    /// Sets a form field's value as one journal operation (Plan 0006). A field with widgets on one
+    /// page is a page edit; one with widgets on several pages changes them all, reported like a
+    /// stamp (every page keeps its place, the changed ones map to none).
+    fn fill(&mut self, page: u32, name: &str, value: &str) -> Result<Change, MupdfError> {
+        if page as usize >= self.revisions.len() {
+            return Err(MupdfError::PageOutOfBounds {
+                page_index: page as usize,
+                total_pages: self.revisions.len(),
+            });
+        }
+        let count = self.revisions.len() as u32;
+        let pdf = self.pdf_mut()?;
+        let journal = |source| MupdfError::EditFailed { page, source };
+        let before = journal_position(pdf);
+        pdf.begin_operation("Fill field").map_err(journal)?;
+        let pages = match form::set_field(pdf, page, name, value) {
+            Ok(pages) => pages,
+            Err(err) => {
+                let _ = pdf.abandon_operation();
+                return Err(err);
+            }
+        };
+        pdf.end_operation().map_err(journal)?;
+        let stepped = journal_position(pdf) > before;
+        if let [only] = pages.as_slice() {
+            if stepped {
+                self.history.truncate(before);
+                self.history.push(Step::Page(*only));
+            }
+            return Ok(Change::Page {
+                page: *only,
+                revision: self.touch(*only),
+            });
+        }
+        let map: PageMap = (0..count)
+            .map(|p| pages.binary_search(&p).is_err().then_some(p))
+            .collect();
+        if stepped {
+            self.history.truncate(before);
+            self.history.push(Step::Pages {
+                forward: map.clone(),
+                old_count: count,
+            });
+        }
+        Ok(self.restructured(map))
+    }
+
     /// Applies one edit (Plan 0004, §4.1) and gives the page a new revision, which it returns.
     /// The page's cached display list is dropped, so its next job is drawn from the edited page;
     /// lists already handed to workers keep drawing the old revision, which their jobs say.
@@ -597,6 +675,9 @@ impl MupdfEngine {
         }
         if let EditOp::SetMetadata(fields) = op {
             return self.set_metadata(fields);
+        }
+        if let EditOp::SetField { page, name, value } = op {
+            return self.fill(*page, name, value);
         }
         let page = op.page();
         if page as usize >= self.revisions.len() {
@@ -1075,6 +1156,7 @@ impl EngineHandle {
                                         unsized_pages,
                                         editable: engine.is_editable(),
                                         repaired: engine.was_repaired(),
+                                        form: engine.form_summary(),
                                     });
                                     let _ = event_tx.send(EngineEvent::Outline {
                                         items: engine.outline(),
@@ -1152,6 +1234,16 @@ impl EngineHandle {
                             mode,
                             generation,
                         } => search.select(from, to, mode, generation),
+                        EngineCmd::Fields { page, generation } => match engine.fields(page) {
+                            Ok(items) => {
+                                let _ = event_tx.send(EngineEvent::Fields {
+                                    page,
+                                    generation,
+                                    items,
+                                });
+                            }
+                            Err(err) => Self::report(&event_tx, &err),
+                        },
                         EngineCmd::Annotations { page, generation } => {
                             match engine.annotations(page) {
                                 Ok(items) => {
