@@ -244,6 +244,13 @@ pub enum EditOp {
     },
     /// Puts every field of the form back to its default value; read-only fields are left alone.
     ResetForm,
+    /// Sets fields from a data file (Plan 0006 Phase 3) as one step. Values for fields the form
+    /// does not have, read-only fields, or values a field does not take are left out.
+    ImportForm {
+        values: Vec<crate::form_data::FieldValue>,
+    },
+    /// Draws every field into its page and removes the form (Plan 0006 Phase 3); undoable.
+    FlattenForm,
 }
 
 impl EditOp {
@@ -267,6 +274,8 @@ impl EditOp {
             Self::SetField { .. } | Self::SetChoices { .. } => "Fill field",
             Self::ResetField { .. } => "Reset field",
             Self::ResetForm => "Reset form",
+            Self::ImportForm { .. } => "Import form data",
+            Self::FlattenForm => "Flatten form",
         }
     }
 
@@ -274,7 +283,10 @@ impl EditOp {
     pub fn page(&self) -> u32 {
         match self {
             Self::Pages(op) => op.first_page(),
-            Self::SetMetadata(_) | Self::ResetForm => 0,
+            Self::SetMetadata(_)
+            | Self::ResetForm
+            | Self::ImportForm { .. }
+            | Self::FlattenForm => 0,
             Self::AddMarkup { page, .. }
             | Self::Delete { page, .. }
             | Self::SetColour { page, .. }

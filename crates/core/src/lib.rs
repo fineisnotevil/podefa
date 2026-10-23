@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 pub mod annot;
 pub mod form;
+pub mod form_data;
 pub mod layout;
 pub mod nav;
 pub mod pages;
@@ -191,6 +192,13 @@ pub enum EngineCmd {
         back: bool,
         generation: u64,
     },
+    /// Write every field's value to `path` in `format` (Plan 0006 Phase 3). Answered with
+    /// [`EngineEvent::FormExported`].
+    ExportForm {
+        path: PathBuf,
+        format: form_data::DataFormat,
+        generation: u64,
+    },
     /// Apply one edit to the document. The engine answers with [`EngineEvent::PageChanged`] for
     /// the page it changed, then [`EngineEvent::Edited`]; `generation` is the document's, so an
     /// answer about a previous document can be recognised.
@@ -349,6 +357,13 @@ pub enum EngineEvent {
         generation: u64,
         page: Option<u32>,
         back: bool,
+    },
+    /// A form's values were written (answer to [`EngineCmd::ExportForm`]): how many fields, or
+    /// why not.
+    FormExported {
+        generation: u64,
+        path: PathBuf,
+        result: Result<usize, String>,
     },
     /// An edit changed a page: it is now at `revision`, with these annotations. Every tile, base
     /// layer and thumbnail of the page rendered from an older revision is out of date.

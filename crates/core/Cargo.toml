@@ -17,3 +17,4 @@ workspace = true
 [dependencies]
 thiserror = { workspace = true }
 
+roxmltree = "0.21"
