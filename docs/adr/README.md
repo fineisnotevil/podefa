@@ -20,4 +20,10 @@ Each ADR follows a standardized format:
 
 - [0001: Technology Stack - Rust, Slint, and MuPDF](0001-stack-rust-slint-mupdf.md)
 - [0002: Licensing - AGPL-3.0-or-later and DCO Contributions](0002-license-agpl.md)
-- [0003: Dedicated Engine Actor Threading Model & Render Cancellation](0003-engine-actor-threading.md)
+- [0003: Dedicated Engine Actor Threading Model & Render Cancellation](0003-engine-actor-threading.md) (amended 2026-10-20)
+- [0004: Opening Documents - File Dialog, Drag-and-Drop and Settings](0004-opening-documents.md)
+- [0005: A Search Thread with Its Own Document](0005-search-thread.md)
+- [0006: Clipboard and Text Selection](0006-clipboard-and-selection.md)
+- [0007: Editing Annotations and Saving](0007-editing-and-saving.md)
+- [0008: Undo and Redo Through MuPDF's Journal](0008-undo-journal.md)
+- [0009: Structural Edits and Page Maps](0009-structural-edits-and-page-maps.md)

@@ -9,17 +9,37 @@
 //! - [`Bitmap`]: Raw pixel buffer for rendered pages.
 //! - [`EngineCmd`] and [`EngineEvent`]: Inter-thread messages for actor engines.
 //! - [`tiling`]: pure tile geometry, and [`scheduler`]: the pure tile cache/request policy.
+//! - [`layout`]: the continuous page layout and the canvas window (Plan 0002).
+//! - [`annot`]: annotations, edits and the unsaved-changes state (Plan 0004).
+//! - [`pages`]: structural edits and how they renumber pages (Plan 0005).
+//! - [`tools`]: jobs that write new files, page ranges, document information (Plan 0005).
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+pub mod annot;
+pub mod form;
+pub mod form_data;
+pub mod layout;
+pub mod nav;
+pub mod pages;
 pub mod scheduler;
+pub mod search;
+pub mod select;
+pub mod settings;
+pub mod stamp;
 pub mod tiling;
+pub mod tools;
 
+pub use layout::{
+    CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, PAGE_GAP_LOGICAL_PX, PageSlot,
+    REANCHOR_MARGIN_LOGICAL_PX,
+};
 pub use scheduler::{TileAction, TileScheduler};
 pub use tiling::{
-    PageGeometry, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileKey, TileRect, ZOOM_MAX_MILLI,
-    ZOOM_MIN_MILLI, clamp_zoom_milli, scale_from_milli, zoom_anchor, zoom_in_milli, zoom_out_milli,
+    BASE_LONG_PX, PageGeometry, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileKey, TileRect,
+    ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli, clamp_zoom_milli, scale_from_milli,
+    thumb_scale_milli, zoom_anchor, zoom_in_milli, zoom_out_milli,
 };
 
 /// 2D floating-point rectangle representing coordinates and dimensions.
@@ -46,15 +66,31 @@ impl Rect {
 /// Pixel format representation for rasterized buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
-    Rgba8,
+    /// Opaque 8-bit RGB, 3 bytes per pixel.
+    ///
+    /// Every raster this workspace produces is opaque: MuPDF clears an alpha-free pixmap to
+    /// `0xff`, so the page is white paper, and an alpha channel would spend a quarter of every
+    /// cached tile on a byte that is always `255`.
+    Rgb8,
+}
+
+impl PixelFormat {
+    /// Bytes one pixel occupies in a tightly packed buffer: what `Bitmap::stride` equals for a
+    /// row of `width` pixels.
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Rgb8 => 3,
+        }
+    }
 }
 
 /// In-memory bitmap containing raw rasterized pixels.
 ///
 /// # Pixel format
 ///
-/// Pixel data is in **non-premultiplied RGBA8** format (4 bytes per pixel: R, G, B, A).
-/// Slint natively consumes non-premultiplied RGBA8.
+/// Pixel data is in **opaque RGB8** format (3 bytes per pixel: R, G, B), tightly packed:
+/// `stride == width * [`PixelFormat::bytes_per_pixel`]`. Slint consumes it as an `Rgb8Pixel`
+/// buffer, so the pixels are copied into a Slint image once and never converted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitmap {
     pub width: u32,
@@ -98,6 +134,94 @@ pub enum EngineCmd {
         row: i32,
         request_id: RequestId,
     },
+    /// Render the low-resolution base layer of one page (Plan 0001, §5 Phase 2).
+    ///
+    /// `scale_milli` is the page's *base* scale (see [`base_scale_milli`]), not a zoom level: the
+    /// base layer is one raster of the whole page that every zoom level stretches, so a page needs
+    /// it once. It is rendered as soon as the document is opened and again on a page change.
+    ///
+    /// Unlike a tile, base work is never cancelled: it belongs to a page rather than to a zoom
+    /// level, so superseding an epoch must not drop it. `request_id` names the epoch it was asked
+    /// under, which the receiver can report but must not use to reject a result.
+    RenderBase {
+        page: u32,
+        scale_milli: u32,
+        request_id: RequestId,
+    },
+    /// Render a thumbnail of one page, `width_px` device pixels wide (Plan 0003, §4.3).
+    ///
+    /// Like a base layer it is a whole-page raster and never cancelled, but its display list is
+    /// built for this one raster and not kept: a sidebar scrolled through thousands of pages must
+    /// not evict the display lists of the pages in the viewport (Plan 0003, §3.5).
+    RenderThumb {
+        page: u32,
+        width_px: u32,
+        request_id: RequestId,
+    },
+    /// Search the document for `query` from `from_page` onwards, wrapping (Plan 0003, §4.4). Runs on
+    /// the search thread; the search with an older `generation` stops at its next page.
+    Search {
+        query: String,
+        from_page: u32,
+        generation: u64,
+    },
+    /// Stop the running search without starting another.
+    CancelSearch,
+    /// The boxes of a page's text lines, so the app can tell whether the pointer is over text.
+    /// Answered on the search thread, like `Select`.
+    /// `generation` is echoed back, so an answer about a previous document can be recognised.
+    TextLines { page: u32, generation: u64 },
+    /// Select the text from `from` to `to` in a mode (Plan 0003, §4.5). Answered on the search
+    /// thread, ahead of any search it is running; only the latest of a burst is computed.
+    Select {
+        from: select::PagePoint,
+        to: select::PagePoint,
+        mode: select::SelectMode,
+        generation: u64,
+    },
+    /// List a page's annotations (Plan 0004, §4.1), answered with [`EngineEvent::Annotations`].
+    /// `generation` is echoed back, so an answer about a previous document can be recognised.
+    Annotations { page: u32, generation: u64 },
+    /// List a page's form field widgets (Plan 0006). Answered with [`EngineEvent::Fields`].
+    Fields { page: u32, generation: u64 },
+    /// Find the next page after `from` (before it when `back`) with a field that can be filled,
+    /// going round the document's end, `from` itself last (Plan 0006 Phase 2: Tab across pages).
+    /// Answered with [`EngineEvent::FieldPage`].
+    NextFieldPage {
+        from: u32,
+        back: bool,
+        generation: u64,
+    },
+    /// Write every field's value to `path` in `format` (Plan 0006 Phase 3). Answered with
+    /// [`EngineEvent::FormExported`].
+    ExportForm {
+        path: PathBuf,
+        format: form_data::DataFormat,
+        generation: u64,
+    },
+    /// Apply one edit to the document. The engine answers with [`EngineEvent::PageChanged`] for
+    /// the page it changed, then [`EngineEvent::Edited`]; `generation` is the document's, so an
+    /// answer about a previous document can be recognised.
+    Edit {
+        op: annot::EditOp,
+        edit_id: u64,
+        generation: u64,
+    },
+    /// Write the document: `None` appends an incremental update to the open file, `Some(path)`
+    /// writes a full copy there and switches to it (Plan 0004, §4.4).
+    Save { path: Option<PathBuf> },
+    /// Undo the last edit (Plan 0004 Phase 2): answered with [`EngineEvent::PageChanged`] for the
+    /// page it touched, then [`EngineEvent::History`]. Nothing to undo is not an error.
+    Undo { generation: u64 },
+    /// Redo the last undone edit, answered like [`EngineCmd::Undo`].
+    Redo { generation: u64 },
+    /// Run a job on the tool thread (Plan 0005, §4.2): answered with
+    /// [`EngineEvent::ToolProgress`] while it runs and one [`EngineEvent::ToolDone`].
+    RunTool { job_id: u64, job: tools::ToolJob },
+    /// Stop that job between two of its steps; its partial outputs are deleted.
+    CancelTool { job_id: u64 },
+    /// The open document's information, for the properties dialog.
+    DocumentInfo { generation: u64 },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
     /// Shut down the engine thread.
@@ -122,6 +246,21 @@ impl PageSize {
     }
 }
 
+/// One outline (bookmark) entry, flattened: its depth in the tree replaces the nesting, so a list
+/// can show the tree without recursion (Plan 0003, §4.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineItem {
+    /// 0 for a top-level entry, 1 for its children, and so on.
+    pub depth: u32,
+    /// The title as the document gives it.
+    pub title: String,
+    /// The page it points at (0-based), or `None` for an external link or an unresolvable target.
+    pub page: Option<u32>,
+    /// Vertical position on that page in points from the page's top edge (MuPDF's page space,
+    /// rotation applied), when the destination names one.
+    pub top: Option<f32>,
+}
+
 /// Events sent from the engine actor thread back to the UI thread.
 #[derive(Debug)]
 pub enum EngineEvent {
@@ -129,18 +268,188 @@ pub enum EngineEvent {
     Opened {
         page_count: usize,
         page_sizes: Vec<PageSize>,
+        /// Pages whose bounds could not be read; they are in `page_sizes` as Letter, so the
+        /// layout stays complete, and the receiver can tell the user which ones are guesses.
+        unsized_pages: Vec<u32>,
+        /// Whether the document can be annotated and saved: only PDFs can (Plan 0004, §1).
+        editable: bool,
+        /// MuPDF had to repair the file to open it (Plan 0005 Phase 4): it cannot be saved in
+        /// place, and a full copy written with Save As is a clean, repaired file.
+        repaired: bool,
+        /// What its form has (Plan 0006).
+        form: form::FormSummary,
     },
     /// One tile has been rendered.
     ///
     /// `request_id` is the epoch the request was issued under; results carrying an older epoch
     /// are stale and must be dropped by the receiver.
+    ///
+    /// `revision` is the page's revision the tile was drawn from (Plan 0004, §4.1): a tile of an
+    /// older revision than the receiver knows shows the page as it was before an edit.
     TileRendered {
         key: TileKey,
         request_id: RequestId,
+        revision: u32,
         bitmap: Bitmap,
     },
+    /// The low-resolution base layer of a page (Plan 0001, §5 Phase 2).
+    ///
+    /// The bitmap covers the page's whole raster rect at `scale_milli`, so the receiver stretches
+    /// it to whatever extent the page currently has. It is *not* stale by epoch - one raster serves
+    /// every zoom of its page - so the receiver validates it by `page` instead.
+    BaseRendered {
+        page: u32,
+        scale_milli: u32,
+        request_id: RequestId,
+        revision: u32,
+        bitmap: Bitmap,
+    },
+    /// A page thumbnail (Plan 0003, §4.3): the whole page at the scale that makes it about
+    /// `width_px` wide (clamped to the zoom range, so a very wide page can come back wider).
+    ThumbRendered {
+        page: u32,
+        request_id: RequestId,
+        revision: u32,
+        bitmap: Bitmap,
+    },
+    /// One page's search hits, each the rectangles that cover it, in MuPDF's page space.
+    SearchHits {
+        generation: u64,
+        page: u32,
+        hits: Vec<Vec<Rect>>,
+    },
+    /// A page's text line boxes, in page space ([`select::line_boxes`]).
+    TextLines {
+        page: u32,
+        generation: u64,
+        lines: Vec<Rect>,
+    },
+    /// A selection: each page's highlight rectangles and text, and the whole text to copy.
+    Selection {
+        generation: u64,
+        pages: Vec<select::PageSelection>,
+        text: String,
+    },
+    /// A search covered all `pages` in `ms` milliseconds. Not sent for a superseded search.
+    SearchDone {
+        generation: u64,
+        pages: u32,
+        ms: u64,
+    },
+    /// The document's outline, flattened in reading order; sent right after `Opened`, empty when
+    /// the document has none.
+    Outline { items: Vec<OutlineItem> },
+    /// A page's annotations, in drawing order (the last is on top).
+    Annotations {
+        page: u32,
+        generation: u64,
+        items: Vec<annot::AnnotInfo>,
+    },
+    /// A page's form field widgets (answer to [`EngineCmd::Fields`]).
+    Fields {
+        page: u32,
+        generation: u64,
+        items: Vec<form::FieldInfo>,
+    },
+    /// The page Tab goes on to (answer to [`EngineCmd::NextFieldPage`]); `None` when no page has
+    /// a field that can be filled.
+    FieldPage {
+        generation: u64,
+        page: Option<u32>,
+        back: bool,
+    },
+    /// A form's values were written (answer to [`EngineCmd::ExportForm`]): how many fields, or
+    /// why not.
+    FormExported {
+        generation: u64,
+        path: PathBuf,
+        result: Result<usize, String>,
+    },
+    /// An edit changed a page: it is now at `revision`, with these annotations. Every tile, base
+    /// layer and thumbnail of the page rendered from an older revision is out of date.
+    PageChanged {
+        generation: u64,
+        page: u32,
+        revision: u32,
+        items: Vec<annot::AnnotInfo>,
+    },
+    /// A structural edit, or its undo or redo, changed the pages (Plan 0005, §4.1): they are now
+    /// `page_sizes`, every one at `revision`, and `map` says where each came from. Everything the
+    /// receiver keeps per page index is out of date; what `map` names can be moved over.
+    Restructured {
+        generation: u64,
+        page_sizes: Vec<PageSize>,
+        revision: u32,
+        map: pages::PageMap,
+    },
+    /// A tool job advanced: `done` of `total` steps.
+    ToolProgress { job_id: u64, done: u32, total: u32 },
+    /// A tool job finished: the files it wrote, or why it did not (a cancelled job says so).
+    /// Compress also reports the sizes.
+    ToolDone {
+        job_id: u64,
+        result: Result<Vec<PathBuf>, String>,
+        sizes: Option<tools::ToolSizes>,
+    },
+    /// The open document's information (answer to [`EngineCmd::DocumentInfo`]).
+    DocumentInfo {
+        generation: u64,
+        info: tools::DocumentInfo,
+    },
+    /// An edit was applied, or why it was not.
+    Edited {
+        edit_id: u64,
+        generation: u64,
+        result: Result<(), String>,
+    },
+    /// The undo history moved or was reset: what happened, and whether undo and redo are possible
+    /// now. Sent after every edit, undo and redo, and when a document is opened or saved as a copy.
+    History {
+        generation: u64,
+        change: HistoryChange,
+        can_undo: bool,
+        can_redo: bool,
+    },
+    /// A save finished: the file now holds the document (its size in bytes), or why not. After a
+    /// Save As `path` is the new file, which the engine has switched to.
+    Saved {
+        path: PathBuf,
+        result: Result<u64, SaveError>,
+    },
+    /// A tile was aborted mid-raster because its epoch had been superseded (Plan 0001, §5 Phase 2).
+    ///
+    /// `ms` is the measured time from the abort signal to the rasterizer noticing it, which is the
+    /// number the Phase 2 gate reports. No pixels follow: the receiver has nothing to draw. The pool
+    /// reports this from its own abort registry, because a display list stopped by the cancel cookie
+    /// returns as normally as one that ran to the end.
+    TileAborted { request_id: RequestId, ms: u64 },
     /// An error occurred.
     Error { message: String },
+}
+
+/// How the undo history changed (see [`EngineEvent::History`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryChange {
+    /// An edit was added (and any redo steps beyond it dropped).
+    Edited,
+    /// The last edit was undone.
+    Undone,
+    /// The last undone edit was redone.
+    Redone,
+    /// Nothing moved: a report after opening, a Save As, or an undo or redo with nothing to do.
+    None,
+}
+
+/// Why a save did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveError {
+    /// The file cannot take an incremental update (MuPDF repaired it at open, for example), so it
+    /// needs a full copy written elsewhere: Save As.
+    NeedsSaveAs,
+    /// The document cannot be saved at all (not a PDF).
+    NotEditable,
+    /// Writing failed (read-only file, missing drive, ...).
+    Failed(String),
 }
 
 /// Minimum allowed zoom scale factor.
@@ -195,12 +504,15 @@ mod tests {
 
     #[test]
     fn test_bitmap_creation() {
-        let b = Bitmap::new(2, 2, 8, PixelFormat::Rgba8, vec![0; 16]);
+        let b = Bitmap::new(2, 2, 6, PixelFormat::Rgb8, vec![0; 12]);
         assert_eq!(b.width, 2);
         assert_eq!(b.height, 2);
-        assert_eq!(b.stride, 8);
-        assert_eq!(b.format, PixelFormat::Rgba8);
-        assert_eq!(b.data.len(), 16);
+        assert_eq!(b.stride, 6);
+        assert_eq!(b.format, PixelFormat::Rgb8);
+        assert_eq!(b.data.len(), 12);
+        // The stride every producer writes is this, and the tests that blit tiles into a
+        // full-page canvas read it from here rather than repeating the `3`.
+        assert_eq!(PixelFormat::Rgb8.bytes_per_pixel(), 3);
     }
 
     #[test]

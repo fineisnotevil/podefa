@@ -8,18 +8,37 @@
 //! - Typed error handling via [`MupdfError`].
 //! - [`EngineHandle`]: A thread-safe actor handle that sends [`pdf_core::EngineCmd`] messages
 //!   to a dedicated background thread owning the `mupdf::Document`, receiving [`pdf_core::EngineEvent`]s.
+//! - The render worker pool the actor dispatches to (`pool`): tiles rasterize on
+//!   [`worker_count`] threads, which never touch the document because the actor hands them
+//!   *resolved* jobs (page display list included) instead of commands.
 
-use mupdf::{Colorspace, Device, DisplayList, Document, Matrix, Pixmap};
+mod edit;
+mod fonts;
+mod form;
+mod pool;
+mod search;
+mod tools;
+
+use mupdf::pdf::{PdfDocument, PdfWriteOptions};
+use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
+use pdf_core::annot::{AnnotInfo, EditOp};
+use pdf_core::form_data;
+use pdf_core::pages::{self, PageMap, PageOp};
+use pdf_core::tools::{MergeInput, ToolJob};
 use pdf_core::{
-    Bitmap, EngineCmd, EngineEvent, PageGeometry, PageSize, PdfEngine, PixelFormat, Rect,
-    RequestId, TILE_BLEED_PX, TILE_SIZE_PX, TILE_STRIDE_PX, TileRect,
+    Bitmap, EngineCmd, EngineEvent, HistoryChange, OutlineItem, PageGeometry, PageSize, PdfEngine,
+    PixelFormat, Rect, RequestId, SaveError, TILE_STRIDE_PX, thumb_scale_milli,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use thiserror::Error;
+
+use pool::{Job, Pool, Prepared, run_tile};
+pub use pool::{MID_RASTER_ABORT, worker_count};
+use search::SearchThread;
+use tools::ToolThread;
 
 /// Typed error enum for MuPDF engine operations.
 #[derive(Debug, Error)]
@@ -32,6 +51,24 @@ pub enum MupdfError {
     #[error("Document is password protected")]
     PasswordRequired,
 
+    #[error("page {} has no field \"{name}\"", page + 1)]
+    FieldNotFound { page: u32, name: String },
+
+    #[error("the field \"{0}\" is read-only")]
+    FieldReadOnly(String),
+
+    #[error("the field \"{0}\" does not take that value")]
+    FieldRefused(String),
+
+    #[error("every field already has its default value")]
+    NothingToReset,
+
+    #[error("no field of this form took a value from the file")]
+    NothingToImport,
+
+    #[error("the document has no form fields")]
+    NoForm,
+
     /// Password authentication failed.
     #[error("Invalid password provided")]
     InvalidPassword,
@@ -39,6 +76,14 @@ pub enum MupdfError {
     /// No document is currently open.
     #[error("No document is currently open")]
     NoDocumentOpen,
+
+    /// The document opened but has no page that can be read.
+    #[error("'{0}' has no pages that can be read")]
+    NoPages(PathBuf),
+
+    /// A structural edit that cannot be applied to this document (Plan 0005).
+    #[error("{0}")]
+    PageOp(#[from] pdf_core::pages::PageOpError),
 
     /// Page index was out of bounds.
     #[error("Page index {page_index} out of bounds (total pages: {total_pages})")]
@@ -94,6 +139,18 @@ pub enum MupdfError {
         actual: (u32, u32),
     },
 
+    /// The document cannot be annotated or saved: MuPDF opened it, but it is not a PDF.
+    #[error("Only PDF documents can be edited")]
+    NotEditable,
+
+    /// An edit named an annotation the page does not have (it was deleted meanwhile).
+    #[error("Page {page} has no annotation {id}")]
+    AnnotationNotFound { page: u32, id: u32 },
+
+    /// MuPDF refused an edit.
+    #[error("Failed to edit page {page}: {source}")]
+    EditFailed { page: u32, source: mupdf::Error },
+
     /// Non-UTF8 path provided.
     #[error("Path is not valid UTF-8: '{0}'")]
     InvalidPath(PathBuf),
@@ -112,18 +169,92 @@ pub enum MupdfError {
 /// The tiled renderer keeps two reusable buffers so that rendering a tile allocates no pixel
 /// memory (Plan 0001, amendments 5 and 6):
 ///
-/// - `scratch` is one `TILE_STRIDE_PX` square RGBA8 pixmap, cleared per tile. It is allocated
+/// - `scratch` is one `TILE_STRIDE_PX` square RGB8 pixmap, cleared per tile. It is allocated
 ///   with origin `(0, 0)`, which makes the draw device transform the identity, so device
 ///   coordinates and buffer coordinates coincide and the tile offset lives in the CTM.
-/// - `display_list` caches the page's display list, which is scale independent, so every zoom
-///   level of a page reuses one parse of its content. One such list per engine means one per
-///   rasterizing thread, as Phase 2's worker pool requires.
+/// - `display_lists` caches the display lists of the last [`DISPLAY_LIST_CACHE_PAGES`] pages used,
+///   most recent last. A list is scale independent, so every zoom level of a page reuses one parse
+///   of its content, and it is handed to the pool as an `Arc`, so one list per *page* serves every
+///   rasterizing thread at once. Several entries because continuous scroll shows several pages at
+///   once: a one-page cache would rebuild each visible page's list every time a tile of the other
+///   one was requested (Plan 0002, §3.3).
+///
+/// A PDF is held as a [`PdfDocument`], which can be annotated and saved; any other format MuPDF
+/// opens (images, EPUB, ...) as a plain [`Document`], which is view-only (Plan 0004, §1).
+/// `revisions` counts the changes of each page (Plan 0004, §4.1) - edits, undos and redos: every
+/// job carries the revision of the display list it was given, so the app can tell pixels drawn
+/// before a change. `history` is what each step of MuPDF's undo journal changed, in journal order
+/// (ADR 0008): the journal knows how to undo a step, this knows what to redraw - one page, or the
+/// page order (Plan 0005).
 pub struct MupdfEngine {
-    doc: Option<Document>,
+    doc: Option<Doc>,
     path: Option<PathBuf>,
+    password: Option<String>,
+    /// Where the open file's own cross-reference section starts: every incremental save names it
+    /// as `/Prev` (see [`Self::save`]).
+    startxref: Option<i64>,
     scratch: Option<Pixmap>,
-    display_list: Option<(u32, DisplayList)>,
+    display_lists: Vec<(u32, Arc<DisplayList>)>,
+    revisions: Vec<u32>,
+    history: Vec<Step>,
 }
+
+/// What one step of the undo history changed.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    /// One page's content: annotations, its text or position.
+    Page(u32),
+    /// The pages themselves: `forward` is the step's page map, from a document of `old_count`
+    /// pages.
+    Pages { forward: PageMap, old_count: u32 },
+    /// The document as a whole (its information fields); no page to redraw.
+    Document,
+}
+
+/// What an edit, an undo or a redo changed, for the actor to report.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    /// One page, now at `revision`.
+    Page { page: u32, revision: u32 },
+    /// The pages (Plan 0005, §4.1): their sizes now, the revision every one of them is at, and
+    /// where each came from.
+    Pages {
+        page_sizes: Vec<PageSize>,
+        revision: u32,
+        map: PageMap,
+    },
+    /// The document's information fields (Plan 0005 Phase 2).
+    Document,
+}
+
+/// The open document, editable or not.
+enum Doc {
+    Plain(Document),
+    Pdf(PdfDocument),
+}
+
+impl Doc {
+    fn document(&self) -> &Document {
+        match self {
+            Doc::Plain(doc) => doc,
+            Doc::Pdf(pdf) => pdf,
+        }
+    }
+}
+
+/// Whether pages are drawn with their annotations (highlights, notes, stamps, form-field
+/// appearances), as other PDF readers draw them. `false` would draw the page's content stream alone,
+/// which hid every annotation a document had until Plan 0004 §3.1. One constant for the display
+/// lists and the full-page render, so tiles and their reference render cannot disagree.
+const DRAW_ANNOTATIONS: bool = true;
+
+/// Display lists kept per document: the pages near the viewport, plus room for the one the user
+/// just left (Plan 0002, §4.3).
+///
+/// Bounded by count, not bytes, because a list's size is not known yet (`docs/backlog.md` item 1
+/// investigates it); a page that is drawn as tiles is at least one tile tall, so a viewport shows
+/// only a handful, and smaller pages are one-tile jobs whose list is rebuilt cheaply if evicted.
+pub const DISPLAY_LIST_CACHE_PAGES: usize = 8;
 
 impl Default for MupdfEngine {
     fn default() -> Self {
@@ -134,11 +265,16 @@ impl Default for MupdfEngine {
 impl MupdfEngine {
     /// Creates a new uninitialized MuPDF engine instance.
     pub fn new() -> Self {
+        fonts::install();
         Self {
             doc: None,
             path: None,
+            password: None,
+            startxref: None,
             scratch: None,
-            display_list: None,
+            display_lists: Vec::new(),
+            revisions: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -173,13 +309,62 @@ impl MupdfEngine {
             .page_count()
             .map_err(|e| MupdfError::Backend(e.to_string()))?
             .max(0) as usize;
+        // A document whose page tree yields nothing cannot be shown; the one already open stays,
+        // as for any other failed open.
+        if count == 0 {
+            return Err(MupdfError::NoPages(path.to_path_buf()));
+        }
 
+        let doc = if doc.is_pdf() {
+            let mut pdf = PdfDocument::try_from(doc).map_err(|source| MupdfError::OpenFailed {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            // Undo and redo (ADR 0008). Without a journal the document still opens and edits; it
+            // only cannot be undone, which `history_state` reports. `FA_PDF_NO_JOURNAL` leaves it
+            // off, so a bench run can measure the journal's share of memory (Plan 0004 row X).
+            if std::env::var_os("FA_PDF_NO_JOURNAL").is_none() {
+                let _ = pdf.enable_journal();
+            }
+            self.startxref = pdf.startxref();
+            Doc::Pdf(pdf)
+        } else {
+            Doc::Plain(doc)
+        };
         self.doc = Some(doc);
         self.path = Some(path.to_path_buf());
-        // A display list belongs to the document that produced it.
-        self.display_list = None;
+        self.password = password.map(str::to_owned);
+        // A display list belongs to the document that produced it, and so do the revisions and the
+        // history.
+        self.display_lists.clear();
+        self.revisions = vec![0; count];
+        self.history.clear();
 
         Ok(count)
+    }
+
+    /// Every page's displayed size, never failing as a whole: a page whose bounds cannot be read
+    /// gets Letter, and its index is returned beside the table so the caller can say so.
+    ///
+    /// The actor used `all_page_sizes().unwrap_or_default()`, so one unreadable page emptied the
+    /// whole table and the app showed no document at all (Plan 0002, §3.3).
+    pub fn page_sizes_lenient(&self) -> (Vec<PageSize>, Vec<u32>) {
+        let count = self.page_count();
+        let mut sizes = Vec::with_capacity(count);
+        let mut failed = Vec::new();
+        for i in 0..count {
+            let rect = self.page_size(i).unwrap_or_else(|_| {
+                failed.push(i as u32);
+                Rect::new(0.0, 0.0, 612.0, 792.0)
+            });
+            sizes.push(PageSize {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            });
+        }
+        (sizes, failed)
     }
 
     /// Returns a list of all page dimensions in points.
@@ -198,7 +383,12 @@ impl MupdfEngine {
         Ok(sizes)
     }
 
-    /// Renders one tile of one page at the scale carried by `geometry`.
+    /// Renders one tile of one page at the scale carried by `geometry`, on the calling thread.
+    ///
+    /// This is the serial reference: the benchmarks and the pool tests use it as the render the
+    /// pool has to reproduce pixel for pixel. The actor itself always dispatches to the pool, where
+    /// `FA_PDF_WORKERS=1` gives the same serial rasterization on one worker thread. The drawing
+    /// itself is [`run_tile`], so both paths rasterize through the same code.
     ///
     /// The tile is drawn into a single reused scratch pixmap with a bleed band around it and
     /// cropped down to the tile size, so the result is pixel-identical to the same region of a
@@ -209,6 +399,48 @@ impl MupdfEngine {
         col: i32,
         row: i32,
     ) -> Result<Bitmap, MupdfError> {
+        let prepared = self.prepare(geometry)?;
+        if self.scratch.is_none() {
+            let cs = Colorspace::device_rgb();
+            let side = TILE_STRIDE_PX as i32;
+            self.scratch = Some(Pixmap::new(&cs, 0, 0, side, side, false).map_err(|source| {
+                MupdfError::TileRenderFailed {
+                    page_index: geometry.page,
+                    col,
+                    row,
+                    source,
+                }
+            })?);
+        }
+        let scratch = self
+            .scratch
+            .as_mut()
+            .expect("scratch was allocated just above");
+        run_tile(&prepared, col, row, scratch, None)
+    }
+
+    /// Resolves and validates everything a tile render needs, without rasterizing anything.
+    ///
+    /// The pool works from the result ([`Prepared`]) rather than from [`EngineCmd`]s, which is what
+    /// keeps the document on this thread: the page display list comes back as a shared pointer, and
+    /// the raster origin is taken from MuPDF's own rounded bounds, so a worker cannot disagree with
+    /// the renderer about where a tile goes.
+    ///
+    /// This is also where the grid agreement check (Plan 0001, §4.1 risk 1.6) happens: MuPDF's
+    /// raster size at this scale must equal what `core`'s geometry computes, otherwise the cell
+    /// offsets would silently drift. Once per page *and scale*, instead of once per tile.
+    fn prepare(&mut self, geometry: &PageGeometry) -> Result<Prepared, MupdfError> {
+        self.prepare_with(geometry, true)
+    }
+
+    /// [`Self::prepare`], with the display list either taken from the page cache (`cache`) or
+    /// built for this one job and left out of it - what thumbnails need, so a sidebar scrolled
+    /// through thousands of pages cannot evict the viewport's lists (Plan 0003, §3.5).
+    fn prepare_with(
+        &mut self,
+        geometry: &PageGeometry,
+        cache: bool,
+    ) -> Result<Prepared, MupdfError> {
         let page_index = geometry.page;
         let total = self.page_count();
         if page_index as usize >= total {
@@ -217,53 +449,13 @@ impl MupdfEngine {
                 total_pages: total,
             });
         }
-        let Some(tile) = geometry.tile_rect(col, row) else {
-            return Err(MupdfError::TileOutsidePage {
-                page_index,
-                col,
-                row,
-            });
-        };
-
-        // Take the scratch out of `self` so the display-list cache can still be borrowed
-        // mutably; it is put back before returning, including on the error path.
-        let mut scratch = match self.scratch.take() {
-            Some(scratch) => scratch,
-            None => {
-                let cs = Colorspace::device_rgb();
-                let side = TILE_STRIDE_PX as i32;
-                Pixmap::new(&cs, 0, 0, side, side, true).map_err(|e| {
-                    MupdfError::TileRenderFailed {
-                        page_index,
-                        col,
-                        row,
-                        source: e,
-                    }
-                })?
-            }
-        };
-        let outcome = self.rasterize_tile(&mut scratch, geometry, col, row, tile);
-        self.scratch = Some(scratch);
-        outcome
-    }
-
-    /// Draws one tile into `scratch` and crops it out. See [`Self::render_tile`].
-    fn rasterize_tile(
-        &mut self,
-        scratch: &mut Pixmap,
-        geometry: &PageGeometry,
-        col: i32,
-        row: i32,
-        tile: TileRect,
-    ) -> Result<Bitmap, MupdfError> {
-        let page_index = geometry.page;
-        let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
-        let page = doc
-            .load_page(page_index as i32)
-            .map_err(|e| MupdfError::PageLoadFailed {
-                page_index: page_index as usize,
-                source: e,
-            })?;
+        let doc = self.document().ok_or(MupdfError::NoDocumentOpen)?;
+        let page =
+            doc.load_page(page_index as i32)
+                .map_err(|source| MupdfError::PageLoadFailed {
+                    page_index: page_index as usize,
+                    source,
+                })?;
 
         // The full-page raster is `fz_round_rect(transform(bounds, scale))`; check that the grid
         // agrees before trusting its cell offsets, otherwise tiles land at the wrong offsets.
@@ -271,9 +463,9 @@ impl MupdfEngine {
         let scale_matrix = Matrix::new_scale(scale, scale);
         let bbox = page
             .bounds()
-            .map_err(|e| MupdfError::PageBoundsFailed {
+            .map_err(|source| MupdfError::PageBoundsFailed {
                 page_index: page_index as usize,
-                source: e,
+                source,
             })?
             .transform(&scale_matrix)
             .round();
@@ -290,91 +482,617 @@ impl MupdfEngine {
             });
         }
 
-        // Scratch origin in device pixels: the cell's top-left corner minus the bleed band.
-        let x0 = bbox.x0 + col * TILE_SIZE_PX as i32 - TILE_BLEED_PX;
-        let y0 = bbox.y0 + row * TILE_SIZE_PX as i32 - TILE_BLEED_PX;
-
-        scratch.clear().map_err(|e| MupdfError::TileRenderFailed {
-            page_index,
-            col,
-            row,
-            source: e,
-        })?;
-
-        let display_list = self.display_list_for(page_index, &page)?;
-        {
-            let device =
-                Device::from_pixmap(scratch).map_err(|e| MupdfError::TileRenderFailed {
-                    page_index,
-                    col,
-                    row,
+        let list = if cache {
+            self.display_list_for(page_index, &page)?
+        } else {
+            Arc::new(page.to_display_list(DRAW_ANNOTATIONS).map_err(|e| {
+                MupdfError::RenderFailed {
+                    page_index: page_index as usize,
                     source: e,
-                })?;
-            let mut ctm = Matrix::new_scale(scale, scale);
-            ctm.concat(Matrix::new_translate(-(x0 as f32), -(y0 as f32)));
-            // The scratch device transform is the identity, so the scissor is expressed in the
-            // same space as the CTM applied to page coordinates.
-            let area = mupdf::Rect::new(0.0, 0.0, TILE_STRIDE_PX as f32, TILE_STRIDE_PX as f32);
-            display_list
-                .run(&device, &ctm, area)
-                .map_err(|e| MupdfError::TileRenderFailed {
-                    page_index,
-                    col,
-                    row,
-                    source: e,
-                })?;
-        }
-
-        // Crop the inner tile out of the padded scratch, tightly packed (stride == w * 4).
-        let stride = scratch.stride().max(0) as usize;
-        let bleed = TILE_BLEED_PX as usize;
-        let row_bytes = tile.row_bytes();
-        let mut data = vec![0u8; tile.byte_len()];
-        {
-            let samples = scratch.samples();
-            for r in 0..tile.h as usize {
-                let src = (r + bleed) * stride + bleed * 4;
-                let dst = r * row_bytes;
-                data[dst..dst + row_bytes].copy_from_slice(&samples[src..src + row_bytes]);
-            }
-        }
-        Ok(Bitmap::new(
-            tile.w,
-            tile.h,
-            row_bytes,
-            PixelFormat::Rgba8,
-            data,
-        ))
+                }
+            })?)
+        };
+        Ok(Prepared {
+            geometry: *geometry,
+            list,
+            origin: (bbox.x0, bbox.y0),
+            revision: self.revision(page_index),
+        })
     }
 
-    /// Returns the cached display list for a page, rebuilding it when the page changes.
+    /// Resolves the low-resolution base layer of a page (Plan 0001, §5 Phase 2).
+    ///
+    /// The base layer is a *page* raster, so its geometry is built here from the page's own bounds
+    /// rather than from the caller: `scale_milli` is the page's base scale
+    /// ([`pdf_core::base_scale_milli`]), not a zoom level, and one bitmap therefore serves every
+    /// zoom level of that page.
+    pub(crate) fn prepare_base(
+        &mut self,
+        page_index: u32,
+        scale_milli: u32,
+    ) -> Result<Prepared, MupdfError> {
+        let bounds = self.page_size(page_index as usize)?;
+        let geometry = PageGeometry::new(page_index, bounds, scale_milli);
+        self.prepare(&geometry)
+    }
+
+    /// Pages whose display list is cached, least recently used first.
+    pub fn display_list_pages(&self) -> Vec<u32> {
+        self.display_lists.iter().map(|(page, _)| *page).collect()
+    }
+
+    /// Resolves a thumbnail of a page, about `width_px` wide, without touching the display-list
+    /// cache (Plan 0003, §4.3).
+    pub(crate) fn prepare_thumb(
+        &mut self,
+        page_index: u32,
+        width_px: u32,
+    ) -> Result<Prepared, MupdfError> {
+        let bounds = self.page_size(page_index as usize)?;
+        let geometry = PageGeometry::new(
+            page_index,
+            bounds,
+            thumb_scale_milli(bounds.width, width_px),
+        );
+        self.prepare_with(&geometry, false)
+    }
+
+    /// Renders a thumbnail on the calling thread: what the pool does for `RenderThumb`, for tests.
+    pub fn render_thumb(&mut self, page_index: u32, width_px: u32) -> Result<Bitmap, MupdfError> {
+        let prepared = self.prepare_thumb(page_index, width_px)?;
+        pool::run_whole_page(&prepared)
+    }
+
+    /// The document's outline, flattened depth-first in reading order (Plan 0003, §4.1). A
+    /// document without one, or one MuPDF cannot read, gives an empty list rather than an error:
+    /// the outline is an aid, and the document is still readable without it.
+    pub fn outline(&self) -> Vec<OutlineItem> {
+        let Some(doc) = self.document() else {
+            return Vec::new();
+        };
+        let Ok(tree) = doc.outlines() else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        flatten_outline(&tree, 0, &mut items);
+        items
+    }
+
+    fn document(&self) -> Option<&Document> {
+        self.doc.as_ref().map(Doc::document)
+    }
+
+    fn pdf(&self) -> Result<&PdfDocument, MupdfError> {
+        match self.doc.as_ref() {
+            Some(Doc::Pdf(pdf)) => Ok(pdf),
+            Some(Doc::Plain(_)) => Err(MupdfError::NotEditable),
+            None => Err(MupdfError::NoDocumentOpen),
+        }
+    }
+
+    fn pdf_mut(&mut self) -> Result<&mut PdfDocument, MupdfError> {
+        match self.doc.as_mut() {
+            Some(Doc::Pdf(pdf)) => Ok(pdf),
+            Some(Doc::Plain(_)) => Err(MupdfError::NotEditable),
+            None => Err(MupdfError::NoDocumentOpen),
+        }
+    }
+
+    /// Whether the open document can be annotated and saved.
+    pub fn is_editable(&self) -> bool {
+        matches!(self.doc, Some(Doc::Pdf(_)))
+    }
+
+    /// Whether MuPDF repaired the open PDF while opening it. Right after opening, that is the only
+    /// reason MuPDF refuses an incremental save (`pdf_can_be_saved_incrementally`: a repair or a
+    /// redaction, and nothing has been redacted yet).
+    pub fn was_repaired(&self) -> bool {
+        matches!(&self.doc, Some(Doc::Pdf(pdf)) if !pdf.can_be_saved_incrementally())
+    }
+
+    /// How many edits a page has had since the document was opened.
+    pub fn revision(&self, page: u32) -> u32 {
+        self.revisions.get(page as usize).copied().unwrap_or(0)
+    }
+
+    /// A page's annotations, in drawing order; empty for a view-only document.
+    pub fn annotations(&self, page: u32) -> Result<Vec<AnnotInfo>, MupdfError> {
+        match self.pdf() {
+            Ok(pdf) => edit::annotations(pdf, page),
+            Err(MupdfError::NotEditable) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// A page's form field widgets (Plan 0006); none for a document that is not a PDF.
+    pub fn fields(&self, page: u32) -> Result<Vec<pdf_core::form::FieldInfo>, MupdfError> {
+        let pdf = match self.pdf() {
+            Ok(pdf) => pdf,
+            Err(MupdfError::NotEditable) => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        let pdf_page =
+            pdf.load_pdf_page(page as i32)
+                .map_err(|source| MupdfError::PageLoadFailed {
+                    page_index: page as usize,
+                    source,
+                })?;
+        Ok(form::fields(&pdf_page))
+    }
+
+    /// What the open document's form has (Plan 0006): fields, scripts, XFA.
+    pub fn form_summary(&self) -> pdf_core::form::FormSummary {
+        self.pdf().map(form::summary).unwrap_or_default()
+    }
+
+    /// The next page after `from` (before it when `back`) with a field that can be filled, going
+    /// round the document (Plan 0006 Phase 2: Tab across pages).
+    pub fn next_field_page(&self, from: u32, back: bool) -> Option<u32> {
+        form::next_field_page(self.pdf().ok()?, from, back)
+    }
+
+    /// Every field's value (Plan 0006 Phase 3), for a data file.
+    pub fn form_values(&self) -> Result<Vec<pdf_core::form_data::FieldValue>, MupdfError> {
+        form::form_values(self.pdf()?)
+    }
+
+    /// Changes form fields as one journal operation (Plan 0006): a fill, a list's choices, a
+    /// reset, an import, flattening. Changes on one page are a page edit; on several pages they
+    /// are reported like a stamp (every page keeps its place, the changed ones map to none). A
+    /// change of no page adds no step and is refused with `nothing()`.
+    fn fill(
+        &mut self,
+        page: u32,
+        title: &str,
+        nothing: impl FnOnce() -> MupdfError,
+        change: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>, MupdfError>,
+    ) -> Result<Change, MupdfError> {
+        if page as usize >= self.revisions.len() {
+            return Err(MupdfError::PageOutOfBounds {
+                page_index: page as usize,
+                total_pages: self.revisions.len(),
+            });
+        }
+        let count = self.revisions.len() as u32;
+        let pdf = self.pdf_mut()?;
+        let journal = |source| MupdfError::EditFailed { page, source };
+        let before = journal_position(pdf);
+        pdf.begin_operation(title).map_err(journal)?;
+        let pages = match change(pdf).and_then(|pages| {
+            if pages.is_empty() {
+                Err(nothing())
+            } else {
+                Ok(pages)
+            }
+        }) {
+            Ok(pages) => pages,
+            Err(err) => {
+                let _ = pdf.abandon_operation();
+                return Err(err);
+            }
+        };
+        pdf.end_operation().map_err(journal)?;
+        let stepped = journal_position(pdf) > before;
+        if let [only] = pages.as_slice() {
+            if stepped {
+                self.history.truncate(before);
+                self.history.push(Step::Page(*only));
+            }
+            return Ok(Change::Page {
+                page: *only,
+                revision: self.touch(*only),
+            });
+        }
+        let map: PageMap = (0..count)
+            .map(|p| pages.binary_search(&p).is_err().then_some(p))
+            .collect();
+        if stepped {
+            self.history.truncate(before);
+            self.history.push(Step::Pages {
+                forward: map.clone(),
+                old_count: count,
+            });
+        }
+        Ok(self.restructured(map))
+    }
+
+    /// Applies one edit (Plan 0004, §4.1) and gives the page a new revision, which it returns.
+    /// The page's cached display list is dropped, so its next job is drawn from the edited page;
+    /// lists already handed to workers keep drawing the old revision, which their jobs say.
+    ///
+    /// The edit is one operation of MuPDF's undo journal (ADR 0008): everything it changes -
+    /// cutting old markup included - is undone by one undo, and an edit that fails is rolled back
+    /// whole (`pdf_abandon_operation`).
+    pub fn edit(&mut self, op: &EditOp) -> Result<Change, MupdfError> {
+        if let EditOp::Pages(pages) = op {
+            return self.restructure(pages);
+        }
+        if let EditOp::SetMetadata(fields) = op {
+            return self.set_metadata(fields);
+        }
+        let unchanged = || MupdfError::NothingToReset;
+        match op {
+            EditOp::SetField { page, name, value } => {
+                return self.fill(*page, op.title(), unchanged, |pdf| {
+                    form::set_field(pdf, *page, name, value)
+                });
+            }
+            EditOp::SetChoices { page, name, values } => {
+                return self.fill(*page, op.title(), unchanged, |pdf| {
+                    form::set_field_values(pdf, *page, name, values)
+                });
+            }
+            EditOp::ResetField { page, name } => {
+                return self.fill(*page, op.title(), unchanged, |pdf| {
+                    form::reset_field(pdf, *page, name)
+                });
+            }
+            EditOp::ResetForm => {
+                return self.fill(0, op.title(), unchanged, form::reset_form);
+            }
+            EditOp::ImportForm { values } => {
+                return self.fill(
+                    0,
+                    op.title(),
+                    || MupdfError::NothingToImport,
+                    |pdf| form::import_values(pdf, values),
+                );
+            }
+            EditOp::FlattenForm => {
+                return self.fill(0, op.title(), || MupdfError::NoForm, form::flatten);
+            }
+            _ => {}
+        }
+        let page = op.page();
+        if page as usize >= self.revisions.len() {
+            return Err(MupdfError::PageOutOfBounds {
+                page_index: page as usize,
+                total_pages: self.revisions.len(),
+            });
+        }
+        let pdf = self.pdf()?;
+        let journal = |source| MupdfError::EditFailed { page, source };
+        let before = journal_position(pdf);
+        pdf.begin_operation(op.title()).map_err(journal)?;
+        if let Err(err) = edit::apply(pdf, op) {
+            let _ = pdf.abandon_operation();
+            return Err(err);
+        }
+        pdf.end_operation().map_err(journal)?;
+        // An edit that changed nothing adds no journal step; one that did drops any redo steps.
+        let after = journal_position(pdf);
+        if after > before {
+            self.history.truncate(before);
+            self.history.push(Step::Page(page));
+        }
+        Ok(Change::Page {
+            page,
+            revision: self.touch(page),
+        })
+    }
+
+    /// Applies a structural edit (Plan 0005, §4.1) as one journal operation. Every page gets a new
+    /// revision, past every revision before, so no tile drawn before the edit - whatever page index
+    /// it had - can pass for one drawn after it.
+    fn restructure(&mut self, op: &PageOp) -> Result<Change, MupdfError> {
+        let count = self.revisions.len() as u32;
+        // Pages from a file: how many is the file's to say.
+        let resolved;
+        let op = match op {
+            PageOp::InsertFrom { path, at, .. } => {
+                resolved = PageOp::InsertFrom {
+                    path: path.clone(),
+                    at: *at,
+                    source_pages: edit::source_page_count(path)?,
+                };
+                &resolved
+            }
+            other => other,
+        };
+        let map = pages::plan(op, count)?;
+        let pdf = self.pdf_mut()?;
+        // An edit that leaves every page as it was (a move to where the pages are, a full turn)
+        // changes nothing: MuPDF's journal would record no step for it, and neither does this.
+        if map.len() == count as usize && map.iter().enumerate().all(|(i, o)| *o == Some(i as u32))
+        {
+            return Ok(self.restructured(map));
+        }
+        let journal = |source| MupdfError::EditFailed {
+            page: op.first_page(),
+            source,
+        };
+        let before = journal_position(pdf);
+        pdf.begin_operation(op.title()).map_err(journal)?;
+        let applied = edit::apply_pages(pdf, op, count).and_then(|()| {
+            let now = pdf.page_count().map_err(journal)?.max(0) as usize;
+            if now == map.len() {
+                Ok(())
+            } else {
+                Err(MupdfError::Backend(format!(
+                    "{}: {now} pages, {} expected",
+                    op.title(),
+                    map.len()
+                )))
+            }
+        });
+        if let Err(err) = applied {
+            let _ = pdf.abandon_operation();
+            return Err(err);
+        }
+        pdf.end_operation().map_err(journal)?;
+        let after = journal_position(pdf);
+        if after > before {
+            self.history.truncate(before);
+            self.history.push(Step::Pages {
+                forward: map.clone(),
+                old_count: count,
+            });
+        }
+        Ok(self.restructured(map))
+    }
+
+    /// The pages changed: every display list goes, every page gets the same new revision, and the
+    /// new sizes are read.
+    fn restructured(&mut self, map: PageMap) -> Change {
+        let revision = self.revisions.iter().copied().max().unwrap_or(0) + 1;
+        self.display_lists.clear();
+        let (page_sizes, _) = self.page_sizes_lenient();
+        self.revisions = vec![revision; page_sizes.len()];
+        Change::Pages {
+            page_sizes,
+            revision,
+            map,
+        }
+    }
+
+    /// Sets the document information fields (Plan 0005 Phase 2) as one journal operation.
+    fn set_metadata(&mut self, fields: &pdf_core::tools::Metadata) -> Result<Change, MupdfError> {
+        let pdf = self.pdf_mut()?;
+        let journal = |source| MupdfError::EditFailed { page: 0, source };
+        let before = journal_position(pdf);
+        pdf.begin_operation("Document properties")
+            .map_err(journal)?;
+        if let Err(err) = edit::set_metadata(pdf, fields) {
+            let _ = pdf.abandon_operation();
+            return Err(err);
+        }
+        pdf.end_operation().map_err(journal)?;
+        if journal_position(pdf) > before {
+            self.history.truncate(before);
+            self.history.push(Step::Document);
+        }
+        Ok(Change::Document)
+    }
+
+    /// The open document's information, for the properties dialog.
+    pub fn document_info(&self) -> Result<pdf_core::tools::DocumentInfo, MupdfError> {
+        match self.doc.as_ref() {
+            Some(Doc::Pdf(pdf)) => Ok(edit::document_info(pdf)),
+            Some(Doc::Plain(doc)) => Ok(edit::plain_info(doc)),
+            None => Err(MupdfError::NoDocumentOpen),
+        }
+    }
+
+    /// What one history step changed, undone (`undo`) or redone, as a change to report.
+    fn replay(&mut self, step: Step, undo: bool) -> Change {
+        match step {
+            Step::Page(page) => Change::Page {
+                page,
+                revision: self.touch(page),
+            },
+            Step::Pages { forward, old_count } => {
+                let map = if undo {
+                    pages::invert(&forward, old_count)
+                } else {
+                    forward
+                };
+                self.restructured(map)
+            }
+            Step::Document => Change::Document,
+        }
+    }
+
+    /// The document as it is now, unsaved changes included, as PDF bytes: what the search thread
+    /// reads after a structural edit. Written without garbage collection, which would break the
+    /// undo journal (Plan 0005, §3.4).
+    pub fn snapshot(&self) -> Result<Vec<u8>, MupdfError> {
+        let pdf = self.pdf()?;
+        let mut bytes = Vec::new();
+        pdf.write_to(&mut bytes)
+            .map_err(|e| MupdfError::Backend(format!("snapshot: {e}")))?;
+        Ok(bytes)
+    }
+
+    /// Undoes the last edit; returns what it changed, or `None` when there was nothing to undo.
+    pub fn undo(&mut self) -> Result<Option<Change>, MupdfError> {
+        let pdf = self.pdf_mut()?;
+        let position = journal_position(pdf);
+        if position == 0 {
+            return Ok(None);
+        }
+        pdf.undo()
+            .map_err(|e| MupdfError::Backend(format!("undo: {e}")))?;
+        Ok(self
+            .history
+            .get(position - 1)
+            .cloned()
+            .map(|step| self.replay(step, true)))
+    }
+
+    /// Redoes the last undone edit, like [`Self::undo`].
+    pub fn redo(&mut self) -> Result<Option<Change>, MupdfError> {
+        let pdf = self.pdf_mut()?;
+        let (position, steps) = pdf.undo_redo_state().unwrap_or((0, 0));
+        if position >= steps {
+            return Ok(None);
+        }
+        pdf.redo()
+            .map_err(|e| MupdfError::Backend(format!("redo: {e}")))?;
+        Ok(self
+            .history
+            .get(position as usize)
+            .cloned()
+            .map(|step| self.replay(step, false)))
+    }
+
+    /// `(can_undo, can_redo)`: both false for a document without a journal.
+    pub fn history_state(&self) -> (bool, bool) {
+        match self.pdf() {
+            Ok(pdf) => {
+                let (position, steps) = pdf.undo_redo_state().unwrap_or((0, 0));
+                (position > 0, position < steps)
+            }
+            Err(_) => (false, false),
+        }
+    }
+
+    /// A page changed: drop its display list and give it a new revision, which is returned.
+    fn touch(&mut self, page: u32) -> u32 {
+        self.display_lists.retain(|(cached, _)| *cached != page);
+        match self.revisions.get_mut(page as usize) {
+            Some(revision) => {
+                *revision += 1;
+                *revision
+            }
+            None => 0,
+        }
+    }
+
+    /// Writes the document (Plan 0004, §3.3 and §4.4) and returns the file and its size.
+    ///
+    /// `None` appends an incremental update to the open file: the bytes already there stay as
+    /// they are, existing signatures stay valid, and the open document keeps reading the file.
+    /// `Some(path)` writes a full copy there and reopens it, so later saves go to the new file. A
+    /// path naming the open file itself is saved incrementally instead, because a full rewrite of
+    /// the file MuPDF is reading from would destroy what it reads.
+    pub fn save(&mut self, path: Option<&Path>) -> Result<(PathBuf, u64), SaveError> {
+        let current = self.path.clone().ok_or(SaveError::NotEditable)?;
+        let target = path.map(Path::to_path_buf);
+        let in_place = target
+            .as_deref()
+            .is_none_or(|target| same_file(target, &current));
+        let startxref = self.startxref;
+        let pdf = self.pdf_mut().map_err(|_| SaveError::NotEditable)?;
+        if in_place {
+            if !pdf.can_be_saved_incrementally() {
+                return Err(SaveError::NeedsSaveAs);
+            }
+            let name = current.to_str().ok_or(SaveError::NeedsSaveAs)?;
+            // Every incremental save of this document rewrites one cumulative section after the
+            // bytes the file had at open, so its `/Prev` must name the file's own section. MuPDF
+            // 1.27.2 points it at the previous save's section instead, which the save itself
+            // overwrites: the second save in place made a file other readers, and MuPDF itself,
+            // read with pages missing (`patches/mupdf/journal/journal.c`). Without the offset the
+            // file is not written in place at all.
+            let startxref = startxref.ok_or(SaveError::NeedsSaveAs)?;
+            pdf.set_startxref(startxref);
+            // New streams are compressed (Plan 0005 §3.5: MuPDF writes them raw otherwise); no
+            // garbage collection, which would break the undo journal (§3.4).
+            let mut options = PdfWriteOptions::default();
+            options.set_incremental(true).set_compress(true);
+            pdf.save_with_options(name, options)
+                .map_err(|e| SaveError::Failed(e.to_string()))?;
+            let len = file_len(&current);
+            return Ok((current, len));
+        }
+        let target = target.ok_or(SaveError::NeedsSaveAs)?;
+        let name = target
+            .to_str()
+            .ok_or_else(|| SaveError::Failed(format!("not a UTF-8 path: {}", target.display())))?;
+        pdf.save(name)
+            .map_err(|e| SaveError::Failed(e.to_string()))?;
+        // The copy is the document from now on. Its pages are the edited pages, so they keep their
+        // revisions: a tile drawn before the switch then never passes for one drawn after a
+        // later edit.
+        let password = self.password.clone();
+        let revisions = std::mem::take(&mut self.revisions);
+        self.open_document_with_password(&target, password.as_deref())
+            .map_err(|e| SaveError::Failed(e.to_string()))?;
+        if revisions.len() == self.revisions.len() {
+            self.revisions = revisions;
+        }
+        let len = file_len(&target);
+        Ok((target, len))
+    }
+
+    /// Returns the cached display list for a page, building it on a miss and evicting the least
+    /// recently used one beyond [`DISPLAY_LIST_CACHE_PAGES`].
     ///
     /// Display lists are scale independent, so one list serves every zoom level of a page and a
-    /// zoom step re-interprets the page content not at all.
+    /// zoom step re-interprets the page content not at all. The list comes back as an `Arc` because
+    /// several rasterizing threads run the *same* list at once (Plan 0001, §5 Phase 2;
+    /// `DisplayList` is `Send + Sync`).
     fn display_list_for(
         &mut self,
         page_index: u32,
         page: &mupdf::Page,
-    ) -> Result<&DisplayList, MupdfError> {
-        let stale = self
-            .display_list
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != page_index);
-        if stale {
-            let list = page
-                .to_display_list(false)
-                .map_err(|e| MupdfError::RenderFailed {
-                    page_index: page_index as usize,
-                    source: e,
-                })?;
-            self.display_list = Some((page_index, list));
+    ) -> Result<Arc<DisplayList>, MupdfError> {
+        if let Some(at) = self
+            .display_lists
+            .iter()
+            .position(|(cached, _)| *cached == page_index)
+        {
+            let entry = self.display_lists.remove(at);
+            let list = Arc::clone(&entry.1);
+            self.display_lists.push(entry);
+            return Ok(list);
         }
-        match &self.display_list {
-            Some((_, list)) => Ok(list),
-            None => Err(MupdfError::Backend(
-                "display list cache was not populated".to_string(),
-            )),
+        let list = Arc::new(page.to_display_list(DRAW_ANNOTATIONS).map_err(|e| {
+            MupdfError::RenderFailed {
+                page_index: page_index as usize,
+                source: e,
+            }
+        })?);
+        if self.display_lists.len() >= DISPLAY_LIST_CACHE_PAGES {
+            self.display_lists.remove(0);
         }
+        self.display_lists.push((page_index, Arc::clone(&list)));
+        Ok(list)
+    }
+}
+
+/// How many steps of the undo journal are applied (0 without a journal).
+fn journal_position(pdf: &PdfDocument) -> usize {
+    pdf.undo_redo_state()
+        .map_or(0, |(position, _)| position as usize)
+}
+
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Whether two paths name the same file, by their canonical form when both exist.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Depth-first, so the list reads in the order the tree shows its entries.
+fn flatten_outline(nodes: &[mupdf::Outline], depth: u32, out: &mut Vec<OutlineItem>) {
+    for node in nodes {
+        let (page, top) = match node.dest {
+            Some(dest) => (Some(dest.loc.page_number), destination_top(dest.kind)),
+            None => (None, None),
+        };
+        out.push(OutlineItem {
+            depth,
+            title: node.title.clone(),
+            page,
+            top,
+        });
+        flatten_outline(&node.down, depth + 1, out);
+    }
+}
+
+/// The vertical position a destination names, in MuPDF's page space (points from the page's top).
+fn destination_top(kind: mupdf::DestinationKind) -> Option<f32> {
+    use mupdf::DestinationKind as Kind;
+    match kind {
+        Kind::FitH { top } | Kind::FitBH { top } | Kind::XYZ { top, .. } => top,
+        Kind::FitR { top, bottom, .. } => Some(top.min(bottom)),
+        _ => None,
     }
 }
 
@@ -386,15 +1104,14 @@ impl PdfEngine for MupdfEngine {
     }
 
     fn page_count(&self) -> usize {
-        self.doc
-            .as_ref()
+        self.document()
             .and_then(|d| d.page_count().ok())
             .map(|c| c.max(0) as usize)
             .unwrap_or(0)
     }
 
     fn page_size(&self, page_index: usize) -> Result<Rect, Self::Error> {
-        let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
+        let doc = self.document().ok_or(MupdfError::NoDocumentOpen)?;
         let total = self.page_count();
         if page_index >= total {
             return Err(MupdfError::PageOutOfBounds {
@@ -419,7 +1136,7 @@ impl PdfEngine for MupdfEngine {
     }
 
     fn render_page(&self, page_index: usize, scale: f32) -> Result<Bitmap, Self::Error> {
-        let doc = self.doc.as_ref().ok_or(MupdfError::NoDocumentOpen)?;
+        let doc = self.document().ok_or(MupdfError::NoDocumentOpen)?;
         let total = self.page_count();
         if page_index >= total {
             return Err(MupdfError::PageOutOfBounds {
@@ -437,13 +1154,14 @@ impl PdfEngine for MupdfEngine {
 
         let ctm = Matrix::new_scale(scale, scale);
         let cs = Colorspace::device_rgb();
-        // alpha = true produces 4 channels: RGBA (non-premultiplied)
-        let pixmap =
-            page.to_pixmap(&ctm, &cs, true, false)
-                .map_err(|e| MupdfError::RenderFailed {
-                    page_index,
-                    source: e,
-                })?;
+        // alpha = false produces 3 channels: opaque RGB, cleared to white (the page's paper), so
+        // no byte is spent on a channel that would be 255 everywhere.
+        let pixmap = page
+            .to_pixmap(&ctm, &cs, false, DRAW_ANNOTATIONS)
+            .map_err(|e| MupdfError::RenderFailed {
+                page_index,
+                source: e,
+            })?;
 
         let width = pixmap.width();
         let height = pixmap.height();
@@ -453,47 +1171,61 @@ impl PdfEngine for MupdfEngine {
         // Convert / clone raw samples into owned vector
         let data = samples.to_vec();
 
-        Ok(Bitmap::new(width, height, stride, PixelFormat::Rgba8, data))
+        Ok(Bitmap::new(width, height, stride, PixelFormat::Rgb8, data))
     }
 }
 
 /// Actor handle for the background MuPDF engine thread.
 ///
-/// Sends commands to a single dedicated thread owning the MuPDF document.
+/// Sends commands to a single dedicated thread owning the MuPDF document, which resolves them into
+/// jobs for the render worker pool ([`Pool`]) and forwards the pool's events.
 /// Upon dropping, sends [`EngineCmd::Shutdown`] and joins the worker thread,
 /// preventing thread leaks.
 pub struct EngineHandle {
     cmd_tx: Sender<EngineCmd>,
-    cancelled_request: Arc<AtomicU64>,
     worker_thread: Option<JoinHandle<()>>,
 }
 
 impl EngineHandle {
-    /// Spawns a new dedicated engine actor thread.
+    /// Spawns a new dedicated engine actor thread and its render worker pool.
     ///
     /// The returned handle provides command sending, and events from the engine
     /// are received on the returned `Receiver<EngineEvent>`.
     pub fn spawn() -> (Self, Receiver<EngineEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>();
         let (event_tx, event_rx) = mpsc::channel::<EngineEvent>();
-        let cancelled_request = Arc::new(AtomicU64::new(0));
-        let cancelled_for_worker = Arc::clone(&cancelled_request);
 
         let worker_thread = thread::Builder::new()
             .name("mupdf-engine-actor".to_string())
             .spawn(move || {
                 let mut engine = MupdfEngine::new();
+                // One core is left for the UI thread; `FA_PDF_WORKERS` overrides the count, and a
+                // count of one gives a single-worker pool, i.e. serial rasterization.
+                let pool = Pool::start(worker_count(), event_tx.clone());
+                // Search runs beside the pool, on a document of its own (Plan 0003, §3.6).
+                let search = SearchThread::start(event_tx.clone());
+                // Tools that write new files run beside them (Plan 0005, §4.2).
+                let tools = ToolThread::start(event_tx.clone());
 
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
                         EngineCmd::Open { path, password } => {
                             match engine.open_document_with_password(&path, password.as_deref()) {
                                 Ok(page_count) => {
-                                    let page_sizes = engine.all_page_sizes().unwrap_or_default();
+                                    search.document(path.clone(), password.clone());
+                                    let (page_sizes, unsized_pages) = engine.page_sizes_lenient();
                                     let _ = event_tx.send(EngineEvent::Opened {
                                         page_count,
                                         page_sizes,
+                                        unsized_pages,
+                                        editable: engine.is_editable(),
+                                        repaired: engine.was_repaired(),
+                                        form: engine.form_summary(),
                                     });
+                                    let _ = event_tx.send(EngineEvent::Outline {
+                                        items: engine.outline(),
+                                    });
+                                    Self::history(&event_tx, &engine, 0, HistoryChange::None);
                                 }
                                 Err(err) => {
                                     let _ = event_tx.send(EngineEvent::Error {
@@ -509,51 +1241,333 @@ impl EngineHandle {
                             request_id,
                         } => {
                             // Tiles are additive, so unlike the old full-page request there is
-                            // nothing to coalesce: each command is one tile. A request from a
-                            // superseded epoch is dropped before any raster time is spent.
-                            let cancelled = cancelled_for_worker.load(Ordering::Relaxed);
-                            if cancelled == request_id {
-                                continue;
+                            // nothing to coalesce: each command is one tile, resolved here and
+                            // rasterized by the pool. A superseded epoch costs no raster time.
+                            match engine.prepare(&geometry) {
+                                Ok(prepared) => pool.dispatch(Job::Tile {
+                                    prepared,
+                                    col,
+                                    row,
+                                    request_id,
+                                }),
+                                Err(err) => Self::report(&event_tx, &err),
                             }
-
-                            match engine.render_tile(&geometry, col, row) {
-                                Ok(bitmap) => {
-                                    // The epoch may have moved on while this tile rendered; the
-                                    // UI thread would drop such a result anyway, so keep it off
-                                    // the event channel.
-                                    if cancelled_for_worker.load(Ordering::Relaxed) != request_id {
-                                        let _ = event_tx.send(EngineEvent::TileRendered {
-                                            key: geometry.key(col, row),
-                                            request_id,
-                                            bitmap,
-                                        });
-                                    }
-                                }
-                                Err(err) => {
-                                    let _ = event_tx.send(EngineEvent::Error {
-                                        message: err.to_string(),
+                        }
+                        EngineCmd::RenderBase {
+                            page,
+                            scale_milli,
+                            request_id,
+                        } => {
+                            // The base layer is queued *ahead* of the tiles: at a cold open it is
+                            // the only job that can put a whole page on screen, and watching it
+                            // appear beats watching a grid fill in.
+                            match engine.prepare_base(page, scale_milli) {
+                                Ok(prepared) => pool.dispatch_first(Job::Base {
+                                    prepared,
+                                    request_id,
+                                }),
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
+                        }
+                        EngineCmd::RenderThumb {
+                            page,
+                            width_px,
+                            request_id,
+                        } => {
+                            // Behind the tiles already queued: the viewport comes first.
+                            match engine.prepare_thumb(page, width_px) {
+                                Ok(prepared) => pool.dispatch(Job::Thumb {
+                                    prepared,
+                                    request_id,
+                                }),
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
+                        }
+                        EngineCmd::Search {
+                            query,
+                            from_page,
+                            generation,
+                        } => search.search(query, from_page, generation),
+                        EngineCmd::CancelSearch => search.cancel(),
+                        EngineCmd::TextLines { page, generation } => {
+                            search.text_lines(page, generation)
+                        }
+                        EngineCmd::Select {
+                            from,
+                            to,
+                            mode,
+                            generation,
+                        } => search.select(from, to, mode, generation),
+                        EngineCmd::Fields { page, generation } => match engine.fields(page) {
+                            Ok(items) => {
+                                let _ = event_tx.send(EngineEvent::Fields {
+                                    page,
+                                    generation,
+                                    items,
+                                });
+                            }
+                            Err(err) => Self::report(&event_tx, &err),
+                        },
+                        EngineCmd::NextFieldPage {
+                            from,
+                            back,
+                            generation,
+                        } => {
+                            let _ = event_tx.send(EngineEvent::FieldPage {
+                                generation,
+                                page: engine.next_field_page(from, back),
+                                back,
+                            });
+                        }
+                        EngineCmd::ExportForm {
+                            path,
+                            format,
+                            generation,
+                        } => {
+                            let result = engine
+                                .form_values()
+                                .map_err(|e| e.to_string())
+                                .and_then(|values| {
+                                    let name = engine
+                                        .path
+                                        .as_deref()
+                                        .and_then(Path::file_name)
+                                        .and_then(|n| n.to_str());
+                                    let text = form_data::write(&values, format, name);
+                                    tools::write_replacing(&path, text.as_bytes())
+                                        .map_err(|e| e.to_string())?;
+                                    Ok(values.len())
+                                });
+                            let _ = event_tx.send(EngineEvent::FormExported {
+                                generation,
+                                path,
+                                result,
+                            });
+                        }
+                        EngineCmd::Annotations { page, generation } => {
+                            match engine.annotations(page) {
+                                Ok(items) => {
+                                    let _ = event_tx.send(EngineEvent::Annotations {
+                                        page,
+                                        generation,
+                                        items,
                                     });
                                 }
+                                Err(err) => Self::report(&event_tx, &err),
                             }
                         }
-                        EngineCmd::Cancel { request_id } => {
-                            cancelled_for_worker.store(request_id, Ordering::Relaxed);
+                        EngineCmd::Edit {
+                            op,
+                            edit_id,
+                            generation,
+                        } => {
+                            // `PageChanged` goes out before any tile of the new revision can be
+                            // prepared - this loop prepares nothing until it returns - so the app
+                            // always knows a revision before it sees pixels of it.
+                            let result = engine.edit(&op).and_then(|change| {
+                                Self::changed(&event_tx, &engine, &search, generation, change)
+                            });
+                            let applied = result.is_ok();
+                            let _ = event_tx.send(EngineEvent::Edited {
+                                edit_id,
+                                generation,
+                                result: result.map_err(|err| err.to_string()),
+                            });
+                            if applied {
+                                Self::history(
+                                    &event_tx,
+                                    &engine,
+                                    generation,
+                                    HistoryChange::Edited,
+                                );
+                            }
                         }
-                        EngineCmd::Shutdown => {
-                            break;
+                        EngineCmd::Undo { generation } | EngineCmd::Redo { generation } => {
+                            let undo = matches!(cmd, EngineCmd::Undo { .. });
+                            let moved = if undo { engine.undo() } else { engine.redo() };
+                            match moved {
+                                Ok(Some(change)) => {
+                                    if let Err(err) = Self::changed(
+                                        &event_tx, &engine, &search, generation, change,
+                                    ) {
+                                        Self::report(&event_tx, &err);
+                                    }
+                                    let change = if undo {
+                                        HistoryChange::Undone
+                                    } else {
+                                        HistoryChange::Redone
+                                    };
+                                    Self::history(&event_tx, &engine, generation, change);
+                                }
+                                Ok(None) => Self::history(
+                                    &event_tx,
+                                    &engine,
+                                    generation,
+                                    HistoryChange::None,
+                                ),
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
                         }
+                        EngineCmd::Save { path } => {
+                            let result = engine.save(path.as_deref());
+                            let saved_to = match &result {
+                                Ok((file, _)) => file.clone(),
+                                Err(_) => path.clone().unwrap_or_default(),
+                            };
+                            // After a Save As the search thread reads the new file too, and the
+                            // history starts again with the reopened copy (ADR 0008).
+                            if path.is_some() && result.is_ok() {
+                                search.document(saved_to.clone(), engine.password.clone());
+                            }
+                            let switched = path.is_some() && result.is_ok();
+                            let _ = event_tx.send(EngineEvent::Saved {
+                                path: saved_to,
+                                result: result.map(|(_, bytes)| bytes),
+                            });
+                            if switched {
+                                Self::history(&event_tx, &engine, 0, HistoryChange::None);
+                            }
+                        }
+                        EngineCmd::RunTool { job_id, mut job } => {
+                            // Compressing a document with no unsaved changes reads its file, so
+                            // "before" is the size the user knows and a result that is not smaller
+                            // is the file itself.
+                            if let ToolJob::Compress { input, .. } = &mut job
+                                && *input == MergeInput::Current
+                                && let Some(path) = engine.path.clone()
+                                && engine.pdf().is_ok_and(|pdf| !pdf.has_unsaved_changes())
+                            {
+                                *input = MergeInput::File(path);
+                            }
+                            // No output may be the open file: MuPDF reads from it.
+                            let clash = engine.path.as_deref().is_some_and(|open| {
+                                job.outputs().iter().any(|out| same_file(out, open))
+                            });
+                            let current = if tools::needs_current(&job) {
+                                engine.snapshot().map(Some)
+                            } else {
+                                Ok(None)
+                            };
+                            match (clash, current) {
+                                (true, _) => {
+                                    let _ = event_tx.send(EngineEvent::ToolDone {
+                                        job_id,
+                                        result: Err(
+                                            "the open document cannot be written over; choose another file"
+                                                .to_owned(),
+                                        ),
+                                        sizes: None,
+                                    });
+                                }
+                                (false, Err(err)) => {
+                                    let _ = event_tx.send(EngineEvent::ToolDone {
+                                        job_id,
+                                        result: Err(err.to_string()),
+                                        sizes: None,
+                                    });
+                                }
+                                (false, Ok(current)) => tools.run(job_id, job, current),
+                            }
+                        }
+                        EngineCmd::CancelTool { job_id } => tools.cancel(job_id),
+                        EngineCmd::DocumentInfo { generation } => {
+                            match engine.document_info() {
+                                Ok(info) => {
+                                    let _ = event_tx
+                                        .send(EngineEvent::DocumentInfo { generation, info });
+                                }
+                                Err(err) => Self::report(&event_tx, &err),
+                            }
+                        }
+                        EngineCmd::Cancel { request_id } => pool.cancel(request_id),
+                        EngineCmd::Shutdown => break,
                     }
                 }
+
+                // Dropping the pool and the search thread stops and joins them before the actor
+                // thread exits.
+                drop(tools);
+                drop(search);
+                drop(pool);
             })
             .expect("Failed to spawn engine actor thread");
 
         let handle = Self {
             cmd_tx,
-            cancelled_request,
             worker_thread: Some(worker_thread),
         };
 
         (handle, event_rx)
+    }
+
+    /// Reports where the undo history stands.
+    /// Reports what an edit, undo or redo changed: `PageChanged` with the page's annotations, or
+    /// `Restructured` (Plan 0005, §4.1), after which the search thread reads the document as it is
+    /// now and the outline is sent again, its entries resolved to the new page numbers. Sent
+    /// before any tile of the new revision can be prepared.
+    fn changed(
+        events: &Sender<EngineEvent>,
+        engine: &MupdfEngine,
+        search: &SearchThread,
+        generation: u64,
+        change: Change,
+    ) -> Result<(), MupdfError> {
+        match change {
+            Change::Page { page, revision } => {
+                let items = engine.annotations(page)?;
+                let _ = events.send(EngineEvent::PageChanged {
+                    generation,
+                    page,
+                    revision,
+                    items,
+                });
+            }
+            Change::Pages {
+                page_sizes,
+                revision,
+                map,
+            } => {
+                let _ = events.send(EngineEvent::Restructured {
+                    generation,
+                    page_sizes,
+                    revision,
+                    map,
+                });
+                let _ = events.send(EngineEvent::Outline {
+                    items: engine.outline(),
+                });
+                search.document_bytes(engine.snapshot()?, engine.password.clone());
+            }
+            Change::Document => {
+                let _ = events.send(EngineEvent::DocumentInfo {
+                    generation,
+                    info: engine.document_info()?,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn history(
+        events: &Sender<EngineEvent>,
+        engine: &MupdfEngine,
+        generation: u64,
+        change: HistoryChange,
+    ) {
+        let (can_undo, can_redo) = engine.history_state();
+        let _ = events.send(EngineEvent::History {
+            generation,
+            change,
+            can_undo,
+            can_redo,
+        });
+    }
+
+    /// Reports an engine failure to the UI thread.
+    fn report(events: &Sender<EngineEvent>, error: &MupdfError) {
+        let _ = events.send(EngineEvent::Error {
+            message: error.to_string(),
+        });
     }
 
     /// Returns a reference to the command sender.
@@ -567,8 +1581,10 @@ impl EngineHandle {
     }
 
     /// Cancels a specific request ID.
+    ///
+    /// The pool drops queued work of that epoch and aborts a tile that is already rasterizing, so
+    /// cancellation is a property of the pool rather than of the actor's command loop.
     pub fn cancel(&self, request_id: RequestId) {
-        self.cancelled_request.store(request_id, Ordering::Relaxed);
         let _ = self.cmd_tx.send(EngineCmd::Cancel { request_id });
     }
 }

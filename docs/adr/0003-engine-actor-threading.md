@@ -7,7 +7,31 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-Accepted
+Accepted; amended 2026-10-20 (see "Amendment" below - the rest of this record is the original
+decision, kept as written).
+
+## Amendment: tiles, a worker pool and epochs (Plan 0001, Phases 1-2)
+
+The decision below still holds in its core - **one actor thread owns the `Document`, and the UI only
+sends commands and receives events** - but the rendering it describes was replaced:
+
+- **No `RenderPage`.** The UI asks for tiles (`EngineCmd::RenderTile`) and a per-page base layer
+  (`EngineCmd::RenderBase`); the actor answers with `TileRendered`, `BaseRendered`, `TileAborted`
+  and `Opened` (`crates/core/src/lib.rs`).
+- **The actor no longer rasterizes.** It loads the page, validates the tile grid against MuPDF,
+  takes the page's display list from an LRU of eight, and dispatches the resolved job to a **render
+  worker pool** of `clamp(cores - 1, 1, 4)` threads (`crates/engine-mupdf/src/pool.rs`). The pool
+  never touches the document; `DisplayList` is `Send + Sync`, which is what makes parallel rendering
+  possible. The "Single-Page Rendering Throughput" consequence below is resolved by this.
+- **Cancellation is by epoch, not by request.** A zoom, a jump or a new document starts an epoch;
+  `Cancel` drops the old epoch's queued tiles, and whether a finished raster may be published is
+  decided under the registry lock `cancel` takes, so a cancelled epoch never publishes pixels.
+  Aborting the tile *inside* the rasterizer through MuPDF's cookie is implemented but **switched off**
+  since 2026-10-20 (`MID_RASTER_ABORT`): with mupdf-rs 0.8 an aborted run can end the process
+  (`docs/benchmarks.md` §9.7, `docs/backlog.md` item 7).
+
+ADR 0004 and Plan 0003 add further work to this model (opening on a running app; a search thread
+with its own document is planned for Plan 0003 Phase 3 and will get its own ADR).
 
 ## Context
 

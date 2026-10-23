@@ -68,6 +68,14 @@ jobs:
           fi
         shell: bash
 
+      # Export as Word is off by default (the `docx` feature); it is still built and tested here so
+      # it keeps working until it is switched on.
+      - name: Clippy and tests with the docx feature
+        run: |
+          cargo clippy -p engine-mupdf -p app --all-targets --features engine-mupdf/docx,app/docx -- -D warnings
+          cargo test -p engine-mupdf --features docx --test word_test
+        shell: bash
+
       - name: Cargo deny check
         if: runner.os == 'Linux'
         uses: EmbarkStudios/cargo-deny-action@v2
