@@ -22,6 +22,7 @@ mod tools;
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
 use pdf_core::annot::{AnnotInfo, EditOp};
+use pdf_core::form_data;
 use pdf_core::pages::{self, PageMap, PageOp};
 use pdf_core::tools::{MergeInput, ToolJob};
 use pdf_core::{
@@ -61,6 +62,12 @@ pub enum MupdfError {
 
     #[error("every field already has its default value")]
     NothingToReset,
+
+    #[error("no field of this form took a value from the file")]
+    NothingToImport,
+
+    #[error("the document has no form fields")]
+    NoForm,
 
     /// Password authentication failed.
     #[error("Invalid password provided")]
@@ -624,13 +631,20 @@ impl MupdfEngine {
         form::next_field_page(self.pdf().ok()?, from, back)
     }
 
+    /// Every field's value (Plan 0006 Phase 3), for a data file.
+    pub fn form_values(&self) -> Result<Vec<pdf_core::form_data::FieldValue>, MupdfError> {
+        form::form_values(self.pdf()?)
+    }
+
     /// Changes form fields as one journal operation (Plan 0006): a fill, a list's choices, a
-    /// reset. Changes on one page are a page edit; on several pages they are reported like a
-    /// stamp (every page keeps its place, the changed ones map to none).
+    /// reset, an import, flattening. Changes on one page are a page edit; on several pages they
+    /// are reported like a stamp (every page keeps its place, the changed ones map to none). A
+    /// change of no page adds no step and is refused with `nothing()`.
     fn fill(
         &mut self,
         page: u32,
         title: &str,
+        nothing: impl FnOnce() -> MupdfError,
         change: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>, MupdfError>,
     ) -> Result<Change, MupdfError> {
         if page as usize >= self.revisions.len() {
@@ -646,7 +660,7 @@ impl MupdfEngine {
         pdf.begin_operation(title).map_err(journal)?;
         let pages = match change(pdf).and_then(|pages| {
             if pages.is_empty() {
-                Err(MupdfError::NothingToReset)
+                Err(nothing())
             } else {
                 Ok(pages)
             }
@@ -696,21 +710,37 @@ impl MupdfEngine {
         if let EditOp::SetMetadata(fields) = op {
             return self.set_metadata(fields);
         }
+        let unchanged = || MupdfError::NothingToReset;
         match op {
             EditOp::SetField { page, name, value } => {
-                return self.fill(*page, op.title(), |pdf| {
+                return self.fill(*page, op.title(), unchanged, |pdf| {
                     form::set_field(pdf, *page, name, value)
                 });
             }
             EditOp::SetChoices { page, name, values } => {
-                return self.fill(*page, op.title(), |pdf| {
+                return self.fill(*page, op.title(), unchanged, |pdf| {
                     form::set_field_values(pdf, *page, name, values)
                 });
             }
             EditOp::ResetField { page, name } => {
-                return self.fill(*page, op.title(), |pdf| form::reset_field(pdf, *page, name));
+                return self.fill(*page, op.title(), unchanged, |pdf| {
+                    form::reset_field(pdf, *page, name)
+                });
             }
-            EditOp::ResetForm => return self.fill(0, op.title(), form::reset_form),
+            EditOp::ResetForm => {
+                return self.fill(0, op.title(), unchanged, form::reset_form);
+            }
+            EditOp::ImportForm { values } => {
+                return self.fill(
+                    0,
+                    op.title(),
+                    || MupdfError::NothingToImport,
+                    |pdf| form::import_values(pdf, values),
+                );
+            }
+            EditOp::FlattenForm => {
+                return self.fill(0, op.title(), || MupdfError::NoForm, form::flatten);
+            }
             _ => {}
         }
         let page = op.page();
@@ -1287,6 +1317,31 @@ impl EngineHandle {
                                 generation,
                                 page: engine.next_field_page(from, back),
                                 back,
+                            });
+                        }
+                        EngineCmd::ExportForm {
+                            path,
+                            format,
+                            generation,
+                        } => {
+                            let result = engine
+                                .form_values()
+                                .map_err(|e| e.to_string())
+                                .and_then(|values| {
+                                    let name = engine
+                                        .path
+                                        .as_deref()
+                                        .and_then(Path::file_name)
+                                        .and_then(|n| n.to_str());
+                                    let text = form_data::write(&values, format, name);
+                                    tools::write_replacing(&path, text.as_bytes())
+                                        .map_err(|e| e.to_string())?;
+                                    Ok(values.len())
+                                });
+                            let _ = event_tx.send(EngineEvent::FormExported {
+                                generation,
+                                path,
+                                result,
                             });
                         }
                         EngineCmd::Annotations { page, generation } => {

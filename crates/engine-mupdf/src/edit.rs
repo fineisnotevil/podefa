@@ -333,7 +333,9 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
         | EditOp::SetField { .. }
         | EditOp::SetChoices { .. }
         | EditOp::ResetField { .. }
-        | EditOp::ResetForm => {}
+        | EditOp::ResetForm
+        | EditOp::ImportForm { .. }
+        | EditOp::FlattenForm => {}
         EditOp::SetColour { id, colour, .. } => {
             let mut annot =
                 find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;

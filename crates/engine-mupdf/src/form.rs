@@ -14,6 +14,8 @@ use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject, PdfPage, PdfWidget, WidgetType};
 use pdf_core::Rect;
 use pdf_core::form::{ChoiceOption, FieldInfo, FieldKind, FormSummary, OFF, TabOrder, tab_places};
+use pdf_core::form_data::FieldValue;
+use std::collections::HashMap;
 
 fn kind(widget: &PdfWidget) -> FieldKind {
     match widget.r#type() {
@@ -578,6 +580,152 @@ pub(crate) fn reset_form(doc: &mut PdfDocument) -> Result<Vec<u32>, MupdfError> 
     }
     pages.sort_unstable();
     pages.dedup();
+    Ok(pages)
+}
+
+/// Every field's value, for a data file (Plan 0006 Phase 3): each field once, in page order, as
+/// [`FieldValue`] holds it - a text (empty too) or a button's state (`Off` when off) as one value,
+/// a choice's chosen values. Read-only fields are written too; push buttons and signatures have no
+/// value to write.
+pub(crate) fn form_values(doc: &PdfDocument) -> Result<Vec<FieldValue>, MupdfError> {
+    let count = doc
+        .page_count()
+        .map_err(|source| MupdfError::EditFailed { page: 0, source })?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for p in 0..count.max(0) as u32 {
+        let page = doc
+            .load_pdf_page(p as i32)
+            .map_err(|source| MupdfError::EditFailed { page: p, source })?;
+        for info in widgets(&page) {
+            let values = match info.kind {
+                FieldKind::Text => vec![info.value],
+                FieldKind::CheckBox | FieldKind::Radio if info.value.is_empty() => {
+                    vec![OFF.to_owned()]
+                }
+                FieldKind::CheckBox | FieldKind::Radio => vec![info.value],
+                FieldKind::ComboBox | FieldKind::ListBox => info.values,
+                FieldKind::PushButton | FieldKind::Signature | FieldKind::Unknown => continue,
+            };
+            if seen.insert(info.name.clone()) {
+                out.push(FieldValue::new(info.name, values));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// What an import needs to know of one field: where a widget of it is, and what it takes.
+struct Target {
+    page: u32,
+    kind: FieldKind,
+    current: Vec<String>,
+    /// A check box's or radio group's "on" states, over all its widgets.
+    states: Vec<String>,
+    /// A choice field's export values.
+    options: Vec<String>,
+    editable: bool,
+    multi_select: bool,
+}
+
+/// The values a field takes from `wanted`, as [`normalised`] gives them, or `None` when it takes
+/// none of them: a state the button does not have, an entry the list does not have.
+fn accepted(target: &Target, wanted: &[String]) -> Option<Vec<String>> {
+    let first = wanted.first().map_or("", String::as_str);
+    match target.kind {
+        FieldKind::Text => Some(normalised(target.kind, first, Vec::new())),
+        FieldKind::CheckBox | FieldKind::Radio => {
+            (first == OFF || first.is_empty() || target.states.iter().any(|s| s == first))
+                .then(|| normalised(target.kind, first, Vec::new()))
+        }
+        FieldKind::ComboBox | FieldKind::ListBox => {
+            let mut chosen: Vec<String> =
+                wanted.iter().filter(|v| !v.is_empty()).cloned().collect();
+            if !target.multi_select {
+                chosen.truncate(1);
+            }
+            // An editable combo box takes any text.
+            let free = target.kind == FieldKind::ComboBox && target.editable;
+            chosen
+                .iter()
+                .all(|v| free || target.options.contains(v))
+                .then_some(chosen)
+        }
+        FieldKind::PushButton | FieldKind::Signature | FieldKind::Unknown => None,
+    }
+}
+
+/// Sets fields from a data file (Plan 0006 Phase 3), inside the caller's journal operation. A
+/// value for a field the form does not have, a read-only field, or a value the field does not
+/// take is left out; so is one the field already has. Returns every changed page, sorted.
+pub(crate) fn import_values(
+    doc: &mut PdfDocument,
+    values: &[FieldValue],
+) -> Result<Vec<u32>, MupdfError> {
+    let count = doc
+        .page_count()
+        .map_err(|source| MupdfError::EditFailed { page: 0, source })?;
+    let mut targets: HashMap<String, Target> = HashMap::new();
+    for p in 0..count.max(0) as u32 {
+        let page = doc
+            .load_pdf_page(p as i32)
+            .map_err(|source| MupdfError::EditFailed { page: p, source })?;
+        for info in widgets(&page) {
+            if !info.fillable() {
+                continue;
+            }
+            let target = targets.entry(info.name.clone()).or_insert_with(|| Target {
+                page: p,
+                kind: info.kind,
+                current: normalised(info.kind, &info.value, info.values.clone()),
+                states: Vec::new(),
+                options: info.options.iter().map(|o| o.export.clone()).collect(),
+                editable: info.editable,
+                multi_select: info.multi_select,
+            });
+            if let Some(state) = info.on_state {
+                target.states.push(state);
+            }
+        }
+    }
+    let mut pages = Vec::new();
+    for value in values {
+        let Some(target) = targets.get(&value.name) else {
+            continue;
+        };
+        let Some(wanted) = accepted(target, &value.values) else {
+            continue;
+        };
+        if wanted != target.current {
+            let set = to_set(target.kind, wanted);
+            pages.extend(set_field_values(doc, target.page, &value.name, &set)?);
+        }
+    }
+    pages.sort_unstable();
+    pages.dedup();
+    Ok(pages)
+}
+
+/// Draws every field into its page and removes the form (Plan 0006 Phase 3), inside the caller's
+/// journal operation: MuPDF's `pdf_bake_document` with widgets only, so other annotations stay
+/// annotations. Returns the pages that had a widget, sorted; none when there is no form.
+pub(crate) fn flatten(doc: &mut PdfDocument) -> Result<Vec<u32>, MupdfError> {
+    let count = doc
+        .page_count()
+        .map_err(|source| MupdfError::EditFailed { page: 0, source })?;
+    let mut pages = Vec::new();
+    for p in 0..count.max(0) as u32 {
+        let page = doc
+            .load_pdf_page(p as i32)
+            .map_err(|source| MupdfError::EditFailed { page: p, source })?;
+        if page.widgets().next().is_some() {
+            pages.push(p);
+        }
+    }
+    if !pages.is_empty() {
+        doc.bake(false, true)
+            .map_err(|source| MupdfError::EditFailed { page: 0, source })?;
+    }
     Ok(pages)
 }
 

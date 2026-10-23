@@ -404,3 +404,163 @@ fn the_form_resets_as_one_step_and_a_second_reset_adds_none() {
     assert_eq!(value(&engine, 1, "shared"), "Muğla");
     assert_eq!(choices(&engine, "langs"), ["tr", "en"]);
 }
+
+/// The text of page `index` as saved, the way a reader extracts it.
+fn saved_text(engine: &MupdfEngine, index: i32) -> String {
+    let bytes = engine.snapshot().expect("snapshot");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).expect("snapshot opens");
+    doc.load_page(index)
+        .expect("page")
+        .to_text_page(mupdf::TextPageFlags::empty())
+        .expect("text")
+        .to_text()
+        .expect("text")
+}
+
+/// How many widgets the saved document has, over all pages.
+fn saved_widgets(engine: &MupdfEngine) -> usize {
+    let bytes = engine.snapshot().expect("snapshot");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).expect("snapshot opens");
+    (0..doc.page_count().expect("pages"))
+        .map(|p| doc.load_pdf_page(p).expect("page").widgets().count())
+        .sum()
+}
+
+#[test]
+fn flattening_draws_the_fields_into_the_pages_as_one_step() {
+    let path = fixture("form_flatten.pdf");
+    let mut engine = open(&path);
+    fill(&mut engine, 0, "name", "Öğüt Şükrü");
+    fill(&mut engine, 0, "agree", "Yes");
+    fill(&mut engine, 1, "shared", "Muğla");
+    assert!(
+        !saved_text(&engine, 0).contains("Öğüt"),
+        "a field is no page text yet"
+    );
+
+    let change = engine.edit(&EditOp::FlattenForm).expect("flatten");
+    assert!(matches!(change, Change::Pages { .. }), "{change:?}");
+    assert!(engine.fields(0).expect("fields").is_empty());
+    assert!(engine.fields(1).expect("fields").is_empty());
+    assert_eq!(saved_widgets(&engine), 0);
+    // The values are the pages' own text now, on both pages, Turkish letters included.
+    let text = saved_text(&engine, 0);
+    assert!(text.contains("Öğüt Şükrü"), "{text}");
+    assert!(saved_text(&engine, 1).contains("Muğla"));
+    // Nothing left to flatten: refused, no step.
+    let again = engine.edit(&EditOp::FlattenForm);
+    assert!(matches!(again, Err(MupdfError::NoForm)), "{again:?}");
+
+    // One undo brings the form back, values and all; redo flattens it again.
+    engine.undo().expect("undo").expect("a step");
+    assert_eq!(value(&engine, 0, "name"), "Öğüt Şükrü");
+    assert_eq!(value(&engine, 0, "agree"), "Yes");
+    assert_eq!(value(&engine, 1, "shared"), "Muğla");
+    assert!(saved_widgets(&engine) > 0);
+    engine.redo().expect("redo").expect("a step");
+    assert_eq!(saved_widgets(&engine), 0);
+
+    // Saved in place and reopened: still flat.
+    engine.save(None).expect("save");
+    let engine = open(&path);
+    assert!(engine.fields(0).expect("fields").is_empty());
+    assert!(saved_text(&engine, 0).contains("Öğüt Şükrü"));
+}
+
+/// Fills one of every kind the data files carry, Turkish text and a multi-line note included.
+fn fill_everything(engine: &mut MupdfEngine) {
+    fill(engine, 0, "name", "Öğüt \"Şükrü\" <İnce> & co");
+    fill(engine, 0, "notes", "Birinci satır\nİkinci satır");
+    fill(engine, 0, "agree", "Yes");
+    fill(engine, 0, "choice", "b");
+    fill(engine, 0, "city", "Muğla");
+    fill(engine, 0, "code", "AB12CD");
+    fill(engine, 1, "shared", "İzmir");
+    engine
+        .edit(&EditOp::SetChoices {
+            page: 0,
+            name: "langs".to_owned(),
+            values: vec!["tr".to_owned(), "de".to_owned()],
+        })
+        .expect("choose");
+}
+
+#[test]
+fn values_go_out_and_into_an_empty_copy_in_xfdf_and_json() {
+    use pdf_core::form_data::{self, DataFormat};
+    let mut engine = open(&fixture("form_export.pdf"));
+    fill_everything(&mut engine);
+    let values = engine.form_values().expect("values");
+    let names: Vec<&str> = values.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "name", "notes", "agree", "choice", "city", "langs", "a", "b", "total", "shared",
+            "code"
+        ],
+        "each field once, in page and annotation order"
+    );
+    for (format, file) in [
+        (DataFormat::Xfdf, "form_import_xfdf.pdf"),
+        (DataFormat::Json, "form_import_json.pdf"),
+    ] {
+        let text = form_data::write(&values, format, Some("form_export.pdf"));
+        let read = form_data::read(&text, format).expect("read back");
+        let mut empty = open(&fixture(file));
+        let change = empty
+            .edit(&EditOp::ImportForm { values: read })
+            .unwrap_or_else(|e| panic!("{format:?}: {e}"));
+        // "shared" is on page 2 too.
+        assert!(matches!(change, Change::Pages { .. }), "{change:?}");
+        assert_eq!(empty.form_values().expect("values"), values, "{format:?}");
+        // The whole import is one step.
+        empty.undo().expect("undo").expect("a step");
+        assert_eq!(value(&empty, 0, "name"), "", "{format:?}");
+        assert_eq!(value(&empty, 1, "shared"), "", "{format:?}");
+        assert!(empty.undo().expect("undo").is_none(), "{format:?}");
+    }
+}
+
+#[test]
+fn an_import_leaves_out_what_the_form_does_not_take() {
+    use pdf_core::form_data::FieldValue;
+    let v = |name: &str, value: &str| FieldValue::new(name, vec![value.to_owned()]);
+    let mut engine = open(&fixture("form_import_bad.pdf"));
+    let junk = vec![
+        v("nope", "x"),
+        v("total", "99"),
+        v("city", "Paris"),
+        v("agree", "Maybe"),
+        v("choice", "c"),
+        FieldValue::new("langs", vec!["tr".to_owned(), "fr".to_owned()]),
+        v("signature", "me"),
+    ];
+    let refused = engine.edit(&EditOp::ImportForm {
+        values: junk.clone(),
+    });
+    assert!(
+        matches!(refused, Err(MupdfError::NothingToImport)),
+        "{refused:?}"
+    );
+    assert!(engine.undo().expect("undo").is_none());
+
+    // One value the form takes among the junk: only it is set, as a page edit.
+    let mut some = junk;
+    some.push(v("name", "Öğüt"));
+    let change = engine
+        .edit(&EditOp::ImportForm {
+            values: some.clone(),
+        })
+        .expect("import");
+    assert!(matches!(change, Change::Page { page: 0, .. }), "{change:?}");
+    assert_eq!(value(&engine, 0, "name"), "Öğüt");
+    assert_eq!(value(&engine, 0, "city"), "");
+    assert_eq!(value(&engine, 0, "agree"), "Off");
+    assert!(choices(&engine, "langs").is_empty());
+    // The same file again changes nothing.
+    let again = engine.edit(&EditOp::ImportForm { values: some });
+    assert!(
+        matches!(again, Err(MupdfError::NothingToImport)),
+        "{again:?}"
+    );
+}

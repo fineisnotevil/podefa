@@ -125,6 +125,17 @@ fn part_path(output: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Writes `bytes` to the `.part` file of `output`, then renames it to `output`: a file that was
+/// there stays whole until the new one is.
+pub(crate) fn write_replacing(output: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let part = part_path(output);
+    std::fs::write(&part, bytes)
+        .and_then(|()| std::fs::rename(&part, output))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&part);
+        })
+}
+
 /// Writes a document to the `.part` file of `output`, which it returns.
 fn write_part(doc: &PdfDocument, output: &Path) -> Result<PathBuf, String> {
     let part = part_path(output);
