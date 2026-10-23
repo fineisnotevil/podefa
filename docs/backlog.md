@@ -616,3 +616,27 @@ lines on one baseline together with tab stops, detects tables from rules and fro
 columns, tells real text columns apart, and keeps fonts, sizes and bold. Measure it against real
 documents (CVs, reports, forms, two-column articles) before switching the feature on.
 
+---
+
+## 17. mupdf-rs: `PdfWidget::set_value` passes the widget, not the field
+
+**Labels:** `upstream`
+
+### Problem Statement
+
+`PdfWidget::set_value` calls `pdf_set_field_value` with the widget's object. For a check box or
+radio group whose widgets are kids of a field, MuPDF sets the appearance states from the object it
+is given down through `/Kids` (`pdf-form.c`, `update_checkbox_selector`). Only the clicked widget's
+`/AS` changes, so a radio group stores its new value and no button looks on. fa-pdf sets the kids'
+`/AS` itself (`crates/engine-mupdf/src/form.rs`, `set_field`, Plan 0006 Phase 1).
+
+### Proposed Solution
+
+Report it to mupdf-rs with the reproduction in `form_test.rs`
+(`a_radio_group_shows_the_chosen_button`). The fix is passing the field
+(`pdf_dict_get_inheritable`'s owner with `/T`, or MuPDF's `pdf_get_widget_field`-style lookup) to
+`pdf_set_field_value`.
+
+Also from Phase 1: MuPDF 1.27.2 lays single-line rich text below its field (Bug 709471, fixed in
+1.28.5). fa-pdf adds the missing translation (`fix_single_line_rich_text`); item 10's release has
+to carry MuPDF 1.28.5 or later for it to go.

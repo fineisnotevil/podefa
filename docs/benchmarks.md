@@ -1474,3 +1474,22 @@ Without the engine's loader (`FA_PDF_FORM_NO_LOADER=1`) the Turkish fills took 5
 2636 ms. The cause is MuPDF asking for a font named `serif` three times per fill (plan 0006
 §3.2). The calculation script did not run (plan §3.3).
 
+### 12.2 Phase 1: filling fields (rows AI, AJ, AK)
+
+`t_fill` is `t_edit` (§10.2) of an `EditOp::SetField`: from sending the fill to every tile of the
+changed page showing its new revision.
+
+Engine: `crates/engine-mupdf/tests/form_test.rs` (7 tests, plan §5 Phase 1 results). A Turkish
+single-line fill takes about 2 ms (the font fix of plan §3.2; 3046 ms without it, in the debug
+test build).
+
+Through a real window, release build of `92478dc`, 2026-10-23, the §1 machine:
+
+```powershell
+target\release\app.exe target\tmp\bench_form.pdf --bench-forms --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+(`bench_form.pdf` is a copy of `form_read.pdf`, which `form_test.rs` writes from the generated form
+of `tests/form_fixture`.) Clicking the check box, the second radio button, typing
+"Öğüt Şükrü İnce" into the editor over the name field and choosing the third city, then undoing all
+four: 8 of 8 checks. `t_fill` min 3, median 7, max 13 ms (n = 4).
