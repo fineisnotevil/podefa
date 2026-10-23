@@ -155,15 +155,19 @@ fn the_document_exports_as_a_word_file_with_its_text_in_order() {
                 .expect("text"),
         );
     }
+    // Line breaks depend on the fonts the layout finds (Linux lays the text out narrower than
+    // Windows), so whitespace is compared as single spaces.
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut from = 0;
     for chapter in 0..4 {
         for needle in [
             format!("Chapter {chapter}"),
             format!("Line 9 of chapter {chapter} says something."),
         ] {
-            let at = text[from..]
-                .find(&needle)
-                .unwrap_or_else(|| panic!("{needle:?} after byte {from}"));
+            let at = text[from..].find(&needle).unwrap_or_else(|| {
+                let tail: String = text[from..].chars().take(400).collect();
+                panic!("{needle:?} after byte {from}, in: {tail:?}")
+            });
             from += at + needle.len();
         }
     }
