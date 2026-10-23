@@ -1425,3 +1425,20 @@ keeps them as they are.)
 
 2 of 2 checks on both: the compressed copy is not larger; pages 6 and 1 exported, made into a PDF
 and opened come back in that order.
+
+### 11.8 Phase 5: export as Word (row AH)
+
+`crates/engine-mupdf/tests/word_test.rs`, release build, 2026-10-23, the §1 machine: 100 text pages
+(a heading and ten lines each) exported in 29 ms, 0.3 ms per page, 12 KiB of DOCX. Phase 0 measured
+3.7 ms per page and a 1.4 s first document (§11.3) through a test binary; the engine's run has the
+writer's start-up behind it already (the standard fonts come from MuPDF's own copies, plan §3.8).
+
+Reading a DOCX back with MuPDF (only the test does) is slow: about 170 s for the 100-page file in
+a release build, through its HTML layout. The test reads back a 4-page export instead.
+
+Through a real window, release build of `8826918`, the `--bench-convert` run of §11.7 on 200 pages:
+the PDF made of two images exported as Word in `t_tool` 17 ms; the working set went from 130.7 to
+149.2 MiB.
+
+Release `app.exe`: 18 697 216 bytes at `8ec028d`, 20 677 632 bytes with the DOCX writer
+(+1.89 MiB).
