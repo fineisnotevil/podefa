@@ -54,6 +54,7 @@ use std::time::Instant;
 /// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
 mod bench;
 mod convert_ui;
+mod fields_ui;
 mod stamps_ui;
 mod tools_ui;
 
@@ -199,6 +200,24 @@ slint::slint! {
         in-out property <string> convert-dpi: "150";
         in-out property <string> convert-pages: "";
         in-out property <string> convert-error: "";
+        // Filling form fields (Plan 0006): the editor over a text field, a choice field's options,
+        // and the cursor over a field (1 text, 2 pointer).
+        in-out property <bool> field-editor-visible: false;
+        in-out property <length> field-editor-x;
+        in-out property <length> field-editor-y;
+        in-out property <length> field-editor-w;
+        in-out property <length> field-editor-h;
+        in-out property <length> field-editor-font-size: 12px;
+        in-out property <string> field-editor-text;
+        in-out property <bool> field-editor-multiline: false;
+        in-out property <bool> field-editor-password: false;
+        in-out property <bool> field-choices-visible: false;
+        in-out property <[string]> field-choices;
+        in-out property <int> field-choice-selected: -1;
+        in-out property <length> field-choices-x;
+        in-out property <length> field-choices-y;
+        in-out property <length> field-choices-w;
+        in-out property <int> field-cursor: 0;
         // The crop panel, open once the Crop tool's rectangle is drawn.
         in-out property <bool> crop-visible: false;
         in-out property <string> crop-size: "";
@@ -345,6 +364,9 @@ slint::slint! {
         callback convert_close();
         callback images_to_pdf();
         callback export_word();
+        callback field_commit();
+        callback field_cancel();
+        callback field_choose(int);
         callback stamp_open(int);
         callback stamp_apply();
         callback stamp_close();
@@ -1100,6 +1122,8 @@ slint::slint! {
                             return reject;
                         }
                         mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
+                            : root.field-cursor == 1 ? MouseCursor.text
+                            : root.field-cursor == 2 ? MouseCursor.pointer
                             : root.text-cursor ? MouseCursor.text : MouseCursor.default;
                         changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
                         changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
@@ -1203,6 +1227,103 @@ slint::slint! {
                         text: root.note-hover-text;
                         wrap: word-wrap;
                         color: #3b3000;
+                    }
+                }
+
+                // The editor over a text field (Plan 0006): Enter (Ctrl+Enter in a multi-line field)
+                // or Tab keeps the text, Esc drops it; a click elsewhere keeps it too.
+                if root.field-editor-visible : FocusScope {
+                    x: root.field-editor-x;
+                    y: root.field-editor-y;
+                    width: root.field-editor-w;
+                    height: root.field-editor-h;
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.field_cancel();
+                            return accept;
+                        }
+                        if (event.text == Key.Tab) {
+                            root.field_commit();
+                            return accept;
+                        }
+                        if (event.text == Key.Return
+                            && (!root.field-editor-multiline || event.modifiers.control)) {
+                            root.field_commit();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: #e8f0ff;
+                        border-width: 1px;
+                        border-color: Palette.accent-background;
+                        clip: true;
+                        TextInput {
+                            x: 2px;
+                            y: root.field-editor-multiline ? 1px : 0px;
+                            width: parent.width - 4px;
+                            height: parent.height - (root.field-editor-multiline ? 2px : 0px);
+                            text <=> root.field-editor-text;
+                            font-size: root.field-editor-font-size;
+                            single-line: !root.field-editor-multiline;
+                            wrap: root.field-editor-multiline ? TextWrap.word-wrap : TextWrap.no-wrap;
+                            vertical-alignment: root.field-editor-multiline
+                                ? TextVerticalAlignment.top : TextVerticalAlignment.center;
+                            input-type: root.field-editor-password ? InputType.password : InputType.text;
+                            color: #000000;
+                            init => {
+                                self.focus();
+                                self.select-all();
+                            }
+                        }
+                    }
+                }
+
+                // A choice field's options, under the field: a click chooses, Esc closes.
+                if root.field-choices-visible : FocusScope {
+                    x: root.field-choices-x;
+                    y: root.field-choices-y;
+                    width: root.field-choices-w;
+                    height: min(8, root.field-choices.length) * 24px + 4px;
+                    init => {
+                        if (!root.field-editor-visible) {
+                            self.focus();
+                        }
+                    }
+                    capture-key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.field_cancel();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        drop-shadow-blur: 6px;
+                        drop-shadow-color: #00000040;
+                        ListView {
+                            x: 2px;
+                            y: 2px;
+                            width: parent.width - 4px;
+                            height: parent.height - 4px;
+                            for label[index] in root.field-choices : Rectangle {
+                                height: 24px;
+                                background: index == root.field-choice-selected
+                                    ? Palette.selection-background : transparent;
+                                Text {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    text: label;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    color: index == root.field-choice-selected
+                                        ? Palette.selection-foreground : Palette.foreground;
+                                }
+                                TouchArea { clicked => { root.field_choose(index); } }
+                            }
+                        }
                     }
                 }
 
@@ -2099,6 +2220,12 @@ struct AppState {
     ink_shown: Option<u32>,
     /// The Crop tool's rectangle (Plan 0005 Phase 3).
     crop: Option<stamps_ui::CropDraw>,
+    /// Form fields of the near pages, those asked for, the field being filled, and what the
+    /// document's form has (Plan 0006).
+    fields: HashMap<u32, Vec<pdf_core::form::FieldInfo>>,
+    fields_pending: HashSet<u32>,
+    field_edit: Option<fields_ui::FieldEdit>,
+    form: pdf_core::form::FormSummary,
     /// Pages chosen in the thumbnails for a page operation (Plan 0005 Phase 1), the row a Shift+click
     /// range starts from, and the pages a thumbnail drag is moving.
     page_sel: std::collections::BTreeSet<u32>,
@@ -2518,6 +2645,7 @@ impl AppState {
                 }
             }
         }
+        self.field_hover(ui, point, x, y);
     }
 
     /// The note under a page point, if there is one there.
@@ -2624,6 +2752,10 @@ impl AppState {
             return;
         }
         let point = self.page_point(ui, x, y);
+        // A press on a form field fills it (Plan 0006); any press commits an open field editor.
+        if kind == 0 && !shift && self.field_pressed(ui, point) {
+            return;
+        }
         // The Ink tool draws with the mouse, a pen and a finger alike (Plan 0004, §4.2).
         if self.tool == Tool::Ink && self.editable {
             match kind {
@@ -3166,6 +3298,7 @@ impl AppState {
         // Whatever is open on the old pages ends.
         self.finish_ink(ui, false);
         self.crop_cancel(ui);
+        self.field_cancel(ui);
         self.note_cancel(ui);
         self.note_drag = None;
         self.select_annotation(ui, None);
@@ -3175,9 +3308,11 @@ impl AppState {
         // Per-page state follows the map; what has no old page is asked for again.
         self.text_lines = remap(&map, &self.text_lines);
         self.annots = remap(&map, &self.annots);
+        self.fields = remap(&map, &self.fields);
         self.layout_generation += 1;
         self.lines_pending.clear();
         self.annots_pending.clear();
+        self.fields_pending.clear();
         let bases = remap(&map, &self.bases);
         let thumbs: Vec<Option<Image>> = map
             .iter()
@@ -3378,6 +3513,7 @@ impl AppState {
         }
         self.page_revs.insert(page, revision);
         self.annots_pending.remove(&page);
+        self.fields_changed(page);
         if let Some((selected_page, id)) = self.selected_annot
             && selected_page == page
             && !items.iter().any(|item| item.id == id)
@@ -4029,6 +4165,9 @@ impl AppState {
                 }
             }
         }
+        // And the form fields, to fill them (Plan 0006).
+        let near_pages: Vec<u32> = near.clone().map(|page| page as u32).collect();
+        self.request_fields(&near_pages);
         let mut wanted = HashSet::new();
         let mut rows = Vec::with_capacity(near.len());
         for page in near {
@@ -4382,6 +4521,9 @@ impl AppState {
     /// A document was opened: forget everything and show the top of page 1 at 100%.
     fn set_document(&mut self, ui: &MainWindow, page_sizes: Vec<PageSize>, editable: bool) {
         self.crop_cancel(ui);
+        self.field_cancel(ui);
+        self.fields.clear();
+        self.fields_pending.clear();
         ui.set_stamp_visible(false);
         ui.set_convert_visible(false);
         self.page_sizes = page_sizes;
@@ -4626,6 +4768,9 @@ fn viewport_moved(ui: &MainWindow) {
             }
             if state.crop.is_some() {
                 state.rebuild_crop(ui);
+            }
+            if state.field_edit.is_some() {
+                state.place_field_editor(ui);
             }
         }
     });
@@ -4977,6 +5122,10 @@ fn main() -> Result<(), slint::PlatformError> {
             ink_commands: String::new(),
             ink_shown: None,
             crop: None,
+            fields: HashMap::new(),
+            fields_pending: HashSet::new(),
+            field_edit: None,
+            form: pdf_core::form::FormSummary::default(),
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             page_sel: std::collections::BTreeSet::new(),
@@ -5017,6 +5166,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     unsized_pages,
                     editable,
                     repaired,
+                    form,
                 } => {
                     ui.set_has_error(false);
                     ui.set_error_text(SharedString::from(""));
@@ -5033,6 +5183,16 @@ fn main() -> Result<(), slint::PlatformError> {
                             unsized_pages.len()
                         )
                     };
+                    // A form whose scripts do not run here (Plan 0006, §0 question 2), or an XFA
+                    // form MuPDF cannot read.
+                    if form.xfa {
+                        status.push_str(" - this form is XFA, which PODEFA cannot fill");
+                    } else if form.scripts {
+                        status.push_str(
+                            " - this form has scripts (calculations, checks), which PODEFA does not run",
+                        );
+                    }
+                    with_state(|state| state.form = form);
                     // A damaged file MuPDF repaired: a full copy is a clean one (Plan 0005 Phase 4).
                     ui.set_repaired(repaired);
                     if repaired {
@@ -5118,6 +5278,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     items,
                 } => {
                     with_state(|state| state.apply_annotations(&ui, page, generation, items));
+                }
+                EngineEvent::Fields {
+                    page,
+                    generation,
+                    items,
+                } => {
+                    with_state(|state| state.apply_fields(page, generation, items));
                 }
                 EngineEvent::PageChanged {
                     generation,
@@ -5546,6 +5713,24 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
         main_window.on_cancel_tool(|| with_state(|state| state.cancel_tool()));
+        let weak = main_window.as_weak();
+        main_window.on_field_commit(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.field_commit(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_field_cancel(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.field_cancel(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_field_choose(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.field_choose(&ui, index));
+            }
+        });
         let weak = main_window.as_weak();
         main_window.on_convert_open(move |mode| {
             if let Some(ui) = weak.upgrade() {

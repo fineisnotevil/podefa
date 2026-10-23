@@ -155,6 +155,11 @@ pub struct Cfg {
     /// `bench_img_*.png`,
     /// `bench_images.pdf` and `bench_images.docx` next to the document.
     pub convert: bool,
+    /// `--bench-forms`: on the generated form of `form_test.rs`, click the check box, a radio
+    /// button, the name field (typing Turkish text into its editor) and the combo box (choosing
+    /// from its options) through the window, check each value, then undo all four; `t_edit` of
+    /// each fill is its `t_fill` (Plan 0006 Phase 1, rows AI, AJ, AK).
+    pub forms: bool,
 }
 
 impl Default for Cfg {
@@ -192,6 +197,7 @@ impl Default for Cfg {
             tools: false,
             stamps: false,
             convert: false,
+            forms: false,
         }
     }
 }
@@ -216,6 +222,7 @@ impl Cfg {
             && !self.tools
             && !self.stamps
             && !self.convert
+            && !self.forms
     }
 }
 
@@ -329,6 +336,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
             }
             "--bench-stamps" => {
                 cfg.stamps = number.is_none_or(|on| on != 0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-forms" => {
+                cfg.forms = number.is_none_or(|on| on != 0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-convert" => {
@@ -1568,6 +1579,8 @@ enum Phase {
     Stamps,
     /// Compress, export as images and images to PDF, the result opened (Plan 0005 Phase 4).
     Convert,
+    /// Form fields filled by clicking and typing, then undone (Plan 0006 Phase 1).
+    Forms,
     /// Idle time, so the previous phase's tiles arrive before the next phase or the summary.
     Settle,
 }
@@ -1592,6 +1605,7 @@ struct Pending {
     tools: bool,
     stamps: bool,
     convert: bool,
+    forms: bool,
 }
 
 impl Pending {
@@ -1615,6 +1629,7 @@ impl Pending {
             tools: cfg.tools,
             stamps: cfg.stamps,
             convert: cfg.convert,
+            forms: cfg.forms,
         }
     }
 
@@ -1638,6 +1653,7 @@ impl Pending {
             (&mut self.tools, Phase::Tools),
             (&mut self.stamps, Phase::Stamps),
             (&mut self.convert, Phase::Convert),
+            (&mut self.forms, Phase::Forms),
         ];
         for (flag, phase) in slots {
             if *flag {
@@ -1683,6 +1699,10 @@ struct Driver {
     open_wait: Option<i32>,
     /// `--bench-stamps`: the first page's size as opened.
     base_size: String,
+    /// `--bench-forms`: the check the last step waits for (its name, the field, the value), and
+    /// how long it waits.
+    form_expect: Option<(&'static str, &'static str, String)>,
+    form_deadline: Instant,
 }
 
 /// A page-space point of page 0, `(x, line)`, as a window position (logical pixels).
@@ -2069,6 +2089,7 @@ impl Driver {
             Phase::Tools => "tools",
             Phase::Stamps => "stamps",
             Phase::Convert => "convert",
+            Phase::Forms => "forms",
             Phase::Settle => "settle",
         };
         // The window before this one (the startup, or the previous phase's settle) closes here:
@@ -2434,6 +2455,131 @@ impl Driver {
                     }
                     4 => {
                         check("Ctrl+Z puts it back", "(300,399)".to_owned(), at(&note()));
+                    }
+                    _ => {
+                        self.settle();
+                        return false;
+                    }
+                }
+                self.step += 1;
+                false
+            }
+            Phase::Forms => {
+                let check = |name: &str, expected: String, got: String| {
+                    with_state(|state| state.bench.nav_check(name, &expected, &got));
+                };
+                // A field's value on page 1, once the page's fields are in.
+                let value = |name: &str| {
+                    let mut out = None;
+                    with_state(|state| {
+                        out = state.fields.get(&0).and_then(|fields| {
+                            fields
+                                .iter()
+                                .find(|f| f.name == name)
+                                .map(|f| f.value.clone())
+                        });
+                    });
+                    out
+                };
+                // The centre of a field's widget (the `nth` with that name) in the viewport.
+                let centre = |name: &str, nth: usize| {
+                    let mut out = None;
+                    with_state(|state| {
+                        let rect = state.fields.get(&0).and_then(|fields| {
+                            fields
+                                .iter()
+                                .filter(|f| f.name == name)
+                                .nth(nth)
+                                .map(|f| f.rect)
+                        });
+                        out = rect.and_then(|r| {
+                            state.viewport_point(0, r.x + r.width / 2.0, r.y + r.height / 2.0)
+                        });
+                    });
+                    out
+                };
+                let click = |(x, y): (f32, f32)| {
+                    ui.invoke_select_pointer(0, x, y, false, false);
+                    ui.invoke_select_pointer(1, x, y, false, false);
+                };
+                // Each step waits for the value the last one expects.
+                if let Some((name, field, expected)) = self.form_expect.take() {
+                    match value(field) {
+                        Some(got) if got == expected => check(name, expected, got),
+                        _ if Instant::now() < self.form_deadline => {
+                            self.form_expect = Some((name, field, expected));
+                            return false;
+                        }
+                        got => check(name, expected, got.unwrap_or_default()),
+                    }
+                }
+                let expect = |s: &mut Self, name: &'static str, field: &'static str, v: &str| {
+                    s.form_expect = Some((name, field, v.to_owned()));
+                    s.form_deadline = Instant::now() + Duration::from_secs(5);
+                };
+                match self.step {
+                    0 => {
+                        if value("agree").is_none() {
+                            return false;
+                        }
+                        let Some(at) = centre("agree", 0) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        expect(self, "click the check box", "agree", "Yes");
+                    }
+                    1 => {
+                        let Some(at) = centre("choice", 1) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        expect(self, "click the second radio button", "choice", "b");
+                    }
+                    2 => {
+                        let Some(at) = centre("name", 0) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        let open = ui.get_field_editor_visible();
+                        check(
+                            "the editor opens over the field",
+                            "true".into(),
+                            open.to_string(),
+                        );
+                        ui.set_field_editor_text("Öğüt Şükrü İnce".into());
+                        ui.invoke_field_commit();
+                        expect(self, "type Turkish text, Enter", "name", "Öğüt Şükrü İnce");
+                    }
+                    3 => {
+                        let Some(at) = centre("city", 0) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        let open = ui.get_field_choices_visible();
+                        check(
+                            "the options open under the field",
+                            "true".into(),
+                            open.to_string(),
+                        );
+                        ui.invoke_field_choose(2);
+                        expect(self, "choose the third city", "city", "Muğla");
+                    }
+                    4 => {
+                        for _ in 0..4 {
+                            with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                        }
+                        expect(self, "undo all four (check box off)", "agree", "Off");
+                    }
+                    5 => {
+                        check(
+                            "undo all four (name empty)",
+                            String::new(),
+                            value("name").unwrap_or_else(|| "?".to_owned()),
+                        );
                     }
                     _ => {
                         self.settle();
@@ -3440,6 +3586,8 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             tools_wait: 0,
             open_wait: None,
             base_size: String::new(),
+            form_expect: None,
+            form_deadline: Instant::now(),
         });
     });
 
