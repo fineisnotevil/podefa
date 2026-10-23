@@ -342,6 +342,7 @@ slint::slint! {
         callback convert_run();
         callback convert_close();
         callback images_to_pdf();
+        callback export_word();
         callback stamp_open(int);
         callback stamp_apply();
         callback stamp_close();
@@ -534,6 +535,11 @@ slint::slint! {
                     title: "Images to PDF...";
                     enabled: !root.tool-running;
                     activated => { root.images_to_pdf(); }
+                }
+                MenuItem {
+                    title: "Export as Word...";
+                    enabled: root.total_pages > 0 && root.editable && !root.tool-running;
+                    activated => { root.export_word(); }
                 }
                 MenuSeparator {}
                 MenuItem {
@@ -5553,6 +5559,12 @@ fn main() -> Result<(), slint::PlatformError> {
         main_window.on_convert_close(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_convert_visible(false);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_export_word(move || {
+            if let Some(ui) = weak.upgrade() {
+                convert_ui::export_word(&ui);
             }
         });
         let weak = main_window.as_weak();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! Compress, export as images and images to PDF (Plan 0005 Phase 4).
+//! Compress, export as images and images to PDF (Plan 0005 Phase 4), and export as Word (Phase 5).
 //!
 //! All three run on the engine's tool thread like merge and split (Phase 2): compress and export
 //! read the open document as it is now, unsaved changes included. One panel sets compress's preset
@@ -204,5 +204,27 @@ pub(crate) fn images_run(ui: &MainWindow) {
             state.merge_close(ui);
             ui.set_merge_images(false);
         }
+    });
+}
+
+/// Tools > Export as Word...: where to write, then the job, from the document as it is now.
+pub(crate) fn export_word(ui: &MainWindow) {
+    let Some((name, dir)) =
+        with_state_ret(|state| (format!("{}.docx", state.doc_stem()), state.doc_dir()))
+    else {
+        return;
+    };
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Export as Word")
+        .add_filter("Word document", &["docx"])
+        .set_file_name(name);
+    if let Some(dir) = dir {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(output) = dialog.save_file() else {
+        return;
+    };
+    with_state(|state| {
+        state.start_tool(ui, ToolJob::ExportWord { output }, false);
     });
 }
