@@ -161,6 +161,8 @@ slint::slint! {
         in-out property <bool> tool-running: false;
         // The merge panel: its file list, in order, and the chosen row.
         in-out property <bool> merge-visible: false;
+        // The same panel orders images for Images to PDF (Plan 0005 Phase 4).
+        in-out property <bool> merge-images: false;
         in-out property <[string]> merge-files;
         in-out property <int> merge-selected: -1;
         // The split panel: every N pages (mode 0) or page ranges (mode 1).
@@ -1272,7 +1274,8 @@ slint::slint! {
                             padding: 10px;
                             spacing: 8px;
                             Text {
-                                text: "Merge files - in this order";
+                                text: root.merge-images ? "Images to PDF - one page each, in this order"
+                                    : "Merge files - in this order";
                                 font-weight: 600;
                                 color: Palette.foreground;
                             }
@@ -1296,8 +1299,11 @@ slint::slint! {
                             HorizontalLayout {
                                 spacing: 6px;
                                 height: 28px;
-                                Button { text: "Add files..."; clicked => { root.merge_add(); } }
                                 Button {
+                                    text: root.merge-images ? "Add images..." : "Add files...";
+                                    clicked => { root.merge_add(); }
+                                }
+                                if !root.merge-images : Button {
                                     text: "Add open document";
                                     enabled: root.total_pages > 0;
                                     clicked => { root.merge_add_current(); }
@@ -1326,7 +1332,7 @@ slint::slint! {
                                 Rectangle { horizontal-stretch: 1; }
                                 Button { text: "Cancel"; clicked => { root.merge_close(); } }
                                 Button {
-                                    text: "Merge...";
+                                    text: root.merge-images ? "Make PDF..." : "Merge...";
                                     primary: true;
                                     enabled: root.merge-files.length >= 1 && !root.tool-running;
                                     clicked => { root.merge_run(); }

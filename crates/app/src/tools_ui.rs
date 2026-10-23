@@ -122,6 +122,12 @@ impl AppState {
 
     /// Opens the merge panel; it starts with the open document, as it is now.
     pub(crate) fn merge_open(&mut self, ui: &MainWindow) {
+        // The list of an Images to PDF left open is not a merge's.
+        if ui.get_merge_images() {
+            self.merge_inputs.clear();
+            ui.set_merge_selected(-1);
+            ui.set_merge_images(false);
+        }
         if self.merge_inputs.is_empty() && !self.page_sizes.is_empty() {
             self.merge_inputs.push(MergeInput::Current);
         }
@@ -290,8 +296,12 @@ impl AppState {
     }
 }
 
-/// Add files... in the merge panel.
+/// Add files... in the merge panel (Add images... when it orders images).
 pub(crate) fn merge_add(ui: &MainWindow) {
+    if ui.get_merge_images() {
+        crate::convert_ui::add_images(ui);
+        return;
+    }
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
     let mut dialog = rfd::FileDialog::new()
         .set_title("Add PDF files")
@@ -317,8 +327,12 @@ pub(crate) fn save_dialog(title: &str, name: &str) -> Option<PathBuf> {
     dialog.save_file()
 }
 
-/// Merge... in the merge panel: where to write, then the job.
+/// Merge... in the merge panel: where to write, then the job (Make PDF... for images).
 pub(crate) fn merge_run(ui: &MainWindow) {
+    if ui.get_merge_images() {
+        crate::convert_ui::images_run(ui);
+        return;
+    }
     let Some(output) = save_dialog("Save the merged document", "merged.pdf") else {
         return;
     };

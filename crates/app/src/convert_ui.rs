@@ -144,8 +144,21 @@ fn export_run(ui: &MainWindow) {
     });
 }
 
-/// Tools > Images to PDF...: the images, in the order chosen (sorted by name), then the new file.
+/// Tools > Images to PDF...: the merge panel, ordering images, and at once the dialog to add them.
 pub(crate) fn images_to_pdf(ui: &MainWindow) {
+    with_state(|state| {
+        state.merge_inputs.clear();
+        state.merge_add_files(ui, Vec::new());
+    });
+    ui.set_merge_selected(-1);
+    ui.set_merge_images(true);
+    ui.set_merge_visible(true);
+    add_images(ui);
+}
+
+/// Add images... in the panel: they join the end of the list, by name among themselves (platform
+/// dialogs return a selection in no promised order); Up and Down set the order.
+pub(crate) fn add_images(ui: &MainWindow) {
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
     let mut dialog = rfd::FileDialog::new()
         .set_title("Images to make a PDF of")
@@ -155,14 +168,30 @@ pub(crate) fn images_to_pdf(ui: &MainWindow) {
                 "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "PNG", "JPG", "JPEG",
             ],
         );
-    if let Some(dir) = dir.clone() {
+    if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
     let Some(mut images) = dialog.pick_files() else {
         return;
     };
-    // Platform dialogs return the files in no promised order; by name, as a folder lists them.
     images.sort();
+    with_state(|state| state.merge_add_files(ui, images));
+}
+
+/// Make PDF... in the panel: where to write, then the job, the images in the list's order.
+pub(crate) fn images_run(ui: &MainWindow) {
+    let Some(images) = with_state_ret(|state| {
+        state
+            .merge_inputs
+            .iter()
+            .filter_map(|input| match input {
+                MergeInput::File(path) => Some(path.clone()),
+                MergeInput::Current => None,
+            })
+            .collect::<Vec<PathBuf>>()
+    }) else {
+        return;
+    };
     let name = images
         .first()
         .and_then(|p| p.file_stem())
@@ -170,8 +199,10 @@ pub(crate) fn images_to_pdf(ui: &MainWindow) {
     let Some(output) = crate::tools_ui::save_dialog("Save the PDF", &format!("{name}.pdf")) else {
         return;
     };
-    let images: Vec<PathBuf> = images;
     with_state(|state| {
-        state.start_tool(ui, ToolJob::ImagesToPdf { images, output }, true);
+        if state.start_tool(ui, ToolJob::ImagesToPdf { images, output }, true) {
+            state.merge_close(ui);
+            ui.set_merge_images(false);
+        }
     });
 }
