@@ -226,6 +226,20 @@ slint::slint! {
         // Every fillable field of the near pages, shaded unless the user turned it off.
         in-out property <[FieldView]> field-rects;
         in-out property <bool> field-highlight: true;
+        // Bumped each time the editor or the options open, so an editor already showing takes
+        // the keys again (Tab from one text field to the next).
+        in-out property <int> field-editor-serial: 0;
+        // A multi-select list: its options are ticked (one mark per option) until it closes.
+        in-out property <bool> field-choices-multi: false;
+        in-out property <[bool]> field-choice-marks;
+        // The field with the keyboard focus (Plan 0006 Phase 2), outlined while no editor covers it.
+        in-out property <bool> field-focus-visible: false;
+        in-out property <length> field-focus-x;
+        in-out property <length> field-focus-y;
+        in-out property <length> field-focus-w;
+        in-out property <length> field-focus-h;
+        in-out property <bool> has-field-focus: false;
+        in-out property <bool> form-fields: false;
         in-out property <bool> field-choices-visible: false;
         in-out property <[string]> field-choices;
         in-out property <int> field-choice-selected: -1;
@@ -384,6 +398,9 @@ slint::slint! {
         callback field_choose(int);
         callback field_edited(string);
         callback toggle_field_highlight();
+        callback field_tab(bool);
+        callback reset_field();
+        callback reset_form();
         callback stamp_open(int);
         callback stamp_apply();
         callback stamp_close();
@@ -595,6 +612,19 @@ slint::slint! {
                     title: "Document Properties...";
                     enabled: root.total_pages > 0;
                     activated => { root.props_open(); }
+                }
+            }
+            Menu {
+                title: "Form";
+                MenuItem {
+                    title: "Reset Field";
+                    enabled: root.editable && root.has-field-focus;
+                    activated => { root.reset_field(); }
+                }
+                MenuItem {
+                    title: "Reset Form";
+                    enabled: root.editable && root.form-fields;
+                    activated => { root.reset_form(); }
                 }
             }
             Menu {
@@ -1263,6 +1293,18 @@ slint::slint! {
                     }
                 }
 
+                // The field with the keyboard focus (Plan 0006 Phase 2): Space or Enter sets a check
+                // box or radio button, Tab moves on.
+                if root.field-focus-visible && !root.field-editor-visible && !root.field-choices-visible : Rectangle {
+                    x: root.field-focus-x - 2px;
+                    y: root.field-focus-y - 2px;
+                    width: root.field-focus-w + 4px;
+                    height: root.field-focus-h + 4px;
+                    border-width: 2px;
+                    border-radius: 2px;
+                    border-color: Palette.accent-background;
+                }
+
                 // The editor over a text field (Plan 0006): Enter (Ctrl+Enter in a multi-line field)
                 // or Tab keeps the text, Esc drops it; a click elsewhere keeps it too.
                 if root.field-editor-visible : FocusScope {
@@ -1275,8 +1317,8 @@ slint::slint! {
                             root.field_cancel();
                             return accept;
                         }
-                        if (event.text == Key.Tab) {
-                            root.field_commit();
+                        if (event.text == Key.Tab || event.text == Key.Backtab) {
+                            root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
                             return accept;
                         }
                         if (event.text == Key.Return
@@ -1309,6 +1351,11 @@ slint::slint! {
                                 ? transparent : Palette.selection-background;
                             edited => { root.field_edited(self.text); }
                             init => {
+                                self.focus();
+                                self.select-all();
+                            }
+                            property <int> serial: root.field-editor-serial;
+                            changed serial => {
                                 self.focus();
                                 self.select-all();
                             }
@@ -1352,9 +1399,40 @@ slint::slint! {
                             self.focus();
                         }
                     }
+                    property <int> serial: root.field-editor-serial;
+                    changed serial => {
+                        if (!root.field-editor-visible) {
+                            self.focus();
+                        }
+                    }
+                    // Up and Down move through the options, Space chooses (ticks, in a multi-select
+                    // list), Enter chooses or keeps the ticks, Tab keeps them and moves on.
                     capture-key-pressed(event) => {
                         if (event.text == Key.Escape) {
                             root.field_cancel();
+                            return accept;
+                        }
+                        if (event.text == Key.Tab || event.text == Key.Backtab) {
+                            root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
+                            return accept;
+                        }
+                        if (root.field-editor-visible) {
+                            return reject;
+                        }
+                        if (event.text == Key.UpArrow) {
+                            root.field-choice-selected = max(0, root.field-choice-selected - 1);
+                            return accept;
+                        }
+                        if (event.text == Key.DownArrow) {
+                            root.field-choice-selected = min(root.field-choices.length - 1, root.field-choice-selected + 1);
+                            return accept;
+                        }
+                        if (event.text == " " || (event.text == Key.Return && !root.field-choices-multi)) {
+                            root.field_choose(root.field-choice-selected);
+                            return accept;
+                        }
+                        if (event.text == Key.Return) {
+                            root.field_commit();
                             return accept;
                         }
                         return reject;
@@ -1371,17 +1449,28 @@ slint::slint! {
                             width: parent.width - 4px;
                             height: parent.height - 4px;
                             for label[index] in root.field-choices : Rectangle {
+                                property <bool> chosen: root.field-choices-multi
+                                    ? root.field-choice-marks[index] : index == root.field-choice-selected;
                                 height: 24px;
-                                background: index == root.field-choice-selected
-                                    ? Palette.selection-background : transparent;
+                                background: self.chosen ? Palette.selection-background : transparent;
+                                // In a multi-select list the keyboard's place is outlined.
+                                border-width: root.field-choices-multi && index == root.field-choice-selected ? 1px : 0px;
+                                border-color: Palette.accent-background;
                                 Text {
                                     x: 6px;
-                                    width: parent.width - 12px;
+                                    width: 14px;
+                                    visible: root.field-choices-multi;
+                                    text: root.field-choice-marks[index] ? "✓" : "";
+                                    vertical-alignment: center;
+                                    color: parent.chosen ? Palette.selection-foreground : Palette.foreground;
+                                }
+                                Text {
+                                    x: root.field-choices-multi ? 22px : 6px;
+                                    width: parent.width - self.x - 6px;
                                     text: label;
                                     vertical-alignment: center;
                                     overflow: elide;
-                                    color: index == root.field-choice-selected
-                                        ? Palette.selection-foreground : Palette.foreground;
+                                    color: parent.chosen ? Palette.selection-foreground : Palette.foreground;
                                 }
                                 TouchArea { clicked => { root.field_choose(index); } }
                             }
@@ -2290,6 +2379,10 @@ struct AppState {
     form: pdf_core::form::FormSummary,
     field_model: Rc<VecModel<FieldView>>,
     field_rows: Vec<(f32, f32, f32, f32, bool)>,
+    /// The field with the keyboard focus, as (page, index in the page's fields), and the page a
+    /// Tab is waiting to arrive on, with whether it goes backwards (Plan 0006 Phase 2).
+    field_focus: Option<(u32, usize)>,
+    field_tab_pending: Option<(u32, bool)>,
     /// Pages chosen in the thumbnails for a page operation (Plan 0005 Phase 1), the row a Shift+click
     /// range starts from, and the pages a thumbnail drag is moving.
     page_sel: std::collections::BTreeSet<u32>,
@@ -2576,10 +2669,17 @@ impl AppState {
     /// Scrolls so a hit is in view: left alone if it already is, otherwise placed a third of the
     /// way down the viewport (and centred horizontally when it is off to a side).
     fn show_hit(&mut self, ui: &MainWindow, hit: &SearchHit) {
-        let Some(slot) = self.layout.slot(hit.page as usize).copied() else {
-            return;
-        };
-        let Some(rect) = hit.rects.first() else {
+        if let Some(rect) = hit.rects.first() {
+            self.reveal_rect(ui, hit.page, *rect);
+        }
+        self.hit_rows.clear();
+        self.update_hits(ui);
+    }
+
+    /// Scrolls a page rectangle into view when it is not: a third of the way down the view, and
+    /// centred across it when it is off to a side.
+    fn reveal_rect(&mut self, ui: &MainWindow, page: u32, rect: pdf_core::Rect) {
+        let Some(slot) = self.layout.slot(page as usize).copied() else {
             return;
         };
         let s = self.scale_milli as f64 / 1000.0;
@@ -2602,8 +2702,6 @@ impl AppState {
             }
             self.scroll_to(ui, target);
         }
-        self.hit_rows.clear();
-        self.update_hits(ui);
     }
 
     /// The highlight rectangles of the hits on the pages near the view. Hits are in page order, so
@@ -3374,6 +3472,7 @@ impl AppState {
         self.text_lines = remap(&map, &self.text_lines);
         self.annots = remap(&map, &self.annots);
         self.fields = remap(&map, &self.fields);
+        self.fields_restructured(ui, &map);
         self.layout_generation += 1;
         self.lines_pending.clear();
         self.annots_pending.clear();
@@ -4589,6 +4688,10 @@ impl AppState {
         self.field_cancel(ui);
         self.fields.clear();
         self.fields_pending.clear();
+        self.field_focus = None;
+        self.field_tab_pending = None;
+        ui.set_has_field_focus(false);
+        ui.set_field_focus_visible(false);
         ui.set_stamp_visible(false);
         ui.set_convert_visible(false);
         self.page_sizes = page_sizes;
@@ -5196,6 +5299,8 @@ fn main() -> Result<(), slint::PlatformError> {
             form: pdf_core::form::FormSummary::default(),
             field_model,
             field_rows: Vec::new(),
+            field_focus: None,
+            field_tab_pending: None,
             scale_factor: main_window.window().scale_factor(),
             rendered: 0,
             page_sel: std::collections::BTreeSet::new(),
@@ -5262,6 +5367,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             " - this form has scripts (calculations, checks), which PODEFA does not run",
                         );
                     }
+                    ui.set_form_fields(form.fields);
                     with_state(|state| state.form = form);
                     // A damaged file MuPDF repaired: a full copy is a clean one (Plan 0005 Phase 4).
                     ui.set_repaired(repaired);
@@ -5355,6 +5461,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     items,
                 } => {
                     with_state(|state| state.apply_fields(&ui, page, generation, items));
+                }
+                EngineEvent::FieldPage {
+                    generation,
+                    page,
+                    back,
+                } => {
+                    with_state(|state| state.field_page(&ui, generation, page, back));
                 }
                 EngineEvent::PageChanged {
                     generation,
@@ -5505,6 +5618,10 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return false;
             };
+            // Tab between form fields, Space or Enter on a focused check box (Plan 0006 Phase 2).
+            if !ctrl && with_state_ret(|state| state.field_key(&ui, &text, shift)) == Some(true) {
+                return true;
+            }
             let Some(command) = key_command(&text, ctrl, shift) else {
                 return false;
             };
@@ -5800,8 +5917,32 @@ fn main() -> Result<(), slint::PlatformError> {
         });
         let weak = main_window.as_weak();
         main_window.on_field_choose(move |index| {
+            if let Some(ui) = weak.upgrade()
+                && with_state_ret(|state| state.field_choose(&ui, index)) != Some(false)
+            {
+                ui.invoke_focus_viewport();
+            }
+        });
+        // Tab from the editor or the options: an editor or options opened for the next field take
+        // the keys back when they show (`field-editor-serial`); a check box leaves them to the page.
+        let weak = main_window.as_weak();
+        main_window.on_field_tab(move |back| {
             if let Some(ui) = weak.upgrade() {
-                with_state(|state| state.field_choose(&ui, index));
+                ui.invoke_focus_viewport();
+                with_state(|state| state.field_tab(&ui, back));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_reset_field(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.reset_field(&ui));
+                ui.invoke_focus_viewport();
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_reset_form(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.reset_form(&ui));
                 ui.invoke_focus_viewport();
             }
         });

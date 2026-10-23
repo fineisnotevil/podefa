@@ -2470,15 +2470,28 @@ impl Driver {
                 let check = |name: &str, expected: String, got: String| {
                     with_state(|state| state.bench.nav_check(name, &expected, &got));
                 };
-                // A field's value on page 1, once the page's fields are in.
+                // A field's value on page 1, once the page's fields are in; `name[]` is a list's
+                // chosen values, `@focus` the page and name of the field with the focus.
                 let value = |name: &str| {
                     let mut out = None;
                     with_state(|state| {
+                        if name == "@focus" {
+                            out = state.field_focus.and_then(|(page, i)| {
+                                let f = state.fields.get(&page)?.get(i)?;
+                                Some(format!("{}:{}", page + 1, f.name))
+                            });
+                            return;
+                        }
+                        let (name, list) =
+                            name.strip_suffix("[]").map_or((name, false), |n| (n, true));
                         out = state.fields.get(&0).and_then(|fields| {
-                            fields
-                                .iter()
-                                .find(|f| f.name == name)
-                                .map(|f| f.value.clone())
+                            fields.iter().find(|f| f.name == name).map(|f| {
+                                if list {
+                                    f.values.join(",")
+                                } else {
+                                    f.value.clone()
+                                }
+                            })
                         });
                     });
                     out
@@ -2646,6 +2659,118 @@ impl Driver {
                             String::new(),
                             value("name").unwrap_or_else(|| "?".to_owned()),
                         );
+                    }
+                    // Phase 2, the keyboard. The page is tabbed by rows: name, code, notes, agree,
+                    // the two radio buttons, city, langs, a, b, shared.
+                    9 => {
+                        let Some(at) = centre("notes", 0) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        press(ui, Key::Tab.into());
+                        expect(
+                            self,
+                            "Tab from a text field to the check box",
+                            "@focus",
+                            "1:agree",
+                        );
+                    }
+                    10 => {
+                        check(
+                            "no editor over a check box",
+                            "false".into(),
+                            ui.get_field_editor_visible().to_string(),
+                        );
+                        press(ui, " ".into());
+                        expect(self, "Space sets the check box", "agree", "Yes");
+                    }
+                    11 => {
+                        press(ui, Key::Tab.into());
+                        press(ui, " ".into());
+                        expect(self, "Tab, Space: the first radio button", "choice", "a");
+                    }
+                    12 => {
+                        press(ui, Key::Tab.into());
+                        press(ui, Key::Tab.into());
+                        expect(self, "Tab twice: the combo box", "@focus", "1:city");
+                    }
+                    13 => {
+                        check(
+                            "its options open",
+                            "true".into(),
+                            ui.get_field_choices_visible().to_string(),
+                        );
+                        press(ui, Key::DownArrow.into());
+                        press(ui, Key::DownArrow.into());
+                        press(ui, Key::Return.into());
+                        expect(self, "Down, Down, Enter: the third city", "city", "Muğla");
+                    }
+                    14 => {
+                        press(ui, Key::Tab.into());
+                        expect(self, "Tab: the multi-select list", "@focus", "1:langs");
+                    }
+                    15 => {
+                        press(ui, " ".into());
+                        press(ui, Key::DownArrow.into());
+                        press(ui, Key::DownArrow.into());
+                        press(ui, " ".into());
+                        press(ui, Key::Return.into());
+                        expect(self, "tick the first and third, Enter", "langs[]", "tr,de");
+                    }
+                    16 => {
+                        ui.invoke_reset_form();
+                        expect(self, "Reset Form: the city's default", "city", "Ankara");
+                    }
+                    17 => {
+                        check(
+                            "Reset Form: the list and the check box",
+                            "|Off".into(),
+                            format!(
+                                "{}|{}",
+                                value("langs[]").unwrap_or_default(),
+                                value("agree").unwrap_or_default()
+                            ),
+                        );
+                        with_modifier(ui, Key::Control, || press(ui, "z".into()));
+                        expect(self, "one undo brings the form back", "langs[]", "tr,de");
+                    }
+                    18 => {
+                        let Some(at) = centre("shared", 0) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        press(ui, Key::Tab.into());
+                        expect(
+                            self,
+                            "Tab from page 1's last field to page 2",
+                            "@focus",
+                            "2:shared",
+                        );
+                    }
+                    19 => {
+                        check(
+                            "the editor opens on page 2",
+                            "true".into(),
+                            ui.get_field_editor_visible().to_string(),
+                        );
+                        with_modifier(ui, Key::Shift, || press(ui, Key::Tab.into()));
+                        expect(self, "Shift+Tab goes back to page 1", "@focus", "1:shared");
+                    }
+                    // From one text field to the next, the editor stays and takes the keys again.
+                    20 => {
+                        let Some(at) = centre("a", 0) else {
+                            self.settle();
+                            return false;
+                        };
+                        click(at);
+                        press(ui, Key::Tab.into());
+                        for c in "77".chars() {
+                            press(ui, c.to_string().into());
+                        }
+                        press(ui, Key::Return.into());
+                        expect(self, "Tab to the next text field and type", "b", "77");
                     }
                     _ => {
                         self.settle();
