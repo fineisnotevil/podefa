@@ -10,9 +10,10 @@
 //! events ignored.
 
 use crate::MupdfError;
+use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject, PdfPage, PdfWidget, WidgetType};
 use pdf_core::Rect;
-use pdf_core::form::{ChoiceOption, FieldInfo, FieldKind, FormSummary};
+use pdf_core::form::{ChoiceOption, FieldInfo, FieldKind, FormSummary, OFF};
 
 fn kind(widget: &PdfWidget) -> FieldKind {
     match widget.r#type() {
@@ -181,7 +182,29 @@ pub(crate) fn set_field(
     if !accepted {
         return Err(MupdfError::FieldRefused(name.to_owned()));
     }
-    widget.update().map_err(fail)?;
+    // A check box or radio group shows its value through each widget's appearance state. MuPDF
+    // sets the states from the object it is given down through `/Kids`, and mupdf-rs gives it the
+    // widget, not the field, so a group's other widgets would keep their old state: the field's
+    // widgets are set here, each on when the value is its own "on" state.
+    if matches!(
+        widget.r#type(),
+        Ok(WidgetType::Checkbox | WidgetType::RadioButton)
+    ) && let Some(field) = field_of(&widget.annotation().object())
+        && let Some(kids) = field.get_dict("Kids").ok().flatten()
+    {
+        for i in 0..kids.len().unwrap_or(0) {
+            let Some(mut kid) = kids.get_array(i as i32).ok().flatten() else {
+                continue;
+            };
+            let state = if on_state(&kid).as_deref() == Some(value) {
+                value
+            } else {
+                OFF
+            };
+            kid.dict_put("AS", PdfObject::new_name(state).map_err(fail)?)
+                .map_err(fail)?;
+        }
+    }
 
     // Every page with a widget of the field: its kids' pages, or this page alone.
     let mut pages = vec![page];
@@ -202,7 +225,96 @@ pub(crate) fn set_field(
     }
     pages.sort_unstable();
     pages.dedup();
+    drop(widget);
+
+    // Every widget of the field gets its new appearance now, inside this journal operation, so
+    // undo takes it back too and the single-line fix below reaches all of them.
+    for &p in &pages {
+        let pdf_page = doc.load_pdf_page(p as i32).map_err(fail)?;
+        for mut widget in pdf_page.widgets() {
+            if widget.name().ok().flatten().as_deref() != Some(name) {
+                continue;
+            }
+            widget.update().map_err(fail)?;
+            let multiline = widget
+                .field_flags()
+                .is_ok_and(|f| f.contains(mupdf::pdf::FieldFlags::MULTILINE));
+            if !multiline {
+                fix_single_line_rich_text(&widget.annotation().object()).map_err(fail)?;
+            }
+        }
+    }
     Ok(pages)
+}
+
+/// Works around MuPDF 1.27.2's placement of single-line field text it lays out as rich text -
+/// which it does for any letter outside WinAnsi, Greek and KOI8-U, Turkish ğ, ş, ı, İ among them
+/// (`text_needs_rich_layout`, `pdf-appearance.c`). `write_rich_content` computes the text's box
+/// as if y grew upwards, in a stream where it grows downwards, so the text sits below the field
+/// and is clipped: only its upper part shows (Plan 0006 Phase 1). MuPDF fixed it after 1.27.2
+/// (Bug 709471, in 1.28.5); this goes once mupdf-rs builds a MuPDF with that fix
+/// (`docs/backlog.md` item 10).
+///
+/// The appearance has this shape, all numbers MuPDF's: `1 0 0 -1 -0 H cm` (the flip to y down,
+/// `H` the field's height), then `q`, then `B Y0 W 2S re` (the story's content box: `B` the border,
+/// `Y0` its wrong top, `2S` twice the text size). The right top is `B + (H - 2B - S) / 2`, so a
+/// translation by the difference, put right after the flip, moves the box and the text with it.
+/// Anything else is left as it is, and nothing is done unless the wrappers' headers are 1.27.2's
+/// (`journal_headers_match`).
+fn fix_single_line_rich_text(widget: &PdfObject) -> Result<(), mupdf::Error> {
+    if !mupdf::pdf::journal::journal_headers_match() {
+        return Ok(());
+    }
+    let Some(mut normal) = widget
+        .get_dict("AP")?
+        .and_then(|ap| ap.get_dict("N").ok().flatten())
+        .filter(|n| n.is_stream().unwrap_or(false))
+    else {
+        return Ok(());
+    };
+    let content = String::from_utf8_lossy(&normal.read_stream()?).into_owned();
+    if let Some(fixed) = shift_rich_content_box(&content) {
+        normal.write_stream_buffer(&Buffer::from_bytes(fixed.as_bytes())?)?;
+    }
+    Ok(())
+}
+
+/// The appearance with the translation of [`fix_single_line_rich_text`] put in, or `None` when it
+/// does not have the shape that needs it.
+pub(crate) fn shift_rich_content_box(content: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let flip = lines.iter().position(|l| {
+        let t: Vec<&str> = l.split_whitespace().collect();
+        t.len() == 7 && t[..4] == ["1", "0", "0", "-1"] && t[6] == "cm"
+    })?;
+    let height: f32 = lines[flip].split_whitespace().nth(5)?.parse().ok()?;
+    if lines.get(flip + 1).map(|l| l.trim()) != Some("q") {
+        return None;
+    }
+    let rect: Vec<f32> = lines
+        .get(flip + 2)?
+        .strip_suffix(" re")?
+        .split_whitespace()
+        .map(|t| t.parse().ok())
+        .collect::<Option<_>>()?;
+    let [b, y0, _w, h2] = rect[..] else {
+        return None;
+    };
+    let size = h2 / 2.0;
+    let right = b + (height - 2.0 * b - size) / 2.0;
+    let shift = right - y0;
+    if !shift.is_finite() || shift.abs() < 0.01 {
+        return None;
+    }
+    let mut out = String::with_capacity(content.len() + 32);
+    for (i, line) in lines.iter().enumerate() {
+        out.push_str(line);
+        out.push('\n');
+        if i == flip {
+            out.push_str(&format!("1 0 0 1 0 {shift} cm\n"));
+        }
+    }
+    Some(out)
 }
 
 /// Whether an object carries a JavaScript action in `/A` or among its additional actions `/AA`.
@@ -280,6 +392,14 @@ mod tests {
         assert_eq!(text_string(b"plain"), "plain");
         assert_eq!(text_string(&[0xEF, 0xBB, 0xBF, 0xC5, 0x9F]), "ş");
         assert_eq!(font_size("/Helv 11 Tf 0 g"), 11.0);
+        // MuPDF 1.27.2's single-line rich text: the box starts at 11.7, it belongs at 4.5.
+        let ap = "/Tx BMC\nq\n1 1 248 18 re\nW\nn\n1 0 0 -1 -0 20 cm\nq\n2 11.7 244 22 re\nW n\nBT\nET\nQ\nQ\nEMC\n";
+        let fixed = shift_rich_content_box(ap).expect("shifted");
+        assert!(
+            fixed.contains("1 0 0 -1 -0 20 cm\n1 0 0 1 0 -7.2"),
+            "{fixed}"
+        );
+        assert_eq!(shift_rich_content_box("q\nBT\nET\nQ\n"), None);
         assert_eq!(font_size("0 g /Helv 0 Tf"), 0.0);
         assert_eq!(font_size(""), 0.0);
     }

@@ -42,6 +42,20 @@ fn value(engine: &MupdfEngine, page: u32, name: &str) -> String {
         .clone()
 }
 
+/// The appearance state of each widget of a button field on page 1, as saved.
+fn states(engine: &MupdfEngine, name: &str) -> Vec<String> {
+    let bytes = engine.snapshot().expect("snapshot");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).expect("snapshot opens");
+    let page = doc.load_pdf_page(0).expect("page");
+    page.widgets()
+        .filter(|w| w.name().ok().flatten().as_deref() == Some(name))
+        .map(|w| {
+            let state = w.annotation().object().get_dict("AS").expect("dict");
+            String::from_utf8_lossy(&state.expect("AS").as_name().expect("name")).into_owned()
+        })
+        .collect()
+}
+
 fn fill(engine: &mut MupdfEngine, page: u32, name: &str, value: &str) -> Change {
     engine
         .edit(&EditOp::SetField {
@@ -190,4 +204,48 @@ fn read_only_and_unknown_fields_are_refused_without_a_step() {
         "{missing:?}"
     );
     assert_eq!(engine.history_state(), (false, false), "no step was added");
+}
+
+#[test]
+fn a_radio_group_shows_the_chosen_button() {
+    let mut engine = open(&fixture("form_radio.pdf"));
+    fill(&mut engine, 0, "choice", "b");
+    assert_eq!(states(&engine, "choice"), ["Off", "b"]);
+    fill(&mut engine, 0, "choice", "a");
+    assert_eq!(states(&engine, "choice"), ["a", "Off"]);
+    engine.undo().expect("undo").expect("a step");
+    assert_eq!(states(&engine, "choice"), ["Off", "b"]);
+}
+
+/// MuPDF 1.27.2 lays single-line Turkish text out below the field (plan, Phase 1 results): the
+/// engine moves it into place, by the translation `-7.2` for this 20-point field and 11-point
+/// text. The multi-line field is laid out right and is left alone.
+#[test]
+fn single_line_turkish_text_sits_inside_its_field() {
+    let mut engine = open(&fixture("form_rich.pdf"));
+    fill(&mut engine, 0, "name", "Öğüt Şükrü İnce");
+    fill(&mut engine, 0, "notes", "Birinci satır\nİkinci satır");
+    let bytes = engine.snapshot().expect("snapshot");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).expect("snapshot opens");
+    let page = doc.load_pdf_page(0).expect("page");
+    let appearance = |name: &str| {
+        let widget = page
+            .widgets()
+            .find(|w| w.name().ok().flatten().as_deref() == Some(name))
+            .expect("widget");
+        let normal = widget
+            .annotation()
+            .object()
+            .get_dict("AP")
+            .expect("dict")
+            .expect("AP")
+            .get_dict("N")
+            .expect("dict")
+            .expect("N");
+        String::from_utf8_lossy(&normal.read_stream().expect("stream")).into_owned()
+    };
+    let name = appearance("name");
+    assert!(name.contains("\n1 0 0 1 0 -7.2 cm\n"), "{name}");
+    let notes = appearance("notes");
+    assert!(!notes.contains("1 0 0 1 0 -"), "{notes}");
 }

@@ -39,7 +39,7 @@ pub fn form_pdf() -> Vec<u8> {
         )
     };
     let tick = "0 g 2 7 m 6 3 l 12 12 l S";
-    let dot = "0 g 7 7 4 0 360 re f";
+    let dot = "0 g 4 4 6 6 re f";
     let objects: Vec<String> = vec![
         // 1 catalog, 2 pages, 3 form, 4 page.
         "<< /Type /Catalog /Pages 2 0 R /AcroForm 3 0 R >>".into(),
