@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A list box shows its chosen options:** MuPDF 1.27.2 draws a list box without marking its value.
 - **Field text with Turkish letters fills in about 2 ms instead of 2.4-3.5 s**, and sits inside a single-line field instead of being clipped (MuPDF asked for a `serif` font through the system font search; MuPDF 1.27.2 placed single-line rich text below the field). Radio groups show the chosen button.
 - **Copied pages kept their annotations and links:** duplicating a page lost its markup, notes, ink and links, because MuPDF's page copy leaves `/Annots` out. They are copied now, with page links pointing at the copied pages.
 - **Saving in place more than once in a session broke the file.** From the second Ctrl+S, the new section's `/Prev` pointed at the previous save's cross-reference table, which that save had just overwritten (MuPDF 1.27.2's incremental writer moves its notion of the file's table to each section it writes). Readers then lost pages; one file opened with none. Each in-place save now names the file's own table. A document with no readable pages is now refused with a message instead of opening empty.
@@ -21,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unembedded standard fonts load at once:** MuPDF's built-in copies of the 14 standard PDF fonts are used before a system font search, which cost 1.2-1.7 s per font on Windows (a document's first page, a duplicated page). Incremental saves compress the streams they add.
 
 ### Added
+- **Fill forms with the keyboard** (Plan 0006 Phase 2): Tab and Shift+Tab go from field to field in the page's tab order and on to the next page with a field; Space or Enter sets a check box or radio button; Up, Down and Enter choose in a list. Multi-select lists take several choices. Form > Reset Field and Reset Form put values back to their defaults (one undo step).
 - **Form fields are shaded** so they can be seen before they are touched (red edge when required); View > Highlight Form Fields turns it off. **Comb fields** are edited one character per box.
 - **Fill forms** (Plan 0006 Phase 1): with the Select tool, a click on a form field fills it - an editor laid over a text field (Enter, Tab or a click elsewhere keeps the text, Esc drops it), check boxes toggle, radio buttons turn on, combo and list boxes open their options. Each change is one undo step and is saved with the document; a field on several pages changes everywhere. Tooltips show on hover; forms with scripts or XFA say so in the status bar (scripts are not run).
 - **Export as Word, built only on request** (Plan 0005 Phase 5): with the `docx` Cargo feature (off by default), Tools > Export as Word writes the document, unsaved changes included, as a DOCX file through MuPDF's DOCX writer, with progress and Cancel. It is off because that writer does not keep columns or tables (`docs/backlog.md` item 16).

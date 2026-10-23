@@ -1497,3 +1497,23 @@ four: 8 of 8 checks. `t_fill` min 3, median 7, max 13 ms (n = 4).
 After the maintainer's review (same day): the bench clicks and types through the window's input
 path (`dispatch_event`, the button held 150 ms on the text field) and checks the field shading and
 a comb field: 11 of 11, in three runs.
+
+### 12.3 Phase 2: the keyboard, lists, reset (row AL)
+
+Engine: `crates/engine-mupdf/tests/form_test.rs`, 11 tests (plan §5, Phase 2 results).
+
+Through a real window, release build, 2026-10-24, the §1 machine:
+
+```powershell
+target\release\app.exe target\tmp\bench_form2.pdf --bench-forms --bench-step-ms 400 --bench-settle-ms 1500
+```
+
+(`bench_form2.pdf` is a copy of `form_read.pdf`, now tabbed by rows and with a default value for
+"city".) Every key goes through `dispatch_event`. The run passed 27 of 27 checks, in three runs:
+
+- Phase 1's 11;
+- Tab, Space and Enter on the check box, a radio button and the combo box;
+- two ticks in the multi-select list;
+- Reset Form and its undo;
+- Tab and Shift+Tab across pages;
+- Tab from one text field to the next, then typing.

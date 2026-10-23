@@ -640,3 +640,23 @@ Report it to mupdf-rs with the reproduction in `form_test.rs`
 Also from Phase 1: MuPDF 1.27.2 lays single-line rich text below its field (Bug 709471, fixed in
 1.28.5). fa-pdf adds the missing translation (`fix_single_line_rich_text`); item 10's release has
 to carry MuPDF 1.28.5 or later for it to go.
+
+---
+
+## 18. A list box laid out as rich text shows no chosen options
+
+**Labels:** `upstream`
+
+### Problem Statement
+
+MuPDF 1.27.2 draws a list box as all its options and does not mark the chosen ones
+(`pdf_write_ch_widget_appearance`, "TODO: Highlight selected items"). fa-pdf draws the bands itself
+(`crates/engine-mupdf/src/form.rs`, `mark_list_choices`, Plan 0006 Phase 2), from the shape of
+MuPDF's plain text layout. When an option has a letter outside WinAnsi (Turkish ğ, ş, ı, İ), MuPDF
+lays the list out as rich text. That appearance has another shape, so no band is drawn: the value
+is saved, but the list does not show it.
+
+### Proposed Solution
+
+Draw the bands for the rich layout too, from `write_rich_content`'s box, or report the missing
+highlight to MuPDF and drop the workaround when a release draws it.
