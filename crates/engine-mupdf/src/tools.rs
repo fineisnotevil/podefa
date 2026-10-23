@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 //! The tool thread (Plan 0005, §4.2): merging and extracting pages into new files, exporting pages
-//! as images, making a PDF of images and compressing (Phase 4).
+//! as images, making a PDF of images and compressing (Phase 4), and exporting as Word (Phase 5).
 //!
 //! Jobs run here, on documents of their own, never on the open one: rewriting a file with garbage
 //! collection breaks the open document's undo journal (Plan 0005 §3.4), and a merge of thousands of
@@ -16,7 +16,7 @@ use mupdf::pdf::{
     InsertImageOptions, InsertPdfOptions, PageImageSource, PageSelection, PdfDocument,
     PdfWriteOptions,
 };
-use mupdf::{Colorspace, Image, Matrix, Rect, Size};
+use mupdf::{Colorspace, DocumentWriter, Image, Matrix, Rect, Size};
 use pdf_core::EngineEvent;
 use pdf_core::tools::{ImageFormat, MergeInput, ToolJob, ToolSizes};
 use std::path::{Path, PathBuf};
@@ -99,7 +99,7 @@ impl Drop for ToolThread {
 pub(crate) fn needs_current(job: &ToolJob) -> bool {
     match job {
         ToolJob::Merge { inputs, .. } => inputs.contains(&MergeInput::Current),
-        ToolJob::Extract { .. } | ToolJob::ExportImages { .. } => true,
+        ToolJob::Extract { .. } | ToolJob::ExportImages { .. } | ToolJob::ExportWord { .. } => true,
         ToolJob::ImagesToPdf { .. } => false,
         ToolJob::Compress { input, .. } => *input == MergeInput::Current,
     }
@@ -203,6 +203,50 @@ fn add_image_page(doc: &mut PdfDocument, path: &Path) -> Result<(), String> {
     )
     .map_err(fail)?;
     Ok(())
+}
+
+/// Writes every page of `doc` to the `.part` file of `output` as DOCX, through MuPDF's DOCX writer
+/// (the `extract` library): text in reading order, with images. `progress` follows each page and
+/// `stop` is asked between pages. The writer is always closed through the `fz_try` wrapper, also
+/// when stopping, and a part file left by a stop or a failure is deleted.
+fn export_word(
+    doc: &PdfDocument,
+    output: &Path,
+    stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(usize, usize),
+) -> Result<PathBuf, String> {
+    let part = part_path(output);
+    let fail = |e: mupdf::Error| format!("{}: {e}", output.display());
+    let count = doc.page_count().map_err(fail)?.max(0) as usize;
+    let mut writer = DocumentWriter::new(utf8(&part)?, "docx", "").map_err(fail)?;
+    let mut written = (|| -> Result<(), String> {
+        for p in 0..count {
+            if stop() {
+                return Err("cancelled".to_owned());
+            }
+            let page = doc
+                .load_page(p as i32)
+                .map_err(|e| format!("page {}: {e}", p + 1))?;
+            let bounds = page.bounds().map_err(|e| format!("page {}: {e}", p + 1))?;
+            let device = writer.begin_page(bounds).map_err(fail)?;
+            let run = page.run(&device, &Matrix::IDENTITY);
+            writer.end_page(device).map_err(fail)?;
+            run.map_err(|e| format!("page {}: {e}", p + 1))?;
+            progress(p + 1, count + 1);
+        }
+        Ok(())
+    })();
+    let closed = writer.close().map_err(fail);
+    if written.is_ok() {
+        written = closed;
+    }
+    match written {
+        Ok(()) => Ok(part),
+        Err(err) => {
+            let _ = std::fs::remove_file(&part);
+            Err(err)
+        }
+    }
 }
 
 fn open(input: &MergeInput, current: Option<&Arc<Vec<u8>>>) -> Result<PdfDocument, String> {
@@ -389,6 +433,14 @@ fn execute(
                     kept_original,
                 });
                 progress(2, 2);
+            }
+            ToolJob::ExportWord { output } => {
+                let source = open(&MergeInput::Current, run.current.as_ref())?;
+                let part =
+                    export_word(&source, output, &stop, &|done, total| progress(done, total))?;
+                written.push((part, output.clone()));
+                let total = source.page_count().map_or(0, |n| n.max(0) as usize) + 1;
+                progress(total, total);
             }
         }
         if stop() {
