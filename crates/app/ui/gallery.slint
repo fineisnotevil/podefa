@@ -17,14 +17,14 @@ import { ThumbRow } from "types.slint";
 import { Island, IconButton, Separator } from "widgets.slint";
 
 export global GalleryMetrics {
-    // The desk's edge to the first gap.
-    out property <length> pad: 24px;
+    // The strip's edge to the first gap, and after the last page.
+    out property <length> pad: 72px;
     // A gap between two pages, and a page's card.
     out property <length> divider: 48px;
     out property <length> card: 232px;
     // One card and the gap after it; the first card starts at `lead`.
     out property <length> pitch: 280px;
-    out property <length> lead: 72px;
+    out property <length> lead: 120px;
     // The box a page's picture fits in, inside its card, and the card's height.
     out property <length> box-w: 216px;
     out property <length> box-h: 300px;
@@ -276,14 +276,6 @@ component Divider inherits Rectangle {
                 VerticalLayout {
                     padding: 3px;
                     spacing: 1px;
-                    if root.index > 0 && root.index < root.count : IconButton {
-                        width: 28px;
-                        height: 28px;
-                        icon-size: 14px;
-                        icon: @image-url("icons/scissors.svg");
-                        tip: "Split Here...";
-                        clicked => { root.action(0); }
-                    }
                     IconButton {
                         width: 28px;
                         height: 28px;
@@ -344,6 +336,12 @@ export component Gallery inherits Rectangle {
     property <length> view-w: root.width - root.inset-left;
     property <length> view-h: root.height - root.inset-top - root.inset-bottom;
     property <length> max-scroll: max(0px, root.content-w - root.view-w);
+    // A strip narrower than the view sits in its middle; a wider one starts at the left.
+    property <length> centre-shift: max(0px, (root.view-w - root.content-w) / 2);
+    // The rulers, in the gallery's coordinates: their ticks start at the stone's left edge.
+    property <length> ruler-origin: strip.x + stone.x;
+    property <length> ruler-top-y: strip.y + stone.y - 16px;
+    property <length> ruler-bottom-y: strip.y + stone.y + stone.height + 4px;
     // The band's top: in the middle, but never under the bar over the strip.
     property <length> band-y: root.inset-top
         + max(48px, (root.view-h - GalleryMetrics.band) / 2 - 12px);
@@ -386,12 +384,13 @@ export component Gallery inherits Rectangle {
     }
 
     strip := Rectangle {
-        x: root.inset-left - root.scroll;
+        x: root.inset-left + root.centre-shift - root.scroll;
         y: root.band-y;
         width: root.content-w;
         height: GalleryMetrics.band;
 
-        // The stone the pages are composed on, with ruler ticks along its top and bottom.
+        // The stone the pages are composed on, with ruler ticks along its top and bottom (the
+        // crowns over them are outside the strip, below).
         stone := Rectangle {
             x: GalleryMetrics.pad / 2;
             y: (parent.height - GalleryMetrics.card-h) / 2 - 24px;
@@ -404,20 +403,24 @@ export component Gallery inherits Rectangle {
         }
         Image {
             x: stone.x;
-            y: stone.y - 12px;
+            y: stone.y - 16px;
             width: stone.width;
-            height: 8px;
+            height: 12px;
             source: @image-url("textures/ruler.svg");
             horizontal-tiling: repeat;
+            // Tiles start at the left edge (not centred), so the crowns can line up with them.
+            horizontal-alignment: left;
             colorize: Theme.ruler;
         }
         Image {
             x: stone.x;
             y: stone.y + stone.height + 4px;
             width: stone.width;
-            height: 8px;
+            height: 12px;
             source: @image-url("textures/ruler.svg");
             horizontal-tiling: repeat;
+            // Tiles start at the left edge (not centred), so the crowns can line up with them.
+            horizontal-alignment: left;
             colorize: Theme.ruler;
         }
 
@@ -519,6 +522,47 @@ export component Gallery inherits Rectangle {
     }
 
     // The scroll bar, under the band.
+    // The crowns: over each ruler, in the middle of the view, its ticks drawn stronger and taller
+    // and fading out to both sides, moving with the strip like a wheel turning under the finger.
+    // Dragging one, or the wheel over it, scrolls; the cursor says so. One clipped image each.
+    for row-y in [root.ruler-top-y, root.ruler-bottom-y] : crown := Rectangle {
+        x: root.inset-left + (root.view-w - self.width) / 2;
+        y: row-y - 6px;
+        width: min(480px, root.view-w - 2 * GalleryMetrics.pad);
+        height: 24px;
+        clip: true;
+        visible: root.total-pages > 0;
+        Image {
+            // The ticks line up with the ruler's: the image starts a whole number of periods
+            // from the ruler's origin, within one period left of the crown's edge.
+            // A crown narrower than 480 px shows the image's middle.
+            property <length> centre: (480px - parent.width) / 2;
+            x: mod(mod(root.ruler-origin - crown.x + self.centre, 12px) + 12px, 12px) - 12px
+                - self.centre;
+            y: 6px;
+            width: 492px;
+            height: 12px;
+            source: @image-url("textures/crown.svg");
+            colorize: Theme.crown;
+            opacity: crown-touch.has-hover || crown-touch.pressed ? 1 : 0.7;
+            animate opacity { duration: 150ms; }
+        }
+        crown-touch := TouchArea {
+            property <length> from;
+            mouse-cursor: MouseCursor.ew-resize;
+            scroll-event(event) => {
+                root.scroll-to(root.scroll - event.delta-x - event.delta-y);
+                return accept;
+            }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) { self.from = root.scroll; }
+            }
+            moved => {
+                if (self.pressed) { root.scroll-to(self.from - (self.mouse-x - self.pressed-x)); }
+            }
+        }
+    }
+
     if root.max-scroll > 0 : track := Rectangle {
         x: root.inset-left + GalleryMetrics.pad;
         y: min(root.height - root.inset-bottom - 14px, root.band-y + GalleryMetrics.band + 8px);

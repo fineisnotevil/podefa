@@ -77,8 +77,8 @@ const THUMB_MARGIN_ROWS: usize = 2;
 /// one page's card and the gap after it, where the first card starts, and the box a page's
 /// picture fits in, in logical pixels.
 const GALLERY_PITCH_PX: f32 = 280.0;
-const GALLERY_LEAD_PX: f32 = 72.0;
-const GALLERY_PAD_PX: f32 = 24.0;
+const GALLERY_LEAD_PX: f32 = 120.0;
+const GALLERY_PAD_PX: f32 = 72.0;
 const GALLERY_CARD_PX: f32 = 232.0;
 const GALLERY_BOX_W_PX: f32 = 216.0;
 const GALLERY_BOX_H_PX: f32 = 300.0;
@@ -1698,30 +1698,23 @@ impl AppState {
     }
 
     /// A gap's action in the gallery: a blank page there (as large as the page before it, or the
-    /// first page), or the Split panel set to split there. Pages from a file go through
+    /// first page). Pages from a file go through
     /// [`tools_ui::insert_from_file`], whose dialog runs with the state unborrowed.
-    fn gallery_divider(&mut self, ui: &MainWindow, at: u32, which: i32) {
+    fn gallery_divider(&mut self, at: u32, which: i32) {
         let count = self.page_sizes.len() as u32;
         if !self.editable || count == 0 {
             return;
         }
         let at = at.min(count);
-        match which {
-            0 if at > 0 && at < count => {
-                ui.set_split_mode(1);
-                ui.set_split_ranges(SharedString::from(format!("1-{at}, {}-{count}", at + 1)));
-                ui.set_split_error(SharedString::new());
-                ui.set_split_visible(true);
-            }
-            1 => {
-                let size = self.page_sizes[at.saturating_sub(1) as usize];
-                self.send_edit(EditOp::Pages(PageOp::InsertBlank {
-                    at,
-                    width: size.width,
-                    height: size.height,
-                }));
-            }
-            _ => {}
+        // 1: a blank page the size of the one before. Split from a gap waits for Phase 4's tabs,
+        // which open the second part on its own.
+        if which == 1 {
+            let size = self.page_sizes[at.saturating_sub(1) as usize];
+            self.send_edit(EditOp::Pages(PageOp::InsertBlank {
+                at,
+                width: size.width,
+                height: size.height,
+            }));
         }
     }
 
@@ -4522,7 +4515,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if which == 2 {
                 tools_ui::insert_from_file_at(&ui, Some(at));
             } else {
-                with_state(|state| state.gallery_divider(&ui, at, which));
+                with_state(|state| state.gallery_divider(at, which));
             }
         });
         main_window.on_gallery_dropped(move |at| {

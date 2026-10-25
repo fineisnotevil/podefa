@@ -342,12 +342,6 @@ export component SidebarColumn inherits Rectangle {
                         enabled: !root.tool-running;
                         clicked => { root.merge-open(); }
                     }
-                    IconButton {
-                        icon: @image-url("icons/split.svg");
-                        tip: "Split";
-                        enabled: root.editable && !root.tool-running;
-                        clicked => { root.split-open(); }
-                    }
                     HorizontalLayout {
                         alignment: center;
                         padding-top: 3px;
@@ -547,7 +541,7 @@ export component SidebarColumn inherits Rectangle {
 
     stamp-menu := PopupWindow {
         x: commands.x + commands.width + SidebarMetrics.flyout-gap;
-        y: commands.y + 5 * 34px + 6px;
+        y: commands.y + 4 * 34px + 6px;
         width: 200px;
         MenuSurface {
             VerticalLayout {
@@ -573,7 +567,7 @@ export component SidebarColumn inherits Rectangle {
 
     export-menu := PopupWindow {
         x: commands.x + commands.width + SidebarMetrics.flyout-gap;
-        y: commands.y + 7 * 34px + 6px;
+        y: commands.y + 6 * 34px + 6px;
         width: 200px;
         MenuSurface {
             VerticalLayout {

@@ -1618,13 +1618,14 @@ export component MainWindow inherits Window {
             props-open => { root.props_open(); }
         }
 
-        // Tools has the gallery instead; the canvas keeps the drawer's room, so it does not move.
-        if root.drawer-shown && root.tools-t < 1 : Drawer {
-            opacity: 1 - root.tools-t;
+        // Read only: Edit and Tools fade it out. The pages keep the drawer's room, so a mode
+        // change does not move them (plan row AT). It ends above the status row.
+        if root.drawer-shown && root.tools-t + root.edit-t < 1 : Drawer {
+            opacity: 1 - root.tools-t - root.edit-t;
             x: root.inset + sidebar.width + root.island-gap;
             y: root.canvas-top;
             width: root.drawer-width;
-            height: root.height - root.canvas-top - root.inset;
+            height: root.height - root.canvas-top - root.inset - status.height - root.island-gap;
             sidebar-tab: root.sidebar-tab;
             thumbs: root.thumbs;
             outline-rows: root.outline-rows;
@@ -1709,7 +1710,7 @@ export component MainWindow inherits Window {
         }
 
         if root.status_text != "" || root.tool-running : MessageIsland {
-            x: root.canvas-left + root.island-gap;
+            x: root.inset + sidebar.width + root.island-gap;
             y: root.height - self.height - root.inset;
             height: 32px;
             width: min(self.preferred-width, status.x - self.x - root.island-gap);
