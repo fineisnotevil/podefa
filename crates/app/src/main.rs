@@ -28,7 +28,7 @@ use pdf_core::search::{SearchHit, SearchResults};
 use pdf_core::select::{PagePoint, PageSelection, SelectMode};
 use pdf_core::settings::{Settings, Theme};
 use pdf_core::{
-    Bitmap, CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, EngineCmd, EngineEvent,
+    Bitmap, CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, EngineCmd, EngineEvent, Margins,
     PAGE_GAP_LOGICAL_PX, PageSize, REANCHOR_MARGIN_LOGICAL_PX, TILE_SIZE_PX, TileAction, TileKey,
     TileScheduler, ZOOM_DEFAULT_MILLI, ZOOM_MAX_MILLI, ZOOM_MIN_MILLI, base_scale_milli,
     zoom_in_milli, zoom_out_milli,
@@ -287,6 +287,9 @@ struct AppState {
     /// The opened document's first view is not drawn yet; once it is, one warm-up frame follows
     /// (main.slint `warm`).
     warm_pending: bool,
+    /// The room the islands take at the viewport's edges, in device pixels; every layout keeps it
+    /// clear around the pages (main.slint `doc-inset-*`).
+    margins: Margins,
     /// The thumbnail row marked as the current page.
     current_thumb: Option<usize>,
     outline_items: Vec<OutlineItem>,
@@ -405,6 +408,58 @@ impl AppState {
     /// The page gap in device pixels: constant in logical pixels, so it does not grow with zoom.
     fn gap_px(&self) -> u32 {
         (PAGE_GAP_LOGICAL_PX * self.scale_factor).round() as u32
+    }
+
+    /// The islands' room at the viewport's edges, from the window, in device pixels.
+    fn read_margins(&self, ui: &MainWindow) -> Margins {
+        let px = |logical: f32| (logical as f64 * self.sf()).round().max(0.0) as u32;
+        Margins {
+            top: px(ui.get_doc_inset_top()),
+            right: px(ui.get_doc_inset_right()),
+            bottom: px(ui.get_doc_inset_bottom()),
+            left: px(ui.get_doc_inset_left()),
+        }
+    }
+
+    /// The document laid out at `milli`, with the islands' current margins.
+    fn layout_for(&mut self, ui: &MainWindow, milli: u32) -> DocLayout {
+        self.margins = self.read_margins(ui);
+        DocLayout::with_margins(&self.page_sizes, milli, self.gap_px(), self.margins)
+    }
+
+    /// The viewport less the islands' margins, in device pixels: the room the pages are seen in.
+    fn free_view(&self, ui: &MainWindow) -> (f64, f64) {
+        let (w, h) = self.view_size(ui);
+        let m = self.margins;
+        (
+            (w - (m.left + m.right) as f64).max(1.0),
+            (h - (m.top + m.bottom) as f64).max(1.0),
+        )
+    }
+
+    /// The document y in the middle of the room the pages are seen in.
+    fn view_mid_y(&self, ui: &MainWindow) -> f64 {
+        let (_, free_h) = self.free_view(ui);
+        self.pos.1 + self.margins.top as f64 + free_h / 2.0
+    }
+
+    /// An island moved or changed size (the drawer opened, the window maximized): the pages are
+    /// laid out again around it, and what was in view stays put.
+    fn insets_changed(&mut self, ui: &MainWindow) {
+        let margins = self.read_margins(ui);
+        if margins == self.margins {
+            return;
+        }
+        if self.layout.is_empty() {
+            self.margins = margins;
+            return;
+        }
+        let top = self.margins.top as f64;
+        self.layout = self.layout_for(ui, self.scale_milli);
+        self.pos.1 += self.margins.top as f64 - top;
+        self.clamp_pos(ui);
+        self.reanchor(ui);
+        self.refresh(ui);
     }
 
     /// The viewport size in device pixels.
@@ -559,8 +614,7 @@ impl AppState {
         self.update_selection(ui);
         self.update_annot_selection(ui);
 
-        let (_, view_h) = self.view_size(ui);
-        if let Some(page) = self.layout.page_near(self.pos.1 + view_h / 2.0) {
+        if let Some(page) = self.layout.page_near(self.view_mid_y(ui)) {
             ui.set_current_page(page as i32);
             // The field follows the page, except while the user is typing a page into it.
             let label = SharedString::from((page + 1).to_string());
@@ -683,13 +737,16 @@ impl AppState {
             slot.y as f64 + rect.y as f64 * s,
         );
         let (w, h) = (rect.width as f64 * s, rect.height as f64 * s);
-        let (view_w, view_h) = self.view_size(ui);
+        // In view means in the room the islands leave, not under them.
+        let (view_w, view_h) = self.free_view(ui);
+        let (left, top) = (self.margins.left as f64, self.margins.top as f64);
+        let (seen_x, seen_y) = (self.pos.0 + left, self.pos.1 + top);
         let mut target = self.pos;
-        if y < self.pos.1 || y + h > self.pos.1 + view_h {
-            target.1 = y - view_h / 3.0;
+        if y < seen_y || y + h > seen_y + view_h {
+            target.1 = y - view_h / 3.0 - top;
         }
-        if x < self.pos.0 || x + w > self.pos.0 + view_w {
-            target.0 = x + w / 2.0 - view_w / 2.0;
+        if x < seen_x || x + w > seen_x + view_w {
+            target.0 = x + w / 2.0 - view_w / 2.0 - left;
         }
         if target != self.pos {
             if (target.1 - self.pos.1).abs() > 2.0 * view_h {
@@ -1489,7 +1546,7 @@ impl AppState {
         self.page_sizes = page_sizes;
         let count = self.page_sizes.len();
         self.page_revs = (0..count as u32).map(|page| (page, revision)).collect();
-        self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
+        self.layout = self.layout_for(ui, self.scale_milli);
         ui.set_total_pages(count as i32);
         self.remap_thumbs(&map, old_count);
         self.show_page_sel(ui);
@@ -2422,7 +2479,11 @@ impl AppState {
             return;
         };
         let y = match top {
-            Some(top) => slot.y as f64 + top as f64 * self.scale_milli as f64 / 1000.0,
+            // The destination lands just under the title row, as a page's top does.
+            Some(top) => {
+                slot.y as f64 + top as f64 * self.scale_milli as f64 / 1000.0
+                    - self.margins.top as f64
+            }
             None => page_top(&self.layout, page).unwrap_or(0.0),
         };
         self.begin_epoch();
@@ -2446,7 +2507,7 @@ impl AppState {
     fn update_scrollbar(&self, ui: &MainWindow) {
         let (_, view_h) = self.view_size(ui);
         let doc_h = self.layout.height() as f64;
-        let track = ui.get_view_h() as f64;
+        let track = ui.get_sb_track_h() as f64;
         let visible = doc_h > view_h && track > 0.0;
         ui.set_sb_visible(visible);
         if !visible {
@@ -2476,11 +2537,13 @@ impl AppState {
 
     /// One keyboard navigation action.
     fn nav(&mut self, ui: &MainWindow, action: NavAction) {
-        let (_, view_h) = self.view_size(ui);
+        // A page step is the room the pages are seen in, so nothing passes under the islands
+        // unseen; `scroll_to` clamps to the whole viewport.
+        let (_, free_h) = self.free_view(ui);
         let target = scroll_target(
             action,
             self.pos.1,
-            view_h,
+            free_h,
             self.layout.height() as f64,
             LINE_STEP_LOGICAL_PX * self.sf(),
         );
@@ -2508,7 +2571,8 @@ impl AppState {
         let Some(size) = self.page_sizes.get(page).copied() else {
             return;
         };
-        let (view_w, view_h) = self.view_size(ui);
+        // The page fits the room the islands leave, not the whole window under them.
+        let (view_w, view_h) = self.free_view(ui);
         let gap = self.gap_px();
         let milli = if whole_page {
             fit_page_milli(&size, view_w, view_h, gap)
@@ -2522,7 +2586,7 @@ impl AppState {
     fn zoom_to_page(&mut self, ui: &MainWindow, milli: u32, page: usize) {
         let milli = milli.clamp(ZOOM_MIN_MILLI, ZOOM_MAX_MILLI);
         if milli != self.scale_milli {
-            self.layout = DocLayout::new(&self.page_sizes, milli, self.gap_px());
+            self.layout = self.layout_for(ui, milli);
             self.scale_milli = milli;
             self.bench.level_changed(milli, "fit");
             ui.set_zoom_percent(milli as f32 / 10.0);
@@ -2898,7 +2962,7 @@ impl AppState {
         if self.opening.take().is_none() || self.page_sizes.is_empty() {
             return;
         }
-        self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
+        self.layout = self.layout_for(ui, self.scale_milli);
         // The old document is still the engine's; its outline went with the open and is not
         // resent, so the sidebar keeps only the thumbnails, which are re-rendered.
         self.reset_thumbs(self.page_sizes.len());
@@ -2967,7 +3031,7 @@ impl AppState {
             ui.set_tool(self.tool.index());
         }
         self.scale_milli = ZOOM_DEFAULT_MILLI;
-        self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
+        self.layout = self.layout_for(ui, self.scale_milli);
         self.reset_thumbs(self.page_sizes.len());
         ui.set_thumb_scroll_y(0.0);
         ui.set_gallery_scroll(0.0);
@@ -3038,7 +3102,7 @@ impl AppState {
             return;
         }
         let sf = self.sf();
-        let to = DocLayout::new(&self.page_sizes, new_milli, self.gap_px());
+        let to = self.layout_for(ui, new_milli);
         let anchor = (anchor_x as f64 * sf, anchor_y as f64 * sf);
         self.pos = self.layout.zoom_anchor(&to, self.pos, anchor);
         self.layout = to;
@@ -3551,6 +3615,7 @@ fn main() -> Result<(), slint::PlatformError> {
             mode: 0,
             motion_until: None,
             warm_pending: false,
+            margins: Margins::default(),
             current_thumb: None,
             outline_items: Vec::new(),
             outline_expanded: Vec::new(),
@@ -3864,6 +3929,12 @@ fn main() -> Result<(), slint::PlatformError> {
         main_window.on_viewport_moved(move || {
             if let Some(ui) = weak.upgrade() {
                 viewport_moved(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_insets_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.insets_changed(&ui));
             }
         });
     }

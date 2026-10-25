@@ -9,7 +9,7 @@ import { Theme } from "theme.slint";
 // A surface floating over the canvas. Opaque: Slint has no backdrop blur (Plan 0007 §3.2), and
 // the surface ladder keeps it apart from the canvas where the renderer draws no shadow.
 export component Island inherits Rectangle {
-    background: Theme.surface;
+    background: Theme.surface-float;
     border-radius: Theme.radius-island;
     border-width: 1px;
     border-color: Theme.island-line;

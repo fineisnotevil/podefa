@@ -2091,17 +2091,33 @@ fn with_modifier(ui: &MainWindow, modifier: Key, f: impl FnOnce()) {
 fn nav_perform(ui: &MainWindow, step: NavStep) -> String {
     let mut expected = String::new();
     with_state(|state| {
-        let (view_w, view_h) = state.view_size(ui);
+        let (_, view_h) = state.view_size(ui);
         let doc_h = state.layout.height() as f64;
         let line = LINE_STEP_LOGICAL_PX * state.sf();
         // Scroll steps also name the exact position they lead to, so a 40 px arrow step that
         // stays on the same page is still checked.
         let page_after = |milli: u32, pos_y: f64| {
-            let layout = pdf_core::DocLayout::new(&state.page_sizes, milli, state.gap_px());
-            let page = layout.page_near(pos_y + view_h / 2.0).unwrap_or(0) + 1;
+            let margins = state.layout.margins();
+            let layout = pdf_core::DocLayout::with_margins(
+                &state.page_sizes,
+                milli,
+                state.gap_px(),
+                margins,
+            );
+            let free_h = view_h - (margins.top + margins.bottom) as f64;
+            let page = layout
+                .page_near(pos_y + margins.top as f64 + free_h / 2.0)
+                .unwrap_or(0)
+                + 1;
             format!("zoom={milli} page={page} y={pos_y:.0}")
         };
-        let scroll = |action| scroll_target(action, state.pos.1, view_h, doc_h, line);
+        // The app pages and fits by the room the islands leave (`AppState::free_view`).
+        let (free_w, free_h) = state.free_view(ui);
+        // `scroll_to` then clamps to the whole viewport.
+        let scroll = |action| {
+            scroll_target(action, state.pos.1, free_h, doc_h, line)
+                .clamp(0.0, (doc_h - view_h).max(0.0))
+        };
         let current = state.current_page(ui);
         expected = match step {
             NavStep::Key(key) => {
@@ -2141,8 +2157,8 @@ fn nav_perform(ui: &MainWindow, step: NavStep) -> String {
                 let size = state.page_sizes.get(current).copied();
                 let gap = state.gap_px();
                 let milli = size.map_or(state.scale_milli, |size| match step {
-                    NavStep::FitWidth => fit_width_milli(&size, view_w, gap),
-                    _ => fit_page_milli(&size, view_w, view_h, gap),
+                    NavStep::FitWidth => fit_width_milli(&size, free_w, gap),
+                    _ => fit_page_milli(&size, free_w, free_h, gap),
                 });
                 // Anchored at the page's top, so the page is still the one in view.
                 format!("zoom={milli} page={}", current + 1)
@@ -2173,8 +2189,10 @@ fn nav_perform(ui: &MainWindow, step: NavStep) -> String {
         NavStep::GoTo(page) => ui.invoke_go_to_page(page.to_string().into()),
         NavStep::FitWidth => ui.invoke_fit_width(),
         NavStep::FitPage => ui.invoke_fit_page(),
-        NavStep::ScrollbarBottom => ui.invoke_scrollbar_moved(ui.get_view_h(), ui.get_view_h()),
-        NavStep::ScrollbarTop => ui.invoke_scrollbar_moved(0.0, ui.get_view_h()),
+        NavStep::ScrollbarBottom => {
+            ui.invoke_scrollbar_moved(ui.get_sb_track_h(), ui.get_sb_track_h())
+        }
+        NavStep::ScrollbarTop => ui.invoke_scrollbar_moved(0.0, ui.get_sb_track_h()),
     }
     expected
 }
@@ -3796,12 +3814,19 @@ impl Driver {
                         Some(slot) => match item.top {
                             Some(top) => {
                                 slot.y as f64 + top as f64 * state.scale_milli as f64 / 1000.0
+                                    - state.layout.margins().top as f64
                             }
-                            None => slot.y as f64 - state.layout.gap_px() as f64,
+                            None => {
+                                slot.y as f64
+                                    - state.layout.gap_px() as f64
+                                    - state.layout.margins().top as f64
+                            }
                         },
                     };
                     let y = y.clamp(0.0, (doc_h - view_h).max(0.0));
-                    let page = state.layout.page_near(y + view_h / 2.0).unwrap_or(0) + 1;
+                    let (_, free_h) = state.free_view(ui);
+                    let mid = y + state.layout.margins().top as f64 + free_h / 2.0;
+                    let page = state.layout.page_near(mid).unwrap_or(0) + 1;
                     let mut opened = state.outline_expanded.clone();
                     if let Some(&index) = state.outline_visible.get(row) {
                         crate::expand_on_click(&state.outline_items, &mut opened, index);

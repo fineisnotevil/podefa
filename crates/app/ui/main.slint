@@ -50,6 +50,20 @@ export component MainWindow inherits Window {
     property <length> drawer-width: 212px;
     property <length> canvas-left: root.inset + sidebar.width + root.island-gap
         + (root.drawer-shown ? root.drawer-width + root.island-gap : 0px);
+    // The canvas runs under the whole window and the islands float over it; the document keeps
+    // this much room clear at its edges, so its first page starts under the title row, its column
+    // is centred beside the sidebar, and its last page ends over the status island (Rust's
+    // `Margins`). A change lays the pages out again.
+    out property <length> doc-inset-top: root.canvas-top;
+    out property <length> doc-inset-left: root.canvas-left;
+    out property <length> doc-inset-right: root.inset;
+    out property <length> doc-inset-bottom: root.inset + status.height + root.island-gap;
+    changed doc-inset-top => { root.insets_changed(); }
+    changed doc-inset-left => { root.insets_changed(); }
+    changed doc-inset-right => { root.insets_changed(); }
+    changed doc-inset-bottom => { root.insets_changed(); }
+    // The scroll bar's track: the window's right edge between the title row and the status island.
+    out property <length> sb-track-h: root.view-h - root.doc-inset-top - root.doc-inset-bottom;
 
     // The mode (Plan 0007 §4): 0 Read, 1 Edit, 2 Tools. Phase 2 switches the sidebar's commands;
     // Phase 3 adds the gallery and the transitions. Choosing a tool by its key moves to Edit.
@@ -279,6 +293,8 @@ export component MainWindow inherits Window {
     callback zoom_out();
     callback zoom_reset();
     callback viewport_moved();
+    // One of `doc-inset-*` changed.
+    callback insets_changed();
     callback fit_width();
     callback fit_page();
     // A key on the viewport: text as Slint reports it, plus ctrl and shift; true when handled.
@@ -424,10 +440,10 @@ export component MainWindow inherits Window {
         // Document viewport. The FocusScope takes the navigation keys (Plan 0002, §4.6); it has
         // focus from startup and takes it back on a click into the page.
         viewport-keys := FocusScope {
-            x: root.canvas-left;
-            y: root.canvas-top;
-            width: root.width - root.canvas-left;
-            height: root.height - root.canvas-top;
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
             key-pressed(event) => {
                 if (root.nav_key(event.text, event.modifiers.control, event.modifiers.shift)) {
                     return accept;
@@ -566,10 +582,13 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // The document scrollbar, over the right edge of the viewport.
+                    // The document scrollbar, over the right edge of the viewport, clear of the
+                    // window's buttons and the status island.
                     Rectangle {
                         x: parent.width - 12px;
+                        y: root.doc-inset-top;
                         width: 12px;
+                        height: root.sb-track-h;
                         visible: root.sb-visible;
                         background: Theme.scroll-track;
                         Rectangle {
