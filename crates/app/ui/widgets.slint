@@ -27,8 +27,10 @@ export component IconButton inherits FocusScope {
     in property <length> icon-size: 16px;
     // The icon's colour when it is neither checked nor under the pointer.
     in property <color> tint: Theme.text-muted;
-    // The fill when checked; the danger red for the window's close button on hover.
+    // The fill and the icon's colour when checked; the danger red for the window's close button
+    // on hover.
     in property <brush> checked-fill: Theme.active;
+    in property <color> checked-tint: Theme.text;
     in property <bool> danger: false;
     callback clicked();
 
@@ -60,7 +62,8 @@ export component IconButton inherits FocusScope {
             width: root.icon-size;
             height: root.icon-size;
             colorize: root.danger && touch.has-hover && root.enabled ? #ffffff
-                : root.checked || (touch.has-hover && root.enabled) ? Theme.text : root.tint;
+                : root.checked ? root.checked-tint
+                : touch.has-hover && root.enabled ? Theme.text : root.tint;
             opacity: root.enabled ? 1.0 : 0.35;
         }
         touch := TouchArea {

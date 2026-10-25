@@ -60,6 +60,35 @@ export global Theme {
     // The window's edge while it is not maximized: a frameless window has no system border.
     out property <color> window-edge: dark ? #36363b : #c4c4cc;
 
+    // The modes (Plan 0007 Phase 3). Edit lays a dot grid over a slightly darker canvas; Tools
+    // is a "typesetting desk": dots, lines, ruler ticks and a raised stone under the pages. The
+    // grids are textures coloured with these, each a little fainter in dark (DESIGN.md step 36).
+    out property <color> canvas-edit: dark ? #1c1c1f : #e6e7ea;
+    out property <color> grid-dot: dark ? #ffffff1c : #00000040;
+    out property <color> desk: dark ? #1a1a1d : #eaecef;
+    out property <color> desk-ink: dark ? #ffffff1a : #18181b38;
+    out property <color> ruler: dark ? #ffffff12 : #a1a1aa36;
+    out property <color> stone: dark ? #ffffff08 : #f4f4f580;
+    out property <color> stone-line: dark ? #3f3f4699 : #d4d4d899;
+    // A page in the gallery: chosen, under the pointer, and the check box on it.
+    out property <color> card-chosen: dark ? #27272a99 : #e4e4e780;
+    out property <color> card-ring: dark ? #a1a1aa : #27272a;
+    out property <color> card-hover-ring: #71717a;
+    out property <color> check-fill: dark ? #d4d4d8 : #18181b;
+    out property <color> check-mark: dark ? #09090b : #ffffff;
+    // The active markup tools carry their ink's colour (the concept's amber and rose).
+    out property <color> highlight-fill: #fbbf2440;
+    out property <color> highlight-ink: dark ? #fbbf24 : #b45309;
+    out property <color> strike-fill: #f43f5e33;
+    out property <color> strike-ink: dark ? #fb7185 : #be123c;
+    out property <color> ink-fill: dark ? #52525b : #18181b;
+
+    // Motion (plan §1: at most 250 ms). A mode change and pages sliding aside take `motion`; a
+    // palette pours out its swatches over `pour`, one `pour-step` after another.
+    out property <duration> motion: 250ms;
+    out property <duration> pour: 220ms;
+    out property <duration> pour-step: 40ms;
+
     // Radii and the islands' distance from the window's edge.
     out property <length> radius-island: 8px;
     out property <length> radius-control: 6px;

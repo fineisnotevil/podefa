@@ -23,7 +23,7 @@ use pdf_core::nav::{
     LINE_STEP_LOGICAL_PX, NavAction, SCROLLBAR_MIN_THUMB_LOGICAL_PX, fit_page_milli,
     fit_width_milli, page_top, scroll_target, scrollbar_pos, scrollbar_thumb, wheel_zoom_milli,
 };
-use pdf_core::pages::{PageMap, PageOp, follow};
+use pdf_core::pages::{PageMap, PageOp, follow, kept_rows};
 use pdf_core::search::{SearchHit, SearchResults};
 use pdf_core::select::{PagePoint, PageSelection, SelectMode};
 use pdf_core::settings::{Settings, Theme};
@@ -49,7 +49,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
 mod bench;
@@ -72,6 +72,29 @@ const THUMB_CACHE: usize = 64;
 const THUMB_INFLIGHT: usize = 4;
 /// Rows above and below the visible ones that are requested ahead.
 const THUMB_MARGIN_ROWS: usize = 2;
+
+/// The gallery's strip (Plan 0007 Phase 3); must match `GalleryMetrics` in `ui/gallery.slint`:
+/// one page's card and the gap after it, where the first card starts, and the box a page's
+/// picture fits in, in logical pixels.
+const GALLERY_PITCH_PX: f32 = 280.0;
+const GALLERY_LEAD_PX: f32 = 72.0;
+const GALLERY_PAD_PX: f32 = 24.0;
+const GALLERY_CARD_PX: f32 = 232.0;
+const GALLERY_BOX_W_PX: f32 = 216.0;
+const GALLERY_BOX_H_PX: f32 = 300.0;
+/// Pages left and right of the gallery's view whose pictures are drawn ahead.
+const GALLERY_MARGIN_CARDS: usize = 2;
+/// Pictures the gallery keeps: larger than the drawer's, so fewer of them (the view shows about
+/// four on the §1 machine).
+const GALLERY_THUMB_CACHE: usize = 24;
+/// A mode change's motion (`Theme.motion` in `ui/theme.slint`) and the quiet time after it:
+/// nothing new is drawn until both have passed (plan row AT).
+const MODE_MOTION_MS: u64 = 250;
+const MODE_SETTLE_MS: u64 = 30;
+/// How long the warm-up frame's items stay shown: long enough for one frame to draw them.
+const WARM_MS: u64 = 40;
+/// The modes, as the window's `mode` property has them.
+const MODE_TOOLS: i32 = 2;
 
 /// How long a finger must rest before a touch starts a selection instead of a pan.
 const LONG_PRESS_MS: u64 = 500;
@@ -251,10 +274,19 @@ struct AppState {
     /// document is recognised and dropped.
     doc_generation: u64,
     thumbs_model: Rc<VecModel<ThumbRow>>,
-    /// Pages whose thumbnail is held, with the tick they were last in view (LRU, [`THUMB_CACHE`]).
-    thumb_cache: HashMap<u32, u64>,
+    /// Pages whose thumbnail is held, with the tick they were last in view (LRU, [`THUMB_CACHE`])
+    /// and the width in pixels it was drawn at: the drawer and the gallery want different ones.
+    thumb_cache: HashMap<u32, (u64, u32)>,
     thumb_tick: u64,
-    thumb_inflight: HashSet<u32>,
+    /// Thumbnails asked for, with the width each was asked at.
+    thumb_inflight: HashMap<u32, u32>,
+    /// The window's mode (0 Read, 1 Edit, 2 Tools) as Rust last saw it, and when the motion of
+    /// the last change ends (Plan 0007 Phase 3): until then nothing new is drawn.
+    mode: i32,
+    motion_until: Option<Instant>,
+    /// The opened document's first view is not drawn yet; once it is, one warm-up frame follows
+    /// (main.slint `warm`).
+    warm_pending: bool,
     /// The thumbnail row marked as the current page.
     current_thumb: Option<usize>,
     outline_items: Vec<OutlineItem>,
@@ -519,6 +551,7 @@ impl AppState {
         let mut actions = self.scheduler.update_view(&visible, self.scale_milli);
         actions.extend(self.scheduler.prefetch(&ring));
         self.bench.frame(&self.scheduler, &visible, &ring);
+        self.warm_when_covered(ui, &visible);
         self.apply(ui, actions);
         self.update_pages(ui);
         self.update_hits(ui);
@@ -1440,17 +1473,6 @@ impl AppState {
         self.annots_pending.clear();
         self.fields_pending.clear();
         let bases = remap(&map, &self.bases);
-        let thumbs: Vec<Option<Image>> = map
-            .iter()
-            .map(|from| {
-                let from = (*from)?;
-                self.thumb_cache.contains_key(&from).then_some(())?;
-                self.thumbs_model
-                    .row_data(from as usize)
-                    .filter(|row| row.has_image)
-                    .map(|row| row.image)
-            })
-            .collect();
         let same_count = map.len() as u32 == old_count;
         self.page_sel = map
             .iter()
@@ -1469,18 +1491,7 @@ impl AppState {
         self.page_revs = (0..count as u32).map(|page| (page, revision)).collect();
         self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
         ui.set_total_pages(count as i32);
-        self.reset_thumbs(count);
-        for (page, image) in thumbs.into_iter().enumerate() {
-            if let Some(image) = image
-                && let Some(mut row) = self.thumbs_model.row_data(page)
-            {
-                row.image = image;
-                row.has_image = true;
-                self.thumbs_model.set_row_data(page, row);
-                self.thumb_tick += 1;
-                self.thumb_cache.insert(page as u32, self.thumb_tick);
-            }
-        }
+        self.remap_thumbs(&map, old_count);
         self.show_page_sel(ui);
 
         self.begin_epoch();
@@ -1608,6 +1619,114 @@ impl AppState {
         self.drag_pages = self.page_sel.iter().copied().collect();
     }
 
+    /// The gallery's gap before page `before` got the dragged pages (Plan 0007 Phase 3).
+    fn gallery_dropped(&mut self, before: u32) {
+        let pages = std::mem::take(&mut self.drag_pages);
+        if pages.is_empty() || !self.editable {
+            return;
+        }
+        let before = before.min(self.page_sizes.len() as u32);
+        self.send_edit(EditOp::Pages(PageOp::Move { pages, before }));
+    }
+
+    /// An action on a page in the gallery acts on the chosen pages when it is one of them, and
+    /// otherwise chooses it alone first, so the action and what it acts on are what is shown.
+    fn gallery_choose_for_action(&mut self, ui: &MainWindow, page: u32) {
+        if !self.page_sel.contains(&page) {
+            self.page_sel.clear();
+            self.page_sel.insert(page);
+            self.page_sel_anchor = Some(page);
+            self.show_page_sel(ui);
+        }
+    }
+
+    /// A gap's action in the gallery: a blank page there (as large as the page before it, or the
+    /// first page), or the Split panel set to split there. Pages from a file go through
+    /// [`tools_ui::insert_from_file`], whose dialog runs with the state unborrowed.
+    fn gallery_divider(&mut self, ui: &MainWindow, at: u32, which: i32) {
+        let count = self.page_sizes.len() as u32;
+        if !self.editable || count == 0 {
+            return;
+        }
+        let at = at.min(count);
+        match which {
+            0 if at > 0 && at < count => {
+                ui.set_split_mode(1);
+                ui.set_split_ranges(SharedString::from(format!("1-{at}, {}-{count}", at + 1)));
+                ui.set_split_error(SharedString::new());
+                ui.set_split_visible(true);
+            }
+            1 => {
+                let size = self.page_sizes[at.saturating_sub(1) as usize];
+                self.send_edit(EditOp::Pages(PageOp::InsertBlank {
+                    at,
+                    width: size.width,
+                    height: size.height,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    /// Keys in the gallery (Plan 0007 Phase 3): the arrows, Home and End go through the pages (with
+    /// Shift choosing the run), Ctrl+A chooses every page, Esc unchooses them, Delete deletes the
+    /// chosen pages. Zoom keys do nothing there. `None` when the key is not the gallery's.
+    fn gallery_key(&mut self, ui: &MainWindow, text: &str, ctrl: bool, shift: bool) -> Option<()> {
+        let mut chars = text.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            return None;
+        };
+        let count = self.page_sizes.len() as u32;
+        if count == 0 {
+            return None;
+        }
+        let current = (ui.get_current_page().max(0) as u32).min(count - 1);
+        let step = |to: u32| to.min(count - 1);
+        let target = if c == char::from(Key::LeftArrow) || c == char::from(Key::UpArrow) {
+            Some(current.saturating_sub(1))
+        } else if c == char::from(Key::RightArrow) || c == char::from(Key::DownArrow) {
+            Some(step(current + 1))
+        } else if c == char::from(Key::Home) {
+            Some(0)
+        } else if c == char::from(Key::End) {
+            Some(count - 1)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            if !ctrl {
+                if shift && self.page_sel_anchor.is_none() {
+                    self.page_sel_anchor = Some(current);
+                }
+                self.thumb_clicked(ui, target, false, shift);
+                if shift {
+                    self.go_to_page(ui, target as usize);
+                }
+            }
+            return Some(());
+        }
+        if ctrl && (c == 'a' || c == 'A') {
+            self.page_sel = (0..count).collect();
+            self.page_sel_anchor = Some(0);
+            self.show_page_sel(ui);
+            return Some(());
+        }
+        if ctrl && matches!(c, '+' | '=' | '-' | '0') {
+            return Some(());
+        }
+        if c == char::from(Key::Escape) && !self.page_sel.is_empty() {
+            self.page_sel.clear();
+            self.page_sel_anchor = None;
+            self.show_page_sel(ui);
+            return Some(());
+        }
+        if c == char::from(Key::Delete) {
+            self.page_op(ui, 3);
+            return Some(());
+        }
+        None
+    }
+
     /// The drag ended on a row: the pages go before it, or after it.
     fn thumb_dropped(&mut self, row: u32, after: bool) {
         let pages = std::mem::take(&mut self.drag_pages);
@@ -1653,8 +1772,7 @@ impl AppState {
             self.base_pending.insert(page);
             self.request_base(page);
         }
-        if self.thumb_cache.contains_key(&page) || self.thumb_inflight.contains(&page) {
-            self.thumb_inflight.insert(page);
+        if self.thumb_cache.contains_key(&page) || self.thumb_inflight.contains_key(&page) {
             self.send_thumb(page);
         }
         let stale = self.scheduler.stale_visible(page);
@@ -1940,26 +2058,180 @@ impl AppState {
 
     /// One empty thumbnail row per page, and nothing held or in flight.
     fn reset_thumbs(&mut self, pages: usize) {
-        let rows: Vec<ThumbRow> = (0..pages)
-            .map(|page| ThumbRow {
-                image: Image::default(),
-                has_image: false,
-                label: SharedString::from((page + 1).to_string()),
-                current: false,
-                selected: false,
-            })
-            .collect();
+        let rows: Vec<ThumbRow> = (0..pages).map(|page| self.empty_thumb(page)).collect();
         self.thumbs_model.set_vec(rows);
         self.thumb_cache.clear();
         self.thumb_inflight.clear();
         self.current_thumb = None;
     }
 
+    fn empty_thumb(&self, page: usize) -> ThumbRow {
+        ThumbRow {
+            image: Image::default(),
+            has_image: false,
+            label: SharedString::from((page + 1).to_string()),
+            current: false,
+            selected: false,
+            ratio: self.page_ratio(page),
+        }
+    }
+
+    /// A page's width over its height, as shown.
+    fn page_ratio(&self, page: usize) -> f32 {
+        self.page_sizes
+            .get(page)
+            .filter(|size| size.width > 0.0 && size.height > 0.0)
+            .map_or(1.0 / std::f32::consts::SQRT_2, |size| {
+                size.width / size.height
+            })
+    }
+
+    /// The thumbnail rows follow a structural edit (Plan 0007 Phase 3): a row whose page only
+    /// moved stays and takes its new place, so the gallery slides it there instead of building it
+    /// again; the other old rows are removed and new ones inserted ([`kept_rows`]). Pictures of
+    /// pages that only moved are kept; turned and new pages are drawn again.
+    fn remap_thumbs(&mut self, map: &PageMap, old_count: u32) {
+        let old_rows = (self.thumbs_model.row_count() as u32).min(old_count);
+        let kept = kept_rows(map, old_rows);
+        let kept_old: HashSet<u32> = kept.iter().flatten().copied().collect();
+        let mut pictures: HashMap<u32, (Image, u32)> = HashMap::new();
+        for (&old, &(_, width)) in &self.thumb_cache {
+            if let Some(row) = self.thumbs_model.row_data(old as usize)
+                && row.has_image
+            {
+                pictures.insert(old, (row.image, width));
+            }
+        }
+        for old in (0..old_rows).rev() {
+            if !kept_old.contains(&old) {
+                self.thumbs_model.remove(old as usize);
+            }
+        }
+        let mut held = HashMap::new();
+        for (new, from) in map.iter().enumerate() {
+            let mut row = self.empty_thumb(new);
+            if let Some((image, width)) = from.and_then(|old| pictures.get(&old)) {
+                row.image = image.clone();
+                row.has_image = true;
+                self.thumb_tick += 1;
+                held.insert(new as u32, (self.thumb_tick, *width));
+            }
+            if kept[new].is_some() {
+                self.thumbs_model.set_row_data(new, row);
+            } else {
+                self.thumbs_model.insert(new, row);
+            }
+        }
+        self.thumb_cache = held;
+        self.thumb_inflight.clear();
+        self.current_thumb = None;
+    }
+
+    fn in_gallery(&self) -> bool {
+        self.mode == MODE_TOOLS
+    }
+
+    /// Whether a mode change is still moving: nothing new is drawn until it settles.
+    fn in_motion(&self) -> bool {
+        self.motion_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// The width a page's thumbnail is drawn at, in pixels: the drawer's, or in the gallery the
+    /// width that fits the page's box.
+    fn thumb_width_px(&self, page: u32) -> u32 {
+        let logical = if self.in_gallery() {
+            GALLERY_BOX_W_PX.min(GALLERY_BOX_H_PX * self.page_ratio(page as usize))
+        } else {
+            THUMB_WIDTH_LOGICAL_PX
+        };
+        (logical * self.scale_factor).round().max(1.0) as u32
+    }
+
+    /// How many thumbnails are kept.
+    fn thumb_cap(&self) -> usize {
+        if self.in_gallery() {
+            GALLERY_THUMB_CACHE
+        } else {
+            THUMB_CACHE
+        }
+    }
+
+    /// The mode changed (Plan 0007 Phase 3). The motion only fades and scales what is drawn
+    /// already; once it settles, the thumbnails the new mode shows are drawn at its size.
+    fn mode_changed(&mut self, ui: &MainWindow) {
+        let mode = ui.get_mode();
+        if mode == self.mode {
+            return;
+        }
+        self.mode = mode;
+        let motion = Duration::from_millis(MODE_MOTION_MS + MODE_SETTLE_MS);
+        self.motion_until = Some(Instant::now() + motion);
+        if self.in_gallery() {
+            // The gallery opens on the current page.
+            self.current_thumb = None;
+            let page = self.current_page(ui);
+            self.set_current_thumb(ui, page);
+        }
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(motion, move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| {
+                    if state.in_motion() {
+                        return;
+                    }
+                    state.motion_until = None;
+                    state.trim_thumbs();
+                    state.pump_thumbs(&ui);
+                });
+            }
+        });
+    }
+
+    /// Once the opened document's first view is drawn, one warm-up frame (main.slint `warm`).
+    fn warm_when_covered(&mut self, ui: &MainWindow, visible: &[TileKey]) {
+        if self.warm_pending && bench::holes(&self.scheduler, visible) == 0 {
+            self.warm_pending = false;
+            warm_up(ui);
+        }
+    }
+
+    /// Scrolls the gallery so `page` is in view, in the middle when it was not.
+    fn reveal_in_gallery(&mut self, ui: &MainWindow, page: usize) {
+        let view = ui.get_gallery_view_w();
+        let count = self.page_sizes.len() as f32;
+        let content = GALLERY_LEAD_PX + count * GALLERY_PITCH_PX + GALLERY_PAD_PX;
+        let max = (content - view).max(0.0);
+        let left = GALLERY_LEAD_PX + page as f32 * GALLERY_PITCH_PX;
+        let scroll = ui.get_gallery_scroll();
+        if left < scroll + GALLERY_PAD_PX || left + GALLERY_CARD_PX > scroll + view - GALLERY_PAD_PX
+        {
+            ui.set_gallery_scroll((left - (view - GALLERY_CARD_PX) / 2.0).clamp(0.0, max));
+            self.pump_thumbs(ui);
+        }
+    }
+
     /// Thumbnail rows in view plus the margin, in order from the top; empty while the thumbnail
     /// list is not shown.
     fn thumb_range(&self, ui: &MainWindow) -> std::ops::Range<usize> {
         let rows = self.thumbs_model.row_count();
-        if !ui.get_sidebar_visible() || ui.get_sidebar_tab() != 0 || rows == 0 {
+        if rows == 0 {
+            return 0..0;
+        }
+        if self.in_gallery() {
+            let scroll = ui.get_gallery_scroll().max(0.0);
+            let view = ui.get_gallery_view_w().max(0.0);
+            let first = ((scroll - GALLERY_LEAD_PX) / GALLERY_PITCH_PX)
+                .floor()
+                .max(0.0) as usize;
+            let last = ((scroll + view - GALLERY_LEAD_PX) / GALLERY_PITCH_PX)
+                .ceil()
+                .max(0.0) as usize;
+            let first = first.saturating_sub(GALLERY_MARGIN_CARDS);
+            let last = (last + GALLERY_MARGIN_CARDS).min(rows);
+            return first.min(last)..last;
+        }
+        if !ui.get_sidebar_visible() || ui.get_sidebar_tab() != 0 {
             return 0..0;
         }
         let top = (-ui.get_thumb_scroll_y()).max(0.0) / THUMB_ROW_LOGICAL_PX;
@@ -1971,31 +2243,40 @@ impl AppState {
 
     /// Requests the missing thumbnails of the rows in view, nearest the top first, keeping at most
     /// [`THUMB_INFLIGHT`] in flight.
+    ///
+    /// A held thumbnail drawn at another width (the drawer's in the gallery, or the other way) is
+    /// shown scaled until the new one arrives. Nothing is asked for while a mode change moves.
     fn pump_thumbs(&mut self, ui: &MainWindow) {
+        if self.in_motion() {
+            return;
+        }
         self.thumb_tick += 1;
         let tick = self.thumb_tick;
-        let width_px = (THUMB_WIDTH_LOGICAL_PX * self.scale_factor).round() as u32;
         for row in self.thumb_range(ui) {
             let page = row as u32;
-            if let Some(seen) = self.thumb_cache.get_mut(&page) {
-                *seen = tick;
-                continue;
+            let wanted = self.thumb_width_px(page);
+            if let Some(held) = self.thumb_cache.get_mut(&page) {
+                held.0 = tick;
+                if held.1 == wanted {
+                    continue;
+                }
             }
             if self.thumb_inflight.len() >= THUMB_INFLIGHT {
                 break;
             }
-            if self.thumb_inflight.insert(page) {
-                self.send_thumb_at(page, width_px);
+            if !self.thumb_inflight.contains_key(&page) {
+                self.send_thumb_at(page, wanted);
             }
         }
     }
 
     fn send_thumb(&mut self, page: u32) {
-        let width_px = (THUMB_WIDTH_LOGICAL_PX * self.scale_factor).round() as u32;
+        let width_px = self.thumb_width_px(page);
         self.send_thumb_at(page, width_px);
     }
 
     fn send_thumb_at(&mut self, page: u32, width_px: u32) {
+        self.thumb_inflight.insert(page, width_px);
         let _ = self.cmd_tx.send(EngineCmd::RenderThumb {
             page,
             width_px,
@@ -2016,20 +2297,27 @@ impl AppState {
         if generation != self.doc_generation || revision < self.page_revision(page) {
             return;
         }
-        self.thumb_inflight.remove(&page);
+        let width = self.thumb_inflight.remove(&page).unwrap_or(bitmap.width);
         let row = page as usize;
         if let Some(mut data) = self.thumbs_model.row_data(row) {
             data.image = to_image(bitmap);
             data.has_image = true;
             self.thumbs_model.set_row_data(row, data);
             self.thumb_tick += 1;
-            self.thumb_cache.insert(page, self.thumb_tick);
+            self.thumb_cache.insert(page, (self.thumb_tick, width));
         }
-        while self.thumb_cache.len() > THUMB_CACHE {
+        self.trim_thumbs();
+        self.bench.thumbs_held(self.thumb_cache.len());
+        self.pump_thumbs(ui);
+    }
+
+    /// Keeps at most [`AppState::thumb_cap`] thumbnails, dropping the longest out of view.
+    fn trim_thumbs(&mut self) {
+        while self.thumb_cache.len() > self.thumb_cap() {
             let Some((&oldest, _)) = self
                 .thumb_cache
                 .iter()
-                .min_by_key(|(page, tick)| (**tick, **page))
+                .min_by_key(|(page, (tick, _))| (*tick, **page))
             else {
                 break;
             };
@@ -2040,8 +2328,6 @@ impl AppState {
                 self.thumbs_model.set_row_data(oldest as usize, data);
             }
         }
-        self.bench.thumbs_held(self.thumb_cache.len());
-        self.pump_thumbs(ui);
     }
 
     /// Marks the current page's thumbnail and, when the list is shown, scrolls it into view.
@@ -2058,6 +2344,10 @@ impl AppState {
             }
         }
         self.current_thumb = Some(page);
+        if self.in_gallery() {
+            self.reveal_in_gallery(ui, page);
+            return;
+        }
         if !ui.get_sidebar_visible() || ui.get_sidebar_tab() != 0 {
             return;
         }
@@ -2469,6 +2759,7 @@ impl AppState {
         ui.set_is_loading(false);
         let visible = self.visible(ui);
         self.bench.tile(&self.scheduler, &visible);
+        self.warm_when_covered(ui, &visible);
         self.bench.restructure_tile(&self.scheduler, &visible);
         let stale = self.scheduler.stale_visible(key.page);
         self.bench.tile_after_edit(key.page, stale);
@@ -2679,6 +2970,7 @@ impl AppState {
         self.layout = DocLayout::new(&self.page_sizes, self.scale_milli, self.gap_px());
         self.reset_thumbs(self.page_sizes.len());
         ui.set_thumb_scroll_y(0.0);
+        ui.set_gallery_scroll(0.0);
         self.rendered = 0;
         ui.set_tiles_rendered(0);
         ui.set_tiles_requested(0);
@@ -2789,6 +3081,27 @@ fn with_programmatic_guard<T>(f: impl FnOnce() -> T) -> T {
     let out = f();
     PROGRAMMATIC.with(|flag| flag.set(false));
     out
+}
+
+/// A page action from the gallery on the chosen pages (or the current one): Extract asks for a
+/// file with the state unborrowed; the rest are page operations ([`AppState::page_op`]).
+fn gallery_run(ui: &MainWindow, which: i32) {
+    if which == 7 {
+        tools_ui::extract_pages(ui);
+    } else {
+        with_state(|state| state.page_op(ui, which));
+    }
+}
+
+/// Shows every mode's dot grid, gallery and commands for one frame, unseen (main.slint `warm`).
+fn warm_up(ui: &MainWindow) {
+    ui.set_warm(true);
+    let weak = ui.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(WARM_MS), move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_warm(false);
+        }
+    });
 }
 
 /// Runs `f` on the application state, if a document is loaded.
@@ -3234,7 +3547,10 @@ fn main() -> Result<(), slint::PlatformError> {
             thumbs_model,
             thumb_cache: HashMap::new(),
             thumb_tick: 0,
-            thumb_inflight: HashSet::new(),
+            thumb_inflight: HashMap::new(),
+            mode: 0,
+            motion_until: None,
+            warm_pending: false,
             current_thumb: None,
             outline_items: Vec::new(),
             outline_expanded: Vec::new(),
@@ -3374,6 +3690,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     with_state(|state| {
                         state.set_document(&ui, page_sizes, editable);
                         state.document_opened(&ui);
+                        state.warm_pending = true;
                     });
                     // A scripted run starts on the open, so its first step is a real zoom or pan
                     // rather than a no-op against an empty document.
@@ -3620,6 +3937,12 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             // Tab between form fields, Space or Enter on a focused check box (Plan 0006 Phase 2).
             if !ctrl && with_state_ret(|state| state.field_key(&ui, &text, shift)) == Some(true) {
+                return true;
+            }
+            if ui.get_mode() == MODE_TOOLS
+                && with_state_ret(|state| state.gallery_key(&ui, &text, ctrl, shift)).flatten()
+                    == Some(())
+            {
                 return true;
             }
             let Some(command) = key_command(&text, ctrl, shift) else {
@@ -4056,6 +4379,84 @@ fn main() -> Result<(), slint::PlatformError> {
         main_window.on_crop_cancel(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.crop_cancel(&ui));
+            }
+        });
+    }
+    // The modes and the gallery (Plan 0007 Phase 3).
+    {
+        let weak = main_window.as_weak();
+        main_window.on_mode_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.mode_changed(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_scrolled(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.pump_thumbs(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_toggled(move |row| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(row) = u32::try_from(row)
+            {
+                with_state(|state| state.thumb_clicked(&ui, row, true, false));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_opened(move |row| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(row) = usize::try_from(row)
+            {
+                with_state(|state| state.go_to_page(&ui, row));
+                ui.set_mode(0);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_action(move |row, which| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Ok(row) = u32::try_from(row) else {
+                return;
+            };
+            with_state(|state| state.gallery_choose_for_action(&ui, row));
+            gallery_run(&ui, which);
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_chosen_action(move |which| {
+            if let Some(ui) = weak.upgrade() {
+                gallery_run(&ui, which);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_clear(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| {
+                    state.page_sel.clear();
+                    state.page_sel_anchor = None;
+                    state.show_page_sel(&ui);
+                });
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_divider(move |at, which| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Ok(at) = u32::try_from(at) else {
+                return;
+            };
+            if which == 2 {
+                tools_ui::insert_from_file_at(&ui, Some(at));
+            } else {
+                with_state(|state| state.gallery_divider(&ui, at, which));
+            }
+        });
+        main_window.on_gallery_dropped(move |at| {
+            if let Ok(at) = u32::try_from(at) {
+                with_state(|state| state.gallery_dropped(at));
             }
         });
     }

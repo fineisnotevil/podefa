@@ -1,0 +1,612 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The Tools mode's gallery (Plan 0007 Phase 3, the concept's DESIGN.md steps 5, 6, 18, 19, 28-31
+// and 34): every page side by side on a "typesetting desk", the first one at the left. A click
+// chooses a page, Ctrl or Shift or its check box chooses several; under the pointer a page offers
+// its actions, which act on all the chosen pages when it is one of them. Dragging pages onto a
+// gap between two pages moves them there; a gap offers Split Here, a blank page and pages from a
+// file. The wheel scrolls the strip sideways, and so does dragging the desk.
+//
+// The rows are the thumbnails' rows, one per page, so a page that only moves keeps its row and
+// slides to its new place. Only the pages near the view are built; Rust draws the pictures of
+// the ones in view (main.rs, `GALLERY_*`, which must match `GalleryMetrics`).
+
+import { Theme } from "theme.slint";
+import { ThumbRow } from "types.slint";
+import { Island, IconButton, Separator } from "widgets.slint";
+
+export global GalleryMetrics {
+    // The desk's edge to the first gap.
+    out property <length> pad: 24px;
+    // A gap between two pages, and a page's card.
+    out property <length> divider: 48px;
+    out property <length> card: 232px;
+    // One card and the gap after it; the first card starts at `lead`.
+    out property <length> pitch: 280px;
+    out property <length> lead: 72px;
+    // The box a page's picture fits in, inside its card, and the card's height.
+    out property <length> box-w: 216px;
+    out property <length> box-h: 300px;
+    out property <length> card-h: 316px;
+    // The band the cards and gaps stand in.
+    out property <length> band: 380px;
+}
+
+// One page: its picture on white paper, its number, a check box and, under the pointer, its
+// actions. The click area holds everything, so the page stays "under the pointer" while the
+// pointer is on its buttons.
+component PageCard inherits Rectangle {
+    in property <ThumbRow> page;
+    in property <bool> chosen;
+    in property <bool> editable;
+    in property <bool> can-delete;
+    // Chosen with other pages: the actions act on all of them.
+    in property <bool> many;
+    in property <data-transfer> drag-data;
+    callback clicked(bool, bool);
+    callback toggled();
+    callback opened();
+    callback action(int);
+    callback drag-started();
+    callback drag-ended();
+    callback drop-over(bool);
+    callback dropped(bool);
+
+    property <float> ratio: root.page.ratio > 0 ? root.page.ratio : 0.7071;
+    property <length> page-w: min(GalleryMetrics.box-w, GalleryMetrics.box-h * root.ratio);
+    property <length> page-h: root.page-w / root.ratio;
+    property <bool> hovered: over.has-hover;
+
+    width: GalleryMetrics.card;
+    height: GalleryMetrics.card-h;
+    border-radius: Theme.radius-island;
+    background: root.chosen ? Theme.card-chosen : transparent;
+    border-width: root.chosen ? 2px : root.hovered ? 1px : 0px;
+    border-color: root.chosen ? Theme.card-ring : Theme.card-hover-ring;
+    transform-scale: root.chosen ? 1.02 : 1.0;
+    animate transform-scale, background { duration: 150ms; easing: ease-out; }
+
+    // The pointer over the page, its buttons included. Drag and drop areas pass a move on without
+    // keeping the items under them in the hover chain, so this sits outside them.
+    over := TouchArea {
+        DragArea {
+            enabled: root.editable;
+            allow-move: true;
+            data: root.drag-data;
+            changed dragging => {
+                if (self.dragging) { root.drag-started(); }
+            }
+            drag-finished(action) => { root.drag-ended(); }
+            DropArea {
+                enabled: root.editable;
+                can-drop(event) => {
+                    root.drop-over(event.position.x > self.width / 2);
+                    return DragAction.move;
+                }
+                dropped(event) => {
+                    root.dropped(event.position.x > self.width / 2);
+                    return DragAction.move;
+                }
+                touch := TouchArea {
+                    property <bool> ctrl;
+                    property <bool> shift;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            self.ctrl = event.modifiers.control;
+                            self.shift = event.modifiers.shift;
+                        }
+                    }
+                    clicked => { root.clicked(self.ctrl, self.shift); }
+                    double-clicked => { root.opened(); }
+
+                    paper := Rectangle {
+                        x: (parent.width - root.page-w) / 2;
+                        y: 8px + (GalleryMetrics.box-h - root.page-h) / 2;
+                        width: root.page-w;
+                        height: root.page-h;
+                        background: #ffffff;
+                        border-width: root.page.has-image ? 0px : 1px;
+                        border-color: Theme.line-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-offset-y: 2px;
+                        drop-shadow-color: Theme.island-shadow;
+                        Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: root.page.image;
+                            image-fit: fill;
+                        }
+                        // The page number, at the picture's lower right (DESIGN.md step 19).
+                        Rectangle {
+                            x: parent.width - self.width - 6px;
+                            y: parent.height - self.height - 6px;
+                            width: number.preferred-width + 10px;
+                            height: 16px;
+                            border-radius: 4px;
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.island-line;
+                            number := Text {
+                                text: root.page.label;
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: root.page.current ? Theme.text : Theme.text-muted;
+                            }
+                        }
+                    }
+
+                    // The check box: chooses the page among others without a key.
+                    if root.editable && (root.chosen || root.hovered) : Rectangle {
+                        x: 10px;
+                        y: 10px;
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 5px;
+                        background: root.chosen ? Theme.check-fill : Theme.surface;
+                        border-width: root.chosen ? 0px : 1px;
+                        border-color: check-touch.has-hover ? Theme.text : Theme.line-strong;
+                        if root.chosen : Image {
+                            source: @image-url("icons/check.svg");
+                            width: 14px;
+                            height: 14px;
+                            colorize: Theme.check-mark;
+                        }
+                        check-touch := TouchArea {
+                            clicked => { root.toggled(); }
+                        }
+                        Tooltip { text: @markdown("\{root.chosen ? "Unchoose" : "Choose with Others"}"); }
+                    }
+
+                    // The page's actions, at the bottom of its picture (DESIGN.md step 18).
+                    if root.editable && root.hovered : Island {
+                        width: self.preferred-width;
+                        height: self.preferred-height;
+                        x: (parent.width - self.width) / 2;
+                        y: paper.y + paper.height - self.height - 28px;
+                        HorizontalLayout {
+                            padding: 3px;
+                            spacing: 1px;
+                            IconButton {
+                                width: 28px;
+                                height: 28px;
+                                icon-size: 14px;
+                                icon: @image-url("icons/rotate-ccw.svg");
+                                tip: root.many ? "Rotate the Chosen Pages Left" : "Rotate Left";
+                                clicked => { root.action(0); }
+                            }
+                            IconButton {
+                                width: 28px;
+                                height: 28px;
+                                icon-size: 14px;
+                                icon: @image-url("icons/rotate-cw.svg");
+                                tip: root.many ? "Rotate the Chosen Pages Right" : "Rotate Right";
+                                clicked => { root.action(1); }
+                            }
+                            IconButton {
+                                width: 28px;
+                                height: 28px;
+                                icon-size: 14px;
+                                icon: @image-url("icons/external-link.svg");
+                                tip: root.many ? "Extract the Chosen Pages..." : "Extract Page...";
+                                clicked => { root.action(7); }
+                            }
+                            IconButton {
+                                width: 28px;
+                                height: 28px;
+                                icon-size: 14px;
+                                icon: @image-url("icons/copy.svg");
+                                tip: root.many ? "Duplicate the Chosen Pages" : "Duplicate";
+                                clicked => { root.action(2); }
+                            }
+                            if root.can-delete : IconButton {
+                                width: 28px;
+                                height: 28px;
+                                icon-size: 14px;
+                                icon: @image-url("icons/trash-2.svg");
+                                tip: root.many ? "Delete the Chosen Pages" : "Delete Page";
+                                danger: true;
+                                clicked => { root.action(3); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The gap before page `index`: a thin line with a "+" that opens, under the pointer, into two
+// halves around Split Here, Insert Blank Page and Insert Pages from File (DESIGN.md step 30).
+// Pages dragged onto it move there.
+component Divider inherits Rectangle {
+    in property <int> index;
+    in property <int> count;
+    in property <bool> editable;
+    callback action(int);
+    callback drop-over();
+    callback dropped();
+
+    width: GalleryMetrics.divider;
+    height: GalleryMetrics.band;
+
+    property <bool> open: hover.has-hover && root.editable;
+    // Half the room the middle takes: the "+" when closed, the buttons when open.
+    property <length> gap: root.open ? pill.preferred-height / 2 + 6px : 9px;
+    animate gap { duration: 150ms; easing: ease-out; }
+
+    hover := TouchArea {
+        DropArea {
+            enabled: root.editable;
+            can-drop(event) => {
+                root.drop-over();
+                return DragAction.move;
+            }
+            dropped(event) => {
+                root.dropped();
+                return DragAction.move;
+            }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 30px;
+                width: 1px;
+                height: parent.height / 2 - 30px - root.gap;
+                background: root.open ? Theme.text-faint : Theme.line-strong;
+            }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height / 2 + root.gap;
+                width: 1px;
+                height: parent.height / 2 - 30px - root.gap;
+                background: root.open ? Theme.text-faint : Theme.line-strong;
+            }
+            if !root.open : Text {
+                text: "+";
+                font-size: 11px;
+                color: Theme.text-faint;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            pill := Island {
+                visible: root.open;
+                width: self.preferred-width;
+                height: self.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                VerticalLayout {
+                    padding: 3px;
+                    spacing: 1px;
+                    if root.index > 0 && root.index < root.count : IconButton {
+                        width: 28px;
+                        height: 28px;
+                        icon-size: 14px;
+                        icon: @image-url("icons/scissors.svg");
+                        tip: "Split Here...";
+                        clicked => { root.action(0); }
+                    }
+                    IconButton {
+                        width: 28px;
+                        height: 28px;
+                        icon-size: 14px;
+                        icon: @image-url("icons/plus.svg");
+                        tip: "Insert Blank Page Here";
+                        clicked => { root.action(1); }
+                    }
+                    IconButton {
+                        width: 28px;
+                        height: 28px;
+                        icon-size: 14px;
+                        icon: @image-url("icons/folder-input.svg");
+                        tip: "Insert Pages from File Here...";
+                        clicked => { root.action(2); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component Gallery inherits Rectangle {
+    in property <[ThumbRow]> thumbs;
+    in property <int> total-pages;
+    in property <int> pages-chosen;
+    in property <bool> editable;
+    in property <data-transfer> drag-data;
+    // The desk fills the window, under the islands; the strip starts right of the sidebar and its
+    // band stands between the title row and the status island.
+    in property <length> inset-left;
+    in property <length> inset-top;
+    in property <length> inset-bottom;
+    // How far the strip is scrolled to the left, from 0.
+    in-out property <length> scroll: 0px;
+    // The gap a drag would drop its pages in, or -1.
+    in-out property <int> drop-index: -1;
+    // Where the strip starts in the window, for the bench harness's clicks and drags.
+    out property <length> strip-abs-x: strip.absolute-position.x;
+    out property <length> strip-abs-y: strip.absolute-position.y;
+    callback scrolled();
+    callback card-clicked(int, bool, bool);
+    callback card-toggled(int);
+    callback card-opened(int);
+    // An action on a page (0 rotate left, 1 rotate right, 2 duplicate, 3 delete, 7 extract): on
+    // all the chosen pages when it is one of them, else on it alone.
+    callback card-action(int, int);
+    // An action in the gap before a page (0 split here, 1 blank page, 2 pages from a file).
+    callback divider-action(int, int);
+    callback drag-started(int);
+    callback dropped-at(int);
+    // An action on every chosen page, from the bar over the strip; and unchoosing them.
+    callback chosen-action(int);
+    callback clear-chosen();
+
+    property <length> content-w: GalleryMetrics.lead + root.total-pages * GalleryMetrics.pitch
+        + GalleryMetrics.pad;
+    property <length> view-w: root.width - root.inset-left;
+    property <length> view-h: root.height - root.inset-top - root.inset-bottom;
+    property <length> max-scroll: max(0px, root.content-w - root.view-w);
+    // The band's top: in the middle, but never under the bar over the strip.
+    property <length> band-y: root.inset-top
+        + max(48px, (root.view-h - GalleryMetrics.band) / 2 - 12px);
+
+    function scroll-to(offset: length) {
+        root.scroll = max(0px, min(root.max-scroll, offset));
+        root.scrolled();
+    }
+
+    changed max-scroll => {
+        if (root.scroll > root.max-scroll) { root.scroll-to(root.max-scroll); }
+    }
+
+    background: Theme.desk;
+    clip: true;
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("textures/desk.svg");
+        horizontal-tiling: repeat;
+        vertical-tiling: repeat;
+        colorize: Theme.desk-ink;
+    }
+
+    // The wheel scrolls sideways (DESIGN.md step 31); dragging the desk pans it.
+    TouchArea {
+        property <length> from;
+        mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.default;
+        scroll-event(event) => {
+            root.scroll-to(root.scroll - event.delta-x - event.delta-y);
+            return accept;
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) { self.from = root.scroll; }
+        }
+        moved => {
+            if (self.pressed) { root.scroll-to(self.from - (self.mouse-x - self.pressed-x)); }
+        }
+    }
+
+    strip := Rectangle {
+        x: root.inset-left - root.scroll;
+        y: root.band-y;
+        width: root.content-w;
+        height: GalleryMetrics.band;
+
+        // The stone the pages are composed on, with ruler ticks along its top and bottom.
+        stone := Rectangle {
+            x: GalleryMetrics.pad / 2;
+            y: (parent.height - GalleryMetrics.card-h) / 2 - 24px;
+            width: parent.width - GalleryMetrics.pad;
+            height: GalleryMetrics.card-h + 48px;
+            border-radius: Theme.radius-island;
+            background: Theme.stone;
+            border-width: 1px;
+            border-color: Theme.stone-line;
+        }
+        Image {
+            x: stone.x;
+            y: stone.y - 12px;
+            width: stone.width;
+            height: 8px;
+            source: @image-url("textures/ruler.svg");
+            horizontal-tiling: repeat;
+            colorize: Theme.ruler;
+        }
+        Image {
+            x: stone.x;
+            y: stone.y + stone.height + 4px;
+            width: stone.width;
+            height: 8px;
+            source: @image-url("textures/ruler.svg");
+            horizontal-tiling: repeat;
+            colorize: Theme.ruler;
+        }
+
+        Divider {
+            x: GalleryMetrics.pad;
+            index: 0;
+            count: root.total-pages;
+            editable: root.editable;
+            action(which) => { root.divider-action(0, which); }
+            drop-over => { root.drop-index = 0; }
+            dropped => {
+                root.drop-index = -1;
+                root.dropped-at(0);
+            }
+        }
+
+        for row[index] in root.thumbs : slot := Rectangle {
+            x: GalleryMetrics.lead + index * GalleryMetrics.pitch;
+            width: GalleryMetrics.pitch;
+            height: GalleryMetrics.band;
+            // A page that moves, or whose neighbour came or went, slides to its place.
+            animate x { duration: Theme.motion; easing: ease-out-expo; }
+            property <bool> near: self.x + self.width > root.scroll - GalleryMetrics.pitch
+                && self.x < root.scroll + root.view-w + GalleryMetrics.pitch;
+            if slot.near : PageCard {
+                y: (parent.height - GalleryMetrics.card-h) / 2;
+                page: row;
+                chosen: row.selected || (root.pages-chosen == 0 && row.current);
+                many: row.selected && root.pages-chosen > 1;
+                editable: root.editable;
+                can-delete: root.total-pages > 1;
+                drag-data: root.drag-data;
+                clicked(ctrl, shift) => { root.card-clicked(index, ctrl, shift); }
+                toggled => { root.card-toggled(index); }
+                opened => { root.card-opened(index); }
+                action(which) => { root.card-action(index, which); }
+                drag-started => { root.drag-started(index); }
+                drag-ended => { root.drop-index = -1; }
+                drop-over(after) => { root.drop-index = after ? index + 1 : index; }
+                dropped(after) => {
+                    root.drop-index = -1;
+                    root.dropped-at(after ? index + 1 : index);
+                }
+            }
+            if slot.near : Divider {
+                x: GalleryMetrics.card;
+                index: index + 1;
+                count: root.total-pages;
+                editable: root.editable;
+                action(which) => { root.divider-action(index + 1, which); }
+                drop-over => { root.drop-index = index + 1; }
+                dropped => {
+                    root.drop-index = -1;
+                    root.dropped-at(index + 1);
+                }
+            }
+        }
+
+        // Where dragged pages would land.
+        if root.drop-index >= 0 : Rectangle {
+            x: GalleryMetrics.pad + root.drop-index * GalleryMetrics.pitch
+                + (GalleryMetrics.divider - self.width) / 2;
+            y: 24px;
+            width: 3px;
+            height: parent.height - 48px;
+            border-radius: 1.5px;
+            background: Theme.card-ring;
+        }
+        if root.drop-index >= 0 : Island {
+            width: self.preferred-width;
+            height: self.preferred-height;
+            x: GalleryMetrics.pad + root.drop-index * GalleryMetrics.pitch
+                + (GalleryMetrics.divider - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-width: 2px;
+            border-color: Theme.card-ring;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("icons/move-horizontal.svg");
+                        width: 18px;
+                        height: 18px;
+                        colorize: Theme.text;
+                    }
+                }
+                Text {
+                    text: "Move Here";
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // The scroll bar, under the band.
+    if root.max-scroll > 0 : track := Rectangle {
+        x: root.inset-left + GalleryMetrics.pad;
+        y: min(root.height - root.inset-bottom - 14px, root.band-y + GalleryMetrics.band + 8px);
+        width: root.view-w - 2 * GalleryMetrics.pad;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.scroll-track;
+        thumb := Rectangle {
+            width: max(32px, parent.width * root.view-w / root.content-w);
+            x: (parent.width - self.width) * root.scroll / root.max-scroll;
+            height: parent.height;
+            border-radius: 3px;
+            background: thumb-touch.pressed ? Theme.scroll-thumb-pressed : Theme.scroll-thumb;
+            thumb-touch := TouchArea {
+                property <length> from;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) { self.from = root.scroll; }
+                }
+                moved => {
+                    if (self.pressed) {
+                        root.scroll-to(self.from + (self.mouse-x - self.pressed-x) * root.max-scroll
+                            / max(1px, track.width - thumb.width));
+                    }
+                }
+            }
+        }
+    }
+
+    // The bar over the strip while several pages are chosen (DESIGN.md step 34).
+    if root.editable && root.pages-chosen > 1 : Island {
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: root.inset-left + (root.view-w - self.width) / 2;
+        y: root.inset-top + 8px;
+        HorizontalLayout {
+            padding: 4px;
+            padding-left: 12px;
+            spacing: 2px;
+            Text {
+                text: root.pages-chosen + " pages chosen";
+                font-size: 12px;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                padding-left: 8px;
+                padding-right: 6px;
+                alignment: center;
+                Separator { vertical: true; height: 16px; }
+            }
+            IconButton {
+                icon: @image-url("icons/rotate-ccw.svg");
+                tip: "Rotate Left";
+                clicked => { root.chosen-action(0); }
+            }
+            IconButton {
+                icon: @image-url("icons/rotate-cw.svg");
+                tip: "Rotate Right";
+                clicked => { root.chosen-action(1); }
+            }
+            IconButton {
+                icon: @image-url("icons/copy.svg");
+                tip: "Duplicate";
+                clicked => { root.chosen-action(2); }
+            }
+            IconButton {
+                icon: @image-url("icons/external-link.svg");
+                tip: "Extract...";
+                clicked => { root.chosen-action(7); }
+            }
+            IconButton {
+                icon: @image-url("icons/trash-2.svg");
+                tip: "Delete (Delete)";
+                danger: true;
+                clicked => { root.chosen-action(3); }
+            }
+            VerticalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                alignment: center;
+                Separator { vertical: true; height: 16px; }
+            }
+            IconButton {
+                icon: @image-url("icons/x.svg");
+                tip: "Unchoose All (Esc)";
+                clicked => { root.clear-chosen(); }
+            }
+        }
+    }
+}

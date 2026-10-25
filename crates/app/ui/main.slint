@@ -4,6 +4,10 @@
 // The main window (Plan 0007 Phase 2): its own frame, and islands floating over the canvas - the
 // title row, the sidebar with the three modes, the drawer, search, and the status islands. Every
 // command the menu bar had lives in the island it belongs to (plan §0, question 1).
+//
+// The modes (Phase 3): Read shows the pages; Edit lays a dot grid under them; Tools pulls the
+// camera back to the gallery. A mode change only fades and scales what is drawn already: the
+// canvas keeps its size and place, so no tile is rendered while it moves (plan row AT).
 
 import { Button, ComboBox, LineEdit, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
 import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView } from "types.slint";
@@ -13,6 +17,7 @@ import { TitleRow } from "title.slint";
 import { SidebarColumn, Drawer } from "sidebar.slint";
 import { StatusIsland, MessageIsland } from "statusbar.slint";
 import { SearchIsland } from "search.slint";
+import { Gallery } from "gallery.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
 export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView }
@@ -30,7 +35,8 @@ export component MainWindow inherits Window {
     in-out property <bool> own-frame: true;
     no-frame: root.own-frame;
     resize-border-width: root.own-frame && !root.maximized ? 6px : 0px;
-    background: Theme.canvas;
+    background: root.mode == 1 ? Theme.canvas-edit : Theme.canvas;
+    animate background { duration: Theme.motion; }
     min-width: 640px;
     min-height: 660px;
     preferred-width: 900px;
@@ -53,6 +59,24 @@ export component MainWindow inherits Window {
             root.mode = 1;
         }
     }
+    changed mode => { root.mode_changed(); }
+    // How far each mode has come in, from 0 to 1, over `Theme.motion`.
+    // Set by Rust for one frame once a document's first view is drawn: Edit's dot grid, the
+    // gallery and every mode's commands are drawn then at opacity 0, which femtovg still renders
+    // into a layer (itemrenderer.rs:520-533), so each image is tinted and uploaded and the gallery
+    // built before the first change to its mode, not in that change's first frame (row AT).
+    in property <bool> warm;
+    property <float> edit-t: root.mode == 1 ? 1 : 0;
+    animate edit-t { duration: Theme.motion; easing: ease-out-expo; }
+    property <float> tools-t: root.mode == 2 ? 1 : 0;
+    animate tools-t { duration: Theme.motion; easing: ease-out-expo; }
+    // The gallery (Tools): how far it is scrolled, the gap a drag would drop in, and where its
+    // strip is in the window (for the bench harness).
+    in-out property <length> gallery-scroll: 0px;
+    in-out property <int> gallery-drop: -1;
+    out property <length> gallery-strip-x: gallery.strip-abs-x;
+    out property <length> gallery-strip-y: gallery.strip-abs-y;
+    out property <length> gallery-view-w: root.width - gallery.inset-left;
     // Shows the tile counters in the status island (when tracing).
     in-out property <bool> diagnostics: false;
 
@@ -350,6 +374,19 @@ export component MainWindow inherits Window {
     callback can_open_drop(data-transfer) -> bool;
     // A drop: open the document it carries.
     callback open_drop(data-transfer);
+    // The mode changed (Rust waits for the motion to end before it draws anything new).
+    callback mode_changed();
+    // The gallery: it scrolled; a page was ticked, double-clicked (back to Read on it), or one
+    // of its actions or a gap's was pressed; pages were dropped in a gap; the chosen pages' bar.
+    // A click on a page is a thumbnail's click (`thumb_clicked`).
+    callback gallery_scrolled();
+    callback gallery_toggled(int);
+    callback gallery_opened(int);
+    callback gallery_action(int, int);
+    callback gallery_divider(int, int);
+    callback gallery_dropped(int);
+    callback gallery_chosen_action(int);
+    callback gallery_clear();
 
 
     function apply-theme() {
@@ -368,6 +405,20 @@ export component MainWindow inherits Window {
                 return accept;
             }
             return reject;
+        }
+
+        // Edit's dot grid, over the whole window under the islands.
+        Image {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            source: @image-url("textures/dot-grid.svg");
+            horizontal-tiling: repeat;
+            vertical-tiling: repeat;
+            colorize: Theme.grid-dot;
+            opacity: root.edit-t;
+            visible: root.edit-t > 0 || root.warm;
         }
 
         // Document viewport. The FocusScope takes the navigation keys (Plan 0002, §4.6); it has
@@ -394,8 +445,13 @@ export component MainWindow inherits Window {
                     root.open_drop(event.data);
                     return DragAction.copy;
                 }
+                // Going to Tools, the pages fall back under the gallery, which fades in over them;
+                // nothing in them is drawn again. No opacity here: it would draw every tile into
+                // a layer on every frame of the motion. The window's background is the canvas
+                // colour.
                 canvas := Rectangle {
-                    background: Theme.canvas;
+                    transform-scale: 1 - 0.08 * root.tools-t;
+                    visible: root.tools-t < 1;
 
                     viewport := Flickable {
                         // A failed open keeps the document that was already showing.
@@ -1429,6 +1485,38 @@ export component MainWindow inherits Window {
             }
         }
 
+        // Tools: the gallery, over the whole window under the islands; it comes in from a little
+        // smaller as the canvas falls back (the concept's "camera pull-back").
+        gallery := Gallery {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            visible: (root.tools-t > 0 || root.warm) && root.total_pages > 0;
+            opacity: root.tools-t;
+            transform-scale: 0.88 + 0.12 * root.tools-t;
+            inset-left: root.inset + sidebar.width + root.island-gap;
+            inset-top: root.canvas-top;
+            inset-bottom: root.inset + status.height + root.island-gap;
+            thumbs: root.thumbs;
+            total-pages: root.total_pages;
+            pages-chosen: root.pages-chosen;
+            editable: root.editable;
+            drag-data: root.page-drag-data;
+            scroll <=> root.gallery-scroll;
+            drop-index <=> root.gallery-drop;
+            scrolled => { root.gallery_scrolled(); }
+            card-clicked(index, ctrl, shift) => { root.thumb_clicked(index, ctrl, shift); }
+            card-toggled(index) => { root.gallery_toggled(index); }
+            card-opened(index) => { root.gallery_opened(index); }
+            card-action(index, which) => { root.gallery_action(index, which); }
+            divider-action(index, which) => { root.gallery_divider(index, which); }
+            drag-started(index) => { root.thumb_drag_started(index); }
+            dropped-at(index) => { root.gallery_dropped(index); }
+            chosen-action(which) => { root.gallery_chosen_action(which); }
+            clear-chosen => { root.gallery_clear(); }
+        }
+
         title-row := TitleRow {
             x: root.inset;
             y: root.inset;
@@ -1460,6 +1548,7 @@ export component MainWindow inherits Window {
             y: root.canvas-top;
             height: root.height - root.canvas-top - root.inset;
             mode <=> root.mode;
+            warm: root.warm;
             editable: root.editable;
             total-pages: root.total_pages;
             tool-running: root.tool-running;
@@ -1510,7 +1599,9 @@ export component MainWindow inherits Window {
             props-open => { root.props_open(); }
         }
 
-        if root.drawer-shown : Drawer {
+        // Tools has the gallery instead; the canvas keeps the drawer's room, so it does not move.
+        if root.drawer-shown && root.tools-t < 1 : Drawer {
+            opacity: 1 - root.tools-t;
             x: root.inset + sidebar.width + root.island-gap;
             y: root.canvas-top;
             width: root.drawer-width;
@@ -1535,7 +1626,7 @@ export component MainWindow inherits Window {
         }
 
         // The search island, under the title row.
-        if root.find-visible : SearchIsland {
+        if root.find-visible && root.mode != 2 : SearchIsland {
             width: self.preferred-width;
             height: self.preferred-height;
             x: root.canvas-left + (root.width - root.canvas-left - self.width) / 2;
@@ -1573,8 +1664,12 @@ export component MainWindow inherits Window {
         status := StatusIsland {
             width: self.preferred-width;
             height: self.preferred-height;
-            // Clear of the scroll bar at the window's right edge.
-            x: root.width - self.width - max(root.inset, 12px) - 8px;
+            // Clear of the scroll bar at the window's right edge; in Tools, page navigation only,
+            // in the middle under the gallery (DESIGN.md step 33).
+            nav-only: root.mode == 2;
+            x: root.mode == 2
+                ? gallery.inset-left + (root.width - gallery.inset-left - self.width) / 2
+                : root.width - self.width - max(root.inset, 12px) - 8px;
             y: root.height - self.height - root.inset;
             current-page: root.current_page;
             total-pages: root.total_pages;

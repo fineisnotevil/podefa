@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 // The sidebar (Plan 0007 Phase 2): the mode island (Read, Edit, Tools) and, under it, the island
-// with the chosen mode's commands; the colours and line widths of the active tool fly out beside
-// it. The drawer next to it holds the page thumbnails or the outline.
+// with the chosen mode's commands; the colours and line widths of the active tool pour out beside
+// it (Phase 3). The drawer next to it holds the page thumbnails or the outline.
 //
-// Until the gallery of Phase 3, Tools also reaches the page operations through its own island
-// and chooses pages in the drawer's thumbnails.
+// In Tools the pages are chosen in the gallery (gallery.slint); the commands here act on the
+// chosen pages, or on the current one.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -19,19 +19,39 @@ global SidebarMetrics {
     out property <length> flyout-gap: 8px;
 }
 
+// One item of a palette: it pours out from the tool when the palette opens, `order` steps after
+// the first (the concept's cascade, 220 ms, 40 ms apart).
+component Pour inherits Rectangle {
+    in property <int> order;
+    property <float> t: 0;
+    init => { self.t = 1; }
+    animate t {
+        duration: Theme.pour;
+        delay: root.order * Theme.pour-step;
+        easing: ease-out-expo;
+    }
+    width: 18px;
+    height: 18px;
+    opacity: root.t;
+    transform-scale: 0.5 + 0.5 * root.t;
+    transform-origin: { x: 0px, y: self.height / 2 };
+}
+
 // A column of swatches beside the active tool.
 component Swatches inherits VerticalLayout {
     in property <[color]> swatches;
     in property <int> chosen;
     callback choose(int);
     spacing: 6px;
-    for swatch[index] in root.swatches : Rectangle {
-        width: 18px;
-        height: 18px;
-        border-radius: 4px;
-        background: swatch;
-        border-width: index == root.chosen ? 2px : 1px;
-        border-color: index == root.chosen ? Theme.text : Theme.line-strong;
+    for swatch[index] in root.swatches : Pour {
+        order: index;
+        Rectangle {
+            border-radius: 4px;
+            background: swatch;
+            border-width: index == root.chosen ? 2px : 1px;
+            border-color: index == root.chosen ? Theme.text : Theme.line-strong;
+            transform-scale: index == root.chosen ? 1.1 : 1.0;
+        }
         TouchArea { clicked => { root.choose(index); } }
     }
 }
@@ -39,6 +59,9 @@ component Swatches inherits VerticalLayout {
 export component SidebarColumn inherits Rectangle {
     // 0 Read, 1 Edit, 2 Tools.
     in-out property <int> mode: 0;
+    // One frame after a document opens, every mode's commands are drawn, unseen, so their icons
+    // are tinted before the first change to that mode (plan row AT; main.slint `warm`).
+    in property <bool> warm;
     in property <bool> editable;
     in property <int> total-pages;
     in property <bool> tool-running;
@@ -126,11 +149,21 @@ export component SidebarColumn inherits Rectangle {
             }
         }
 
+        // The three modes' commands all stay built and only the chosen mode's show: building a
+        // mode's buttons anew on every change cost the change's first frame its budget (plan row
+        // AT). Tab skips the hidden ones (i-slint-core-1.18.1/window.rs:1608).
         commands := Island {
             width: modes.width;
-            VerticalLayout {
+            height: root.mode == 0 ? read-commands.preferred-height
+                : root.mode == 1 ? edit-commands.preferred-height
+                : tools-commands.preferred-height;
+            Rectangle {
                 // Read: the drawer's two tabs and search.
-                if root.mode == 0 : VerticalLayout {
+                read-commands := VerticalLayout {
+                    y: 0px;
+                    height: self.preferred-height;
+                    visible: root.mode == 0 || root.warm;
+                    opacity: root.mode == 0 ? 1 : 0;
                     padding: SidebarMetrics.pad;
                     spacing: 2px;
                     IconButton {
@@ -157,7 +190,11 @@ export component SidebarColumn inherits Rectangle {
                 }
 
                 // Edit: markup, notes, ink, crop, rotation and the form.
-                if root.mode == 1 : VerticalLayout {
+                edit-commands := VerticalLayout {
+                    y: 0px;
+                    height: self.preferred-height;
+                    visible: root.mode == 1 || root.warm;
+                    opacity: root.mode == 1 ? 1 : 0;
                     padding: SidebarMetrics.pad;
                     spacing: 2px;
                     IconButton {
@@ -172,6 +209,8 @@ export component SidebarColumn inherits Rectangle {
                         tip: "Highlight (H)";
                         enabled: root.can-edit;
                         checked: root.tool == 1;
+                        checked-fill: Theme.highlight-fill;
+                        checked-tint: Theme.highlight-ink;
                         clicked => { root.pick(1); }
                     }
                     underline-button := IconButton {
@@ -186,6 +225,8 @@ export component SidebarColumn inherits Rectangle {
                         tip: "Strike-out (K)";
                         enabled: root.can-edit;
                         checked: root.tool == 3;
+                        checked-fill: Theme.strike-fill;
+                        checked-tint: Theme.strike-ink;
                         clicked => { root.pick(3); }
                     }
                     squiggly-button := IconButton {
@@ -207,6 +248,8 @@ export component SidebarColumn inherits Rectangle {
                         tip: "Ink (I)";
                         enabled: root.can-edit;
                         checked: root.tool == 6;
+                        checked-fill: Theme.ink-fill;
+                        checked-tint: #ffffff;
                         clicked => { root.pick(6); }
                     }
                     HorizontalLayout {
@@ -264,16 +307,13 @@ export component SidebarColumn inherits Rectangle {
                 }
 
                 // Tools: the page operations and the tools that write new files.
-                if root.mode == 2 : VerticalLayout {
+                tools-commands := VerticalLayout {
+                    y: 0px;
+                    height: self.preferred-height;
+                    visible: root.mode == 2 || root.warm;
+                    opacity: root.mode == 2 ? 1 : 0;
                     padding: SidebarMetrics.pad;
                     spacing: 2px;
-                    IconButton {
-                        icon: @image-url("icons/layout-grid.svg");
-                        tip: "Page Thumbnails: Ctrl+click or Shift+click chooses pages (F4)";
-                        enabled: root.has-pages;
-                        checked: root.sidebar-visible && root.sidebar-tab == 0;
-                        clicked => { root.show-drawer(0); }
-                    }
                     IconButton {
                         icon: @image-url("icons/rotate-ccw.svg");
                         tip: "Rotate Left";
@@ -393,9 +433,8 @@ export component SidebarColumn inherits Rectangle {
             VerticalLayout {
                 spacing: 6px;
                 alignment: start;
-                for line[index] in [1px, 2px, 4px] : Rectangle {
-                    width: 18px;
-                    height: 18px;
+                for line[index] in [1px, 2px, 4px] : Pour {
+                    order: index;
                     border-radius: 4px;
                     border-width: index == root.ink-width-index ? 2px : 1px;
                     border-color: index == root.ink-width-index ? Theme.text : Theme.line-strong;
@@ -452,7 +491,7 @@ export component SidebarColumn inherits Rectangle {
 
     pages-menu := PopupWindow {
         x: commands.x + commands.width + SidebarMetrics.flyout-gap;
-        y: commands.y + 3 * 34px;
+        y: commands.y + 2 * 34px;
         width: 240px;
         MenuSurface {
             VerticalLayout {
@@ -508,7 +547,7 @@ export component SidebarColumn inherits Rectangle {
 
     stamp-menu := PopupWindow {
         x: commands.x + commands.width + SidebarMetrics.flyout-gap;
-        y: commands.y + 6 * 34px + 6px;
+        y: commands.y + 5 * 34px + 6px;
         width: 200px;
         MenuSurface {
             VerticalLayout {
@@ -534,7 +573,7 @@ export component SidebarColumn inherits Rectangle {
 
     export-menu := PopupWindow {
         x: commands.x + commands.width + SidebarMetrics.flyout-gap;
-        y: commands.y + 8 * 34px + 6px;
+        y: commands.y + 7 * 34px + 6px;
         width: 200px;
         MenuSurface {
             VerticalLayout {

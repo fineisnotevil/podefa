@@ -35,7 +35,7 @@ use slint::Model;
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Timer, TimerMode};
 use slint::{LogicalPosition, SharedString};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
@@ -166,6 +166,11 @@ pub struct Cfg {
     /// `t_first_page` (Plan 0007, rows AR and AS; benchmarks §13.1). Runs alone: the other
     /// scenarios are left out.
     pub idle_s: f64,
+    /// `--bench-modes N`: once the opening view is covered, change the mode N times round
+    /// Read, Edit, Tools, Read, Tools, Edit, Read, and for each change's motion report the tiles
+    /// requested and rendered, the frames, the longest frame and the longest gap between two
+    /// frames (Plan 0007 Phase 3, row AT; benchmarks §13.4). Runs alone.
+    pub modes: u32,
 }
 
 impl Default for Cfg {
@@ -205,6 +210,7 @@ impl Default for Cfg {
             convert: false,
             forms: false,
             idle_s: 0.0,
+            modes: 0,
         }
     }
 }
@@ -231,6 +237,7 @@ impl Cfg {
             && !self.convert
             && !self.forms
             && self.idle_s <= 0.0
+            && self.modes == 0
     }
 }
 
@@ -374,6 +381,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
                 cfg.jump_page = number.map(|page| page.max(1.0) as usize);
                 consumed = 2;
             }
+            "--bench-modes" => {
+                cfg.modes = number.unwrap_or(1.0).max(1.0) as u32;
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
             "--bench-idle" => {
                 cfg.idle_s = number.unwrap_or(5.0).max(0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
@@ -399,6 +410,60 @@ static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 /// Frames the window has drawn, counted by the rendering notifier [`count_frames`] installs.
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// Frame timing since the last [`frame_window_reset`] (benchmarks §13.4): the frames drawn, the
+/// longest `frame_ms` and the longest gap between the ends of two frames, in microseconds, and
+/// when the last frame ended (microseconds after the process start, 0 for none yet).
+static WINDOW_FRAMES: AtomicU64 = AtomicU64::new(0);
+static FRAME_MAX_US: AtomicU64 = AtomicU64::new(0);
+static FRAME_GAP_MAX_US: AtomicU64 = AtomicU64::new(0);
+static LAST_FRAME_END_US: AtomicU64 = AtomicU64::new(0);
+/// The first frame of the window: how long it took (0 before it ends).
+static FRAME_FIRST_US: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// When the frame being drawn began; the notifier runs on the UI thread.
+    static FRAME_START: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Frames drawn since [`frame_window_reset`], with the longest frame and gap and the first frame,
+/// in milliseconds. The first gap runs from the reset to the end of the first frame.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameWindow {
+    pub frames: u64,
+    pub max_ms: f64,
+    pub gap_ms: f64,
+    pub first_ms: f64,
+}
+
+impl fmt::Display for FrameWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "frames={} frame_max={:.1}ms frame_first={:.1}ms gap_max={:.1}ms",
+            self.frames, self.max_ms, self.first_ms, self.gap_ms
+        )
+    }
+}
+
+/// Starts a new frame timing window.
+pub fn frame_window_reset() {
+    WINDOW_FRAMES.store(0, Ordering::Relaxed);
+    FRAME_MAX_US.store(0, Ordering::Relaxed);
+    FRAME_GAP_MAX_US.store(0, Ordering::Relaxed);
+    FRAME_FIRST_US.store(0, Ordering::Relaxed);
+    let now = process_start().elapsed().as_micros().max(1) as u64;
+    LAST_FRAME_END_US.store(now, Ordering::Relaxed);
+}
+
+pub fn frame_window() -> FrameWindow {
+    FrameWindow {
+        frames: WINDOW_FRAMES.load(Ordering::Relaxed),
+        max_ms: FRAME_MAX_US.load(Ordering::Relaxed) as f64 / 1000.0,
+        gap_ms: FRAME_GAP_MAX_US.load(Ordering::Relaxed) as f64 / 1000.0,
+        first_ms: FRAME_FIRST_US.load(Ordering::Relaxed) as f64 / 1000.0,
+    }
+}
+
 /// Marks the start of the process; call it first in `main`, before the window is built, so the
 /// window's own construction is part of `t_first_page`.
 pub fn mark_process_start() {
@@ -411,11 +476,36 @@ fn process_start() -> Instant {
 
 /// Counts the frames the window draws (`frames`, benchmarks §13.1). Only installed when tracing:
 /// the notifier is one atomic add per frame, but an untraced run needs none.
+///
+/// It also times each frame (benchmarks §13.4): `frame_ms` runs from Slint's `BeforeRendering` to
+/// its `AfterRendering`, the drawing and the hand-over to the GPU without the wait for the
+/// display (`i-slint-renderer-femtovg-1.18.1/lib.rs:260, 333`).
 pub fn count_frames(ui: &MainWindow) {
-    let installed = ui.window().set_rendering_notifier(|state, _| {
-        if matches!(state, slint::RenderingState::AfterRendering) {
-            FRAMES.fetch_add(1, Ordering::Relaxed);
+    let installed = ui.window().set_rendering_notifier(|state, _| match state {
+        slint::RenderingState::BeforeRendering => {
+            FRAME_START.with(|start| start.set(Some(Instant::now())));
         }
+        slint::RenderingState::AfterRendering => {
+            FRAMES.fetch_add(1, Ordering::Relaxed);
+            WINDOW_FRAMES.fetch_add(1, Ordering::Relaxed);
+            let now = Instant::now();
+            if let Some(start) = FRAME_START.with(Cell::take) {
+                let took = now.duration_since(start).as_micros() as u64;
+                FRAME_MAX_US.fetch_max(took, Ordering::Relaxed);
+                let _ = FRAME_FIRST_US.compare_exchange(
+                    0,
+                    took.max(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
+            let end = now.duration_since(process_start()).as_micros().max(1) as u64;
+            let last = LAST_FRAME_END_US.swap(end, Ordering::Relaxed);
+            if last != 0 {
+                FRAME_GAP_MAX_US.fetch_max(end.saturating_sub(last), Ordering::Relaxed);
+            }
+        }
+        _ => {}
     });
     if let Err(err) = installed {
         println!("[bench] no frame counter: {err}");
@@ -582,7 +672,7 @@ fn settle_ticks(cfg: &Cfg) -> u32 {
 ///
 /// Visible cells only: the prefetch ring is requested ahead of the viewport but is not something
 /// the user is waiting for, so it must not read as a hole.
-fn holes(sched: &TileScheduler, visible: &[TileKey]) -> u32 {
+pub(crate) fn holes(sched: &TileScheduler, visible: &[TileKey]) -> u32 {
     visible.iter().filter(|key| !sched.contains(key)).count() as u32
 }
 
@@ -1297,7 +1387,9 @@ impl Trace {
         let t = self.t_ms();
         let window = self.stats.window();
         let closed = std::mem::replace(&mut self.window_name, name.to_owned());
-        self.print(format_args!("window {closed} t={t}ms {window}"));
+        let frames = frame_window();
+        frame_window_reset();
+        self.print(format_args!("window {closed} t={t}ms {window} {frames}"));
         self.stats.reset_window();
         if name == "scroll" {
             self.scroll_mem_from = Some(self.memory.len());
@@ -3838,6 +3930,10 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
         start_idle(cfg.idle_s);
         return;
     }
+    if cfg.modes > 0 {
+        start_modes(ui, cfg.modes);
+        return;
+    }
     if cfg.is_empty() {
         println!(
             "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll, --bench-jump or --bench-nav"
@@ -4008,6 +4104,100 @@ fn start_idle(secs: f64) {
         let pass = frames == 0;
         println!("[bench] idle {}", if pass { "PASS" } else { "FAIL" });
         std::process::exit(if pass { 0 } else { 1 });
+    });
+    TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
+}
+
+/// The modes `--bench-modes` goes through, one round: every change between two modes once.
+const MODE_ROUND: [i32; 6] = [1, 2, 0, 2, 1, 0];
+/// Quiet time after a change's motion before the next change, so thumbnails the gallery draws
+/// after it settles are not counted in the next one.
+const MODE_PAUSE: Duration = Duration::from_millis(800);
+/// The frame budget of row AT: one frame at 60 Hz.
+const FRAME_BUDGET_MS: f64 = 1000.0 / 60.0;
+
+/// `--bench-modes N` (row AT): waits for the opening view to be covered, settles, then changes the
+/// mode `N` rounds of [`MODE_ROUND`]. For each change, over its motion plus the settle margin
+/// (`MODE_MOTION_MS + MODE_SETTLE_MS`), it reports the tiles requested and rendered and the frame
+/// timing. Exits 0 when no change rendered or requested a tile and no frame took longer than
+/// [`FRAME_BUDGET_MS`].
+fn start_modes(ui: &MainWindow, rounds: u32) {
+    let motion = Duration::from_millis(crate::MODE_MOTION_MS + crate::MODE_SETTLE_MS);
+    println!(
+        "[bench] modes run: {rounds} round(s) of {MODE_ROUND:?}, each change measured over {}ms",
+        motion.as_millis()
+    );
+    let weak = ui.as_weak();
+    let changes = rounds as usize * MODE_ROUND.len();
+    let mut covered: Option<Instant> = None;
+    let mut next_at: Option<Instant> = None;
+    // (when the change began, from, to, tiles requested and rendered before it)
+    let mut running: Option<(Instant, i32, i32, i32, i32)> = None;
+    let mut done = 0usize;
+    let (mut worst_frame, mut worst_gap, mut tiles, mut frames) = (0.0f64, 0.0f64, 0i32, 0u64);
+    let opened = Instant::now();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, Duration::from_millis(5), move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let first = crate::APP.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|state| state.bench.first_full_ms())
+        });
+        if first.is_none() {
+            if opened.elapsed() > IDLE_COVER_TIMEOUT {
+                println!("[bench] modes FAIL: the opening view was never covered");
+                std::process::exit(1);
+            }
+            return;
+        }
+        let now = Instant::now();
+        let since = *covered.get_or_insert(now);
+        if since.elapsed() < IDLE_SETTLE {
+            return;
+        }
+        if let Some((began, from, to, requested, rendered)) = running {
+            if began.elapsed() < motion {
+                return;
+            }
+            let window = frame_window();
+            let requested = ui.get_tiles_requested() - requested;
+            let rendered = ui.get_tiles_rendered() - rendered;
+            println!(
+                "[bench] mode {from}>{to} tiles_requested={requested} tiles_rendered={rendered} {window}"
+            );
+            worst_frame = worst_frame.max(window.max_ms);
+            worst_gap = worst_gap.max(window.gap_ms);
+            tiles += requested + rendered;
+            frames += window.frames;
+            running = None;
+            next_at = Some(now + MODE_PAUSE);
+            return;
+        }
+        if next_at.is_some_and(|at| now < at) {
+            return;
+        }
+        if done == changes {
+            let pass = tiles == 0 && worst_frame <= FRAME_BUDGET_MS;
+            println!(
+                "[bench] modes changes={changes} tiles={tiles} frames={frames}                  worst_frame={worst_frame:.1}ms worst_gap={worst_gap:.1}ms budget={FRAME_BUDGET_MS:.1}ms"
+            );
+            println!("[bench] modes {}", if pass { "PASS" } else { "FAIL" });
+            std::process::exit(if pass { 0 } else { 1 });
+        }
+        let to = MODE_ROUND[done % MODE_ROUND.len()];
+        frame_window_reset();
+        running = Some((
+            now,
+            ui.get_mode(),
+            to,
+            ui.get_tiles_requested(),
+            ui.get_tiles_rendered(),
+        ));
+        ui.set_mode(to);
+        done += 1;
     });
     TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
 }

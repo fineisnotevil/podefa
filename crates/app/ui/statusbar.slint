@@ -38,6 +38,8 @@ export component StatusIsland inherits Island {
     in property <bool> is-loading;
     in property <float> zoom-percent;
     in-out property <string> page-input;
+    // Tools (Plan 0007 Phase 3): only the page navigation.
+    in property <bool> nav-only: false;
     out property <bool> page-field-focused: page-field.editing;
     callback prev-page();
     callback next-page();
@@ -90,71 +92,82 @@ export component StatusIsland inherits Island {
             enabled: root.ready && root.current-page + 1 < root.total-pages;
             clicked => { root.next-page(); }
         }
-        VerticalLayout {
-            padding-left: 4px;
-            padding-right: 4px;
-            alignment: center;
-            Separator { vertical: true; height: 16px; }
-        }
-        IconButton {
-            width: 28px;
-            icon: @image-url("icons/move-horizontal.svg");
-            icon-size: 14px;
-            tip: "Fit Width";
-            enabled: root.ready;
-            clicked => { root.fit-width(); }
-        }
-        IconButton {
-            width: 28px;
-            icon: @image-url("icons/move-vertical.svg");
-            icon-size: 14px;
-            tip: "Fit Page";
-            enabled: root.ready;
-            clicked => { root.fit-page(); }
-        }
-        actual := IconButton {
-            width: 34px;
-            tip: "Actual Size, 100% (Ctrl+0)";
-            enabled: root.ready;
-            clicked => { root.zoom-reset(); }
-            Text {
-                text: "1:1";
-                font-size: 10px;
-                font-weight: 700;
-                color: Theme.text-muted;
-                opacity: actual.enabled ? 1.0 : 0.35;
+        // Built once and folded away in Tools, rather than built again on every mode change.
+        Rectangle {
+            width: root.nav-only ? 0px : zoom-part.preferred-width;
+            clip: true;
+            visible: !root.nav-only;
+            zoom-part := HorizontalLayout {
+                x: 0px;
+                width: self.preferred-width;
+                spacing: 2px;
+                VerticalLayout {
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    alignment: center;
+                    Separator { vertical: true; height: 16px; }
+                }
+                IconButton {
+                    width: 28px;
+                    icon: @image-url("icons/move-horizontal.svg");
+                    icon-size: 14px;
+                    tip: "Fit Width";
+                    enabled: root.ready;
+                    clicked => { root.fit-width(); }
+                }
+                IconButton {
+                    width: 28px;
+                    icon: @image-url("icons/move-vertical.svg");
+                    icon-size: 14px;
+                    tip: "Fit Page";
+                    enabled: root.ready;
+                    clicked => { root.fit-page(); }
+                }
+                actual := IconButton {
+                    width: 34px;
+                    tip: "Actual Size, 100% (Ctrl+0)";
+                    enabled: root.ready;
+                    clicked => { root.zoom-reset(); }
+                    Text {
+                        text: "1:1";
+                        font-size: 10px;
+                        font-weight: 700;
+                        color: Theme.text-muted;
+                        opacity: actual.enabled ? 1.0 : 0.35;
+                    }
+                }
+                VerticalLayout {
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    alignment: center;
+                    Separator { vertical: true; height: 16px; }
+                }
+                IconButton {
+                    width: 28px;
+                    icon: @image-url("icons/zoom-out.svg");
+                    icon-size: 14px;
+                    tip: "Zoom Out (Ctrl+-)";
+                    enabled: root.ready;
+                    clicked => { root.zoom-out(); }
+                }
+                Text {
+                    text: Math.round(root.zoom-percent) + "%";
+                    font-size: 11px;
+                    font-weight: 500;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    min-width: 46px;
+                }
+                IconButton {
+                    width: 28px;
+                    icon: @image-url("icons/zoom-in.svg");
+                    icon-size: 14px;
+                    tip: "Zoom In (Ctrl++)";
+                    enabled: root.ready;
+                    clicked => { root.zoom-in(); }
+                }
             }
-        }
-        VerticalLayout {
-            padding-left: 4px;
-            padding-right: 4px;
-            alignment: center;
-            Separator { vertical: true; height: 16px; }
-        }
-        IconButton {
-            width: 28px;
-            icon: @image-url("icons/zoom-out.svg");
-            icon-size: 14px;
-            tip: "Zoom Out (Ctrl+-)";
-            enabled: root.ready;
-            clicked => { root.zoom-out(); }
-        }
-        Text {
-            text: Math.round(root.zoom-percent) + "%";
-            font-size: 11px;
-            font-weight: 500;
-            color: Theme.text;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            min-width: 46px;
-        }
-        IconButton {
-            width: 28px;
-            icon: @image-url("icons/zoom-in.svg");
-            icon-size: 14px;
-            tip: "Zoom In (Ctrl++)";
-            enabled: root.ready;
-            clicked => { root.zoom-in(); }
         }
     }
 }

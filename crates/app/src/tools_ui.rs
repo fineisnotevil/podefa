@@ -225,12 +225,16 @@ impl AppState {
         }
     }
 
-    /// Inserts every page of a file after the chosen pages, or after the current page.
-    pub(crate) fn insert_from(&mut self, ui: &MainWindow, path: PathBuf) {
-        let after = self.page_targets(ui).last().copied().unwrap_or(0);
+    /// Inserts every page of a file before page `at`, or, without one, after the chosen pages or
+    /// the current page.
+    pub(crate) fn insert_from(&mut self, ui: &MainWindow, path: PathBuf, at: Option<u32>) {
+        let at = at.map_or_else(
+            || self.page_targets(ui).last().copied().unwrap_or(0) + 1,
+            |at| at.min(self.page_sizes.len() as u32),
+        );
         self.send_edit(EditOp::Pages(PageOp::InsertFrom {
             path,
-            at: after + 1,
+            at,
             source_pages: 0,
         }));
     }
@@ -419,6 +423,11 @@ pub(crate) fn extract_pages(ui: &MainWindow) {
 
 /// Insert Pages from File...: the file, then one undoable edit.
 pub(crate) fn insert_from_file(ui: &MainWindow) {
+    insert_from_file_at(ui, None);
+}
+
+/// Insert Pages from File... before page `at` (a gap in the gallery), or after the chosen pages.
+pub(crate) fn insert_from_file_at(ui: &MainWindow, at: Option<u32>) {
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
     let mut dialog = rfd::FileDialog::new()
         .set_title("Insert pages from")
@@ -427,7 +436,7 @@ pub(crate) fn insert_from_file(ui: &MainWindow) {
         dialog = dialog.set_directory(dir);
     }
     if let Some(path) = dialog.pick_file() {
-        with_state(|state| state.insert_from(ui, path));
+        with_state(|state| state.insert_from(ui, path, at));
     }
 }
 

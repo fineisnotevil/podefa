@@ -35,6 +35,9 @@ export struct ThumbRow {
     current: bool,
     // Chosen for a page operation (Plan 0005 Phase 1).
     selected: bool,
+    // The page's width over its height as shown (turned pages included), so the gallery sizes a
+    // page before its picture arrives (Plan 0007 Phase 3).
+    ratio: float,
 }
 
 // One visible row of the outline tree: collapsed children are not in the model at all.
