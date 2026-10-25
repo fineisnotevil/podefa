@@ -72,6 +72,13 @@ target\release\app.exe crates\engine-mupdf\tests\fixtures\large_format_a0.pdf --
 
 Metric definitions (`t_blank`, `t_full`, `t_abort`, holes, rebuilds, RSS) live in `docs/benchmarks.md` §7.5–7.6. Define a metric there before measuring it.
 
+**Disk use of `target/`:** on 2026-10-25 `target/` had grown to 65 GB (40 GB in `target/debug`: full-debug PDBs of 150-300 MB per `app` build, 15 GB of incremental data, six copies of MuPDF's C build; plus 18 GB of side target dirs `base`, `exp`, `docx`, `nodocx`, `up`). Rules since then:
+
+- `[profile.dev]` builds with `debug = "line-tables-only"` and dependencies with no debug info (`Cargo.toml`). For a debugger session, build with `CARGO_PROFILE_DEV_DEBUG=full`.
+- Do not leave side target dirs (`CARGO_TARGET_DIR=target/<name>`) behind: delete them when the experiment or comparison ends.
+- **Never run `cargo clean`**: `target/tmp` holds the maintainer's sample PDFs and bench files. To reclaim space, delete everything in `target/` except `tmp` (and `CACHEDIR.TAG`), e.g. in PowerShell: `Get-ChildItem target -Force | Where-Object Name -notin 'tmp','CACHEDIR.TAG' | Remove-Item -Recurse -Force`.
+- After that cleanup and a rebuild of `cargo build --workspace --all-targets`, the tests, clippy and `cargo build --release -p app`: `target/debug` 6.7 GB, `target/release` 3.6 GB, the project 10.7 GB (from-scratch build: 24 min for debug, 7.5 min for release).
+
 **PowerShell trap:** do not append comma-separated literal flags after an array splat (`app.exe $fx $flags '--cache-mib','64'`); they are joined into one token and taken as the document path, so the app idles with no document. Put all flags in one `@()` array or write them literally.
 
 **Fixtures** (`crates/engine-mupdf/tests/fixtures/`, licenses in the README there): `minimal.pdf`, `large_200p.pdf`, `large_format_a0.pdf`, `dense_vector.pdf` (one heavy node per tile, worst case for abort latency).

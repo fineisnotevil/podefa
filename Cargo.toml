@@ -39,6 +39,16 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(have_max_align_t)'] }
 all = "warn"
 correctness = "deny"
 
+# Debug builds keep file:line in backtraces and panics but no variable info: the PDBs and
+# rlibs stay small, so `target/` does not grow to tens of GB (CLAUDE.md §3). For a debugger
+# session, set `CARGO_PROFILE_DEV_DEBUG=full` for that build.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies (MuPDF's C sources included) carry no debug info at all.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = "z"
 lto = "fat"
