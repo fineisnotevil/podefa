@@ -679,3 +679,21 @@ and Win+arrow keep working.
 A small Windows-only subclass of the window procedure that answers `HTMAXBUTTON` over the button's
 rectangle, or a winit API for it upstream. Decided on 2026-10-25 to go without it for now (Plan
 0007 §0).
+
+## 20. Zoom-burst repeats of about 200 ms on the §1 machine
+
+**Labels:** `performance`, `investigation`
+
+### Problem Statement
+
+On 2026-10-25 the `dense_vector` zoom burst (`docs/benchmarks.md` §7.5) failed its 50 ms `t_blank`
+ceiling in some repeats, in the Plan 0007 Phase 2 binary and the Phase 3 build alike, run
+alternately in the same session: such repeats took 204-229 ms, the others 21-39 ms. The value is
+close to the same each time. Earlier sessions saw it once (127 ms, Plan 0007 Phase 2 results).
+The trace of one such repeat shows the UI thread missing its 16 ms zoom steps for about 150 ms
+during the burst.
+
+### Proposed Solution
+
+Find where the UI thread waits (a profiler over a failing repeat; the Windows timer resolution
+and GPU power state are candidates), on the §1 machine and on another one.

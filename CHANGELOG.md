@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidebar with Read, Edit and Tools modes; the status island with pages and zoom; search under the
   title. There is no menu bar: every menu command moved to its island (ADR 0010). macOS keeps its
   native frame.
+- **The islands float over the pages** (Plan 0007 Phase 3): the pages run under the whole
+  window and pass under the title row, the sidebar and the status island, which are slightly
+  see-through; the first page opens just under the title, and fit width, fit page, page steps and
+  jumps use the room beside the islands.
 - **Read, Edit and Tools look and move apart** (Plan 0007 Phase 3): Edit lays a dot grid under the
   pages and tints the active markup tool; its colours and line widths pour out beside it. Tools
   pulls back to a gallery of the pages on a desk, in place of the drawer's thumbnails and the

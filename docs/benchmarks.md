@@ -1610,9 +1610,11 @@ target\release\app.exe crates\engine-mupdf\tests\fixtures\large_200p.pdf --bench
 target\release\app.exe crates\engine-mupdf\tests\fixtures\dense_vector.pdf --bench-modes 2
 ```
 
-Release build, the §1 machine, 2026-10-25, 5 runs each: 0 tiles in all 120 changes. The first
-change into Tools took 12.0-21.2 ms in its first frame (over 16.7 ms in 5 of 10 runs); every
-other change's median `frame_max` was 8.9-10.4 ms per run, with 7 of 110 over 16.7 ms
-(19.2-80.0 ms) at random places, in a session where the machine was busy. Before the warm-up
-frame (plan §5, Phase 3 results), the first change into Edit took 19.5-20 ms and the first into
-Tools 34-39 ms. The full table and the other rows are in the plan's §5.
+Release build, the §1 machine, 2026-10-25. First round (canvas beside the islands, a busy
+machine), 5 runs each: 0 tiles in all 120 changes; the first change into Tools took 12.0-21.2 ms
+in its first frame; 3 of 10 runs passed. At the gate (the canvas under the whole window), 16
+runs: 0 tiles in all 192 changes; the first change into Tools 12.2-15.6 ms (the detailed batch),
+every other change's median `frame_max` 7.8-9.9 ms per run; 13 of 16 runs passed, the others'
+worst frames 18.5, 19.3 and 19.8 ms. Before the warm-up frame (plan §5, Phase 3 results), the
+first change into Edit took 19.5-20 ms and the first into Tools 34-39 ms. The other rows are in
+the plan's §5.
