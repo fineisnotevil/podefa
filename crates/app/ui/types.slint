@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// Rows the Rust side fills models with (the canvas, thumbnails, outline, search, fields).
+
+// One model row: an image plus where it goes, in canvas logical pixels.
+//
+// A row keeps its image even while `visible` is false, so panning or zooming back to a cached
+// tile needs no re-render; the scheduler decides when a row is released.
+export struct TileView {
+    image: image,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    visible: bool,
+}
+
+// One page near the viewport: white paper, with the page's low-resolution base layer stretched
+// over it when the page is drawn as tiles (Plan 0002, §4.3).
+export struct PageView {
+    image: image,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+}
+
+// One thumbnail row of the sidebar (Plan 0003, §4.3). Rows exist for every page, but the
+// ListView instantiates only the ones in view, and only those near the view hold an image.
+export struct ThumbRow {
+    image: image,
+    has-image: bool,
+    label: string,
+    current: bool,
+    // Chosen for a page operation (Plan 0005 Phase 1).
+    selected: bool,
+}
+
+// One visible row of the outline tree: collapsed children are not in the model at all.
+export struct OutlineRow {
+    title: string,
+    depth: int,
+    expandable: bool,
+    expanded: bool,
+    enabled: bool,
+}
+
+// One highlighted search hit rectangle, in canvas logical pixels (Plan 0003, §4.4).
+export struct HitView {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    current: bool,
+}
+
+// One form field's shading on the page, in canvas logical pixels (Plan 0006).
+export struct FieldView {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    required: bool,
+}

@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+import { Palette } from "std-widgets.slint";
+
+// The design tokens of both themes (Plan 0007 §4, from the concept's DESIGN.md §5). Everything
+// the window draws itself takes its colours from here; the std-widgets (buttons, fields, lists)
+// follow `Palette`, whose colour scheme the window sets from the user's choice.
+//
+// Dark is one neutral surface ladder, each step lighter the nearer it is to the user:
+//   shell #141416 (recessed fields), canvas #1c1c1f (behind the pages), surface #2b2b30 (islands,
+//   popups), line-strong and hover #36363b, active #4a4a51.
+// Light keeps the concept's grey canvas under white surfaces.
+export global Theme {
+    // Whether the dark tokens apply. Follows the window's colour scheme; when the user picks
+    // "System", `Palette.color-scheme` is `unknown` and the std-widgets style decides on its own,
+    // so this reads the style's background, which is #1C1C1C in the Fluent style's dark scheme
+    // (i-slint-compiler-1.18.1/widgets/fluent/styling.slint:18-22, 36).
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark
+        || (Palette.color-scheme == ColorScheme.unknown && Palette.background == #1c1c1c);
+
+    // Surfaces, from the back of the window to the front.
+    out property <color> shell: dark ? #141416 : #f4f4f5;
+    out property <color> canvas: dark ? #1c1c1f : #eceff3;
+    out property <color> surface: dark ? #2b2b30 : #ffffff;
+    out property <color> hover: dark ? #36363b : #f4f4f5;
+    out property <color> active: dark ? #4a4a51 : #e4e4e7;
+
+    // Lines: hairlines between parts of a surface, and the edge of a surface over the canvas.
+    out property <color> line: dark ? #ffffff14 : #00000014;
+    out property <color> line-strong: dark ? #36363b : #d4d4d8;
+
+    // Text.
+    out property <color> text: dark ? #f4f4f5 : #18181b;
+    out property <color> text-muted: dark ? #a1a1aa : #52525b;
+    out property <color> text-faint: dark ? #71717a : #a1a1aa;
+
+    // The accent: selection, the current item, focus. The concept is neutral; the app keeps the
+    // style's accent so focus stays visible against both themes.
+    out property <brush> accent: Palette.accent-background;
+    out property <brush> selection: Palette.selection-background;
+    out property <brush> selection-text: Palette.selection-foreground;
+
+    // States.
+    out property <color> danger: dark ? #f87171 : #b42318;
+    out property <color> danger-surface: dark ? #3b1d1d : #fde8e8;
+    out property <color> danger-line: dark ? #7f2d2d : #f8b4b4;
+    out property <color> danger-text: dark ? #fecaca : #9b1c1c;
+
+    // Popup shadow; the software renderer draws none, so a popup also keeps its line-strong edge.
+    out property <color> shadow: dark ? #00000080 : #00000040;
+
+    // The canvas scroll bar.
+    out property <color> scroll-track: dark ? #ffffff0d : #0000000d;
+    out property <color> scroll-thumb: dark ? #71717a : #9ca3af;
+    out property <color> scroll-thumb-pressed: dark ? #a1a1aa : #6b7280;
+}
