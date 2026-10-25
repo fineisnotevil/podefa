@@ -58,6 +58,13 @@ export struct HitView {
     current: bool,
 }
 
+// One tab of the title row (Plan 0007 Phase 4): the document's name, and whether it has unsaved
+// changes.
+export struct TabItem {
+    title: string,
+    dirty: bool,
+}
+
 // One form field's shading on the page, in canvas logical pixels (Plan 0006).
 export struct FieldView {
     x: length,

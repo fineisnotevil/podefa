@@ -73,6 +73,8 @@ component PageCard inherits Rectangle {
         DragArea {
             enabled: root.editable;
             allow-move: true;
+            // Copied when dropped on a tab (Plan 0007 Phase 4).
+            allow-copy: true;
             data: root.drag-data;
             changed dragging => {
                 if (self.dragging) { root.drag-started(); }
@@ -276,6 +278,15 @@ component Divider inherits Rectangle {
                 VerticalLayout {
                     padding: 3px;
                     spacing: 1px;
+                    // The pages from here on move to a new tab (Plan 0007 Phase 4).
+                    if root.index > 0 && root.index < root.count : IconButton {
+                        width: 28px;
+                        height: 28px;
+                        icon-size: 14px;
+                        icon: @image-url("icons/scissors.svg");
+                        tip: "Split Here: the Pages After Open in a New Tab";
+                        clicked => { root.action(0); }
+                    }
                     IconButton {
                         width: 28px;
                         height: 28px;

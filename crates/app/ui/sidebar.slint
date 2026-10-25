@@ -645,6 +645,8 @@ export component Drawer inherits Island {
                 DragArea {
                     enabled: root.editable;
                     allow-move: true;
+                    // Copied when dropped on a tab (Plan 0007 Phase 4).
+                    allow-copy: true;
                     data: root.page-drag-data;
                     changed dragging => {
                         if (self.dragging) { root.thumb-drag-started(index); }

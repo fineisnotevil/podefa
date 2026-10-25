@@ -171,6 +171,11 @@ pub struct Cfg {
     /// requested and rendered, the frames, the longest frame and the longest gap between two
     /// frames (Plan 0007 Phase 3, row AT; benchmarks §13.4). Runs alone.
     pub modes: u32,
+    /// `--bench-tabs N`: once the opening view is covered, opens the same document in N-1 more
+    /// tabs, then shows every tab once more, and reports the working set after each step, the
+    /// time each tab took to show its view covered, and `peak_ws` (Plan 0007 Phase 4, row AU;
+    /// benchmarks §13.5). Runs alone.
+    pub tabs: u32,
 }
 
 impl Default for Cfg {
@@ -211,6 +216,7 @@ impl Default for Cfg {
             forms: false,
             idle_s: 0.0,
             modes: 0,
+            tabs: 0,
         }
     }
 }
@@ -238,17 +244,18 @@ impl Cfg {
             && !self.forms
             && self.idle_s <= 0.0
             && self.modes == 0
+            && self.tabs == 0
     }
 }
 
-/// Splits the command line into a document path and a bench configuration.
+/// Splits the command line into document paths and a bench configuration.
 ///
-/// Flags may appear before or after the path, so `--bench-zoom 4 file.pdf` and
-/// `file.pdf --bench-zoom 4` behave the same. Every other argument is the path (the last one
-/// wins), which keeps the plain `cargo run -p app -- file.pdf` behaviour.
-pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
+/// Flags may appear before or after the paths, so `--bench-zoom 4 file.pdf` and
+/// `file.pdf --bench-zoom 4` behave the same. Every other argument is a path; each opens in a tab
+/// of its own (Plan 0007 Phase 4), and a scripted run works on the first.
+pub fn parse_args(args: &[String]) -> (Vec<String>, Cfg) {
     let mut cfg = Cfg::default();
-    let mut path = None;
+    let mut paths = Vec::new();
     let mut i = 1;
     while i < args.len() {
         // Every flag takes one value; a missing or unparseable one falls back to the default.
@@ -385,6 +392,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
                 cfg.modes = number.unwrap_or(1.0).max(1.0) as u32;
                 consumed = if number.is_some() { 2 } else { 1 };
             }
+            "--bench-tabs" => {
+                cfg.tabs = number.unwrap_or(4.0).max(1.0) as u32;
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
             "--bench-idle" => {
                 cfg.idle_s = number.unwrap_or(5.0).max(0.0);
                 consumed = if number.is_some() { 2 } else { 1 };
@@ -397,11 +408,11 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
                 cfg.cache_rows = number.map(|rows| rows.max(0.0) as usize);
                 consumed = 2;
             }
-            other => path = Some(other.to_owned()),
+            other => paths.push(other.to_owned()),
         }
         i += consumed;
     }
-    (path, cfg)
+    (paths, cfg)
 }
 
 /// The instant `main` began, the zero of every `t=` in the trace and of `t_first_page`.
@@ -3959,6 +3970,10 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
         start_modes(ui, cfg.modes);
         return;
     }
+    if cfg.tabs > 0 {
+        start_tabs(ui, cfg.tabs);
+        return;
+    }
     if cfg.is_empty() {
         println!(
             "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll, --bench-jump or --bench-nav"
@@ -4071,7 +4086,7 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
                     )
                 })
             });
-            std::process::exit(if pass { 0 } else { 1 });
+            crate::exit_process(if pass { 0 } else { 1 });
         },
     );
     TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
@@ -4104,7 +4119,7 @@ fn start_idle(secs: f64) {
         let Some(first) = first else {
             if opened.elapsed() > IDLE_COVER_TIMEOUT {
                 println!("[bench] idle FAIL: the opening view was never covered");
-                std::process::exit(1);
+                crate::exit_process(1);
             }
             return;
         };
@@ -4128,7 +4143,117 @@ fn start_idle(secs: f64) {
         );
         let pass = frames == 0;
         println!("[bench] idle {}", if pass { "PASS" } else { "FAIL" });
-        std::process::exit(if pass { 0 } else { 1 });
+        crate::exit_process(if pass { 0 } else { 1 });
+    });
+    TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
+}
+
+/// How long one tab may take to show its view covered before `--bench-tabs` gives up.
+const TABS_COVER_TIMEOUT: Duration = Duration::from_secs(60);
+/// Quiet time after a tab's view is covered before the working set is read.
+const TABS_SETTLE: Duration = Duration::from_millis(1500);
+/// Row AU's ceiling for `peak_ws` with up to 4 tabs, the default configuration's (§7.6).
+const TABS_PEAK_MIB: f32 = 250.0;
+
+/// `--bench-tabs N` (row AU): opens the document in N tabs one by one, then shows each tab once
+/// more. After each step it waits for the view to be covered and settles, then reads the working
+/// set. `doc_mem` is what the second tab added: one document's own memory. Passes when every view
+/// was covered, the working set with N tabs is at most the one-tab figure plus N times
+/// `doc_mem`, and, up to 4 tabs, `peak_ws` is at most 250 MiB.
+fn start_tabs(ui: &MainWindow, count: u32) {
+    let Some(path) = with_state_ret(|state| state.doc_path.clone()).flatten() else {
+        println!("[bench] tabs FAIL: no document");
+        crate::exit_process(1);
+    };
+    println!("[bench] tabs run: {count} tabs of {}", path.display());
+    // The steps: open tab 2..=N, then show tab 1..=N again.
+    let steps = 2 * count as usize - 1;
+    let mut step = 0usize;
+    let mut asked = Instant::now();
+    let mut covered: Option<Instant> = None;
+    let mut ws: Vec<(String, f32)> = Vec::new();
+    let mut shown_ms: Vec<u128> = Vec::new();
+    let weak = ui.as_weak();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let full = with_state_ret(|state| {
+            let visible = state.visible(&ui);
+            !visible.is_empty() && holes(&state.scheduler, &visible) == 0
+        })
+        .unwrap_or(false);
+        if covered.is_none() {
+            if !full {
+                if asked.elapsed() > TABS_COVER_TIMEOUT {
+                    println!("[bench] tabs FAIL: step {step}'s view was never covered");
+                    crate::exit_process(1);
+                }
+                return;
+            }
+            covered = Some(Instant::now());
+            shown_ms.push(asked.elapsed().as_millis());
+        }
+        if covered.is_some_and(|at| at.elapsed() < TABS_SETTLE) {
+            return;
+        }
+        let tabs = crate::tabs::count();
+        let label = if step < count as usize {
+            format!("{tabs} tabs")
+        } else {
+            format!("{tabs} tabs, tab {} shown again", step - count as usize + 1)
+        };
+        let mem = process_memory();
+        let mib_ws = mem.map_or(0.0, |mem| mib(mem.ws as u128));
+        println!(
+            "[bench] tabs step={step} {label}: ws={} private={} shown_ms={}",
+            mem_str(mem.map(|m| m.ws)),
+            mem_str(mem.map(|m| m.private)),
+            shown_ms.last().copied().unwrap_or(0)
+        );
+        ws.push((label, mib_ws));
+        step += 1;
+        covered = None;
+        asked = Instant::now();
+        if step < count as usize {
+            crate::tabs::open_in_new_tab(&ui, path.clone());
+            return;
+        }
+        if step < steps {
+            crate::tabs::switch(&ui, step - count as usize);
+            return;
+        }
+
+        // Done: the summary.
+        let one = ws.first().map_or(0.0, |(_, v)| *v);
+        let doc_mem = ws.get(1).map_or(0.0, |(_, v)| *v - one);
+        let all = ws.get(count as usize - 1).map_or(0.0, |(_, v)| *v);
+        let after = ws.last().map_or(0.0, |(_, v)| *v);
+        let peak = process_memory().map_or(0.0, |mem| mib(mem.peak_ws as u128));
+        let ceiling = one + count as f32 * doc_mem.max(0.0);
+        let (open_ms, again_ms) = shown_ms.split_at((count as usize).min(shown_ms.len()));
+        println!(
+            "[bench] tabs ws_1={one:.1}MiB doc_mem={doc_mem:.1}MiB ws_{count}={all:.1}MiB \
+             ws_after_round={after:.1}MiB ceiling={ceiling:.1}MiB peak_ws={peak:.1}MiB"
+        );
+        println!("[bench] tabs t_open_ms={open_ms:?} t_switch_ms={again_ms:?}");
+        let linear = count < 2 || (all <= ceiling && after <= ceiling);
+        let peak_ok = count > 4 || peak <= TABS_PEAK_MIB;
+        let pass = linear && peak_ok;
+        println!(
+            "[bench] tabs linear={} peak={} {}",
+            if linear { "PASS" } else { "FAIL" },
+            if count > 4 {
+                "n/a".to_owned()
+            } else if peak_ok {
+                "PASS".to_owned()
+            } else {
+                "FAIL".to_owned()
+            },
+            if pass { "PASS" } else { "FAIL" }
+        );
+        crate::exit_process(if pass { 0 } else { 1 });
     });
     TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
 }
@@ -4174,7 +4299,7 @@ fn start_modes(ui: &MainWindow, rounds: u32) {
         if first.is_none() {
             if opened.elapsed() > IDLE_COVER_TIMEOUT {
                 println!("[bench] modes FAIL: the opening view was never covered");
-                std::process::exit(1);
+                crate::exit_process(1);
             }
             return;
         }
@@ -4210,7 +4335,7 @@ fn start_modes(ui: &MainWindow, rounds: u32) {
                 "[bench] modes changes={changes} tiles={tiles} frames={frames}                  worst_frame={worst_frame:.1}ms worst_gap={worst_gap:.1}ms budget={FRAME_BUDGET_MS:.1}ms"
             );
             println!("[bench] modes {}", if pass { "PASS" } else { "FAIL" });
-            std::process::exit(if pass { 0 } else { 1 });
+            crate::exit_process(if pass { 0 } else { 1 });
         }
         let to = MODE_ROUND[done % MODE_ROUND.len()];
         frame_window_reset();
@@ -4300,7 +4425,7 @@ mod tests {
     #[test]
     fn repeat_flag_is_parsed() {
         let (path, cfg) = parse_args(&args(&["--bench-zoom", "4", "--bench-repeat", "5"]));
-        assert_eq!(path.as_deref(), Some("doc.pdf"));
+        assert_eq!(path.first().map(String::as_str), Some("doc.pdf"));
         assert_eq!(cfg.repeats, 5);
         assert_eq!(cfg.zoom_steps, 4);
 
@@ -4323,7 +4448,7 @@ mod tests {
             "--bench-jump",
             "900",
         ]));
-        assert_eq!(path.as_deref(), Some("doc.pdf"));
+        assert_eq!(path.first().map(String::as_str), Some("doc.pdf"));
         assert_eq!(cfg.scroll_pxs, 4000.0);
         assert_eq!(cfg.scroll_s, 12.0);
         assert_eq!(cfg.jump_page, Some(900));

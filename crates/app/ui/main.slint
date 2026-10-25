@@ -10,7 +10,7 @@
 // canvas keeps its size and place, so no tile is rendered while it moves (plan row AT).
 
 import { Button, ComboBox, LineEdit, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
-import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView } from "types.slint";
+import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem } from "types.slint";
 import { Theme } from "theme.slint";
 import { Island, IconButton } from "widgets.slint";
 import { TitleRow } from "title.slint";
@@ -20,7 +20,7 @@ import { SearchIsland } from "search.slint";
 import { Gallery } from "gallery.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
-export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView }
+export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem }
 
 export component MainWindow inherits Window {
     title: root.doc-title == "" ? "PODEFA - PDF Viewer"
@@ -125,6 +125,14 @@ export component MainWindow inherits Window {
     // Dragging thumbnails to reorder pages: the payload (opaque, Rust knows what moves), and
     // the row the drop would land at, before or after it.
     in-out property <data-transfer> page-drag-data;
+    // The open documents, one tab each, and the one shown (Plan 0007 Phase 4).
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
+    callback select-tab(int);
+    callback close-tab(int);
+    // Pages dragged from the gallery or the thumbnails onto a tab, or onto the new-tab button.
+    callback pages-to-tab(int);
+    callback pages-to-new-tab();
     in-out property <int> drop-row: -1;
     in-out property <bool> drop-after: false;
     in-out property <int> pages-chosen: 0;
@@ -1542,8 +1550,8 @@ export component MainWindow inherits Window {
             width: root.width - 2 * root.inset;
             own-frame: root.own-frame;
             maximized: root.maximized;
-            doc-title: root.doc-title;
-            dirty: root.dirty;
+            tabs: root.tabs;
+            active-tab: root.active-tab;
             editable: root.editable;
             repaired: root.repaired;
             can-undo: root.can-undo;
@@ -1560,6 +1568,11 @@ export component MainWindow inherits Window {
             minimize => { root.minimized = true; }
             toggle-maximize => { root.maximized = !root.maximized; }
             close => { root.quit(); }
+            select-tab(index) => { root.select-tab(index); }
+            close-tab(index) => { root.close-tab(index); }
+            new-tab => { root.open_file(); }
+            pages-to-tab(index) => { root.pages-to-tab(index); }
+            pages-to-new-tab => { root.pages-to-new-tab(); }
         }
 
         sidebar := SidebarColumn {

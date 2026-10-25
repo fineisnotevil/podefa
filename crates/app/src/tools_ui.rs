@@ -8,7 +8,7 @@
 //! lets them be cancelled, and offers to open what a merge or an extraction wrote. Platform dialogs
 //! run outside the state's borrow, like Save As.
 
-use crate::{AfterSave, AppState, MainWindow, proceed, with_state, with_state_ret};
+use crate::{AppState, MainWindow, with_state, with_state_ret};
 use pdf_core::EngineCmd;
 use pdf_core::annot::EditOp;
 use pdf_core::pages::PageOp;
@@ -26,6 +26,8 @@ pub(crate) struct RunningTool {
     pub(crate) started: Instant,
     /// Offer to open the output when the job wrote one file.
     pub(crate) offer_open: bool,
+    /// What a tab does with the output (Plan 0007 Phase 4), instead of offering to open it.
+    pub(crate) tab: Option<crate::tabs::TabAction>,
 }
 
 impl AppState {
@@ -60,6 +62,7 @@ impl AppState {
             title,
             started: Instant::now(),
             offer_open,
+            tab: None,
         });
         ui.set_tool_running(true);
         ui.set_status_text(SharedString::from(format!("{title}...")));
@@ -454,7 +457,7 @@ pub(crate) fn tool_finished(ui: &MainWindow, outcome: Option<Result<PathBuf, Str
                 .set_buttons(rfd::MessageButtons::YesNo)
                 .show();
             if answer == rfd::MessageDialogResult::Yes {
-                proceed(ui, AfterSave::Open(path));
+                crate::tabs::open(ui, path);
             }
         }
         Some(Err(err)) => {

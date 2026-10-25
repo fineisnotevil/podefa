@@ -14,7 +14,6 @@
 //! a [`CanvasWindow`] of the document around the viewport, and every coordinate it sees is relative
 //! to that window's start.
 
-use engine_mupdf::EngineHandle;
 use pdf_core::annot::{
     AnnotInfo, AnnotKind, EditOp, INK_SIMPLIFY_PT, INK_WIDTHS, MarkupKind, PALETTE, SaveState,
     note_rect, simplify,
@@ -45,10 +44,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::thread;
 use std::time::{Duration, Instant};
 
 /// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
@@ -56,6 +53,7 @@ mod bench;
 mod convert_ui;
 mod fields_ui;
 mod stamps_ui;
+mod tabs;
 mod tools_ui;
 
 slint::include_modules!();
@@ -218,13 +216,14 @@ impl Tool {
 }
 
 /// What happens once the document is saved, or once the user chose not to save it (Plan 0004,
-/// §4.4): the action that asked "save changes?" first.
+/// §4.4): the action that asked "save changes?" first. Opening a document no longer asks: it
+/// opens in a tab of its own (Plan 0007 Phase 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AfterSave {
+    /// Close the window: the next tab with unsaved changes asks in turn.
     Quit,
-    Open(PathBuf),
-    /// Show the file dialog, then open what it returns.
-    Pick,
+    /// Close the tab with this id.
+    CloseTab(u64),
 }
 
 /// What a `Saved` event leaves for the caller to do outside the state, where a modal dialog may run.
@@ -237,6 +236,24 @@ enum SavedNext {
 /// whether it carried a base layer. Compared before a write, so a scroll that keeps the same pages
 /// near the viewport does not touch the model.
 type PageRow = (u32, f32, f32, f32, f32, bool);
+
+/// What every tab's state shares with the window (Plan 0007 Phase 4): the epoch counters, so an
+/// epoch names one tab's work, and the models the window's markup is bound to.
+#[derive(Clone)]
+struct WindowParts {
+    next_epoch: Arc<AtomicU64>,
+    current_epoch: Arc<AtomicU64>,
+    model: Rc<VecModel<TileView>>,
+    pages_model: Rc<VecModel<PageView>>,
+    recent_model: Rc<VecModel<SharedString>>,
+    thumbs_model: Rc<VecModel<ThumbRow>>,
+    outline_model: Rc<VecModel<OutlineRow>>,
+    hits_model: Rc<VecModel<HitView>>,
+    sel_model: Rc<VecModel<HitView>>,
+    annot_sel_model: Rc<VecModel<HitView>>,
+    field_model: Rc<VecModel<FieldView>>,
+    merge_model: Rc<VecModel<SharedString>>,
+}
 
 /// Everything the UI thread needs to turn a viewport into tiles.
 struct AppState {
@@ -292,6 +309,15 @@ struct AppState {
     margins: Margins,
     /// The thumbnail row marked as the current page.
     current_thumb: Option<usize>,
+    /// What the engine last said can be undone and redone, and whether MuPDF repaired the file:
+    /// a tab shown again puts them back on its buttons (Plan 0007 Phase 4).
+    can_undo: bool,
+    can_redo: bool,
+    repaired: bool,
+    /// A document made from pages of another (dragged out, split off): the tab's name, and the
+    /// folder its first Save As starts in. It has no file of its own until then.
+    untitled: Option<String>,
+    origin_dir: Option<PathBuf>,
     outline_items: Vec<OutlineItem>,
     outline_expanded: Vec<bool>,
     /// Outline row -> index into `outline_items`.
@@ -401,6 +427,127 @@ struct AppState {
 }
 
 impl AppState {
+    /// A state with no document, sharing the window's models and epoch counters (`parts`).
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cmd_tx: Sender<EngineCmd>,
+        parts: WindowParts,
+        scheduler: TileScheduler,
+        settings: Settings,
+        settings_path: Option<PathBuf>,
+        scale_factor: f32,
+        bench: bench::Trace,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            next_epoch: parts.next_epoch,
+            current_epoch: parts.current_epoch,
+            page_sizes: Vec::new(),
+            layout: DocLayout::default(),
+            scale_milli: ZOOM_DEFAULT_MILLI,
+            pos: (0.0, 0.0),
+            win_x: CanvasWindow::default(),
+            win_y: CanvasWindow::default(),
+            shift_x: 0.0,
+            scheduler,
+            model: parts.model,
+            pages_model: parts.pages_model,
+            page_rows: Vec::new(),
+            bases: HashMap::new(),
+            base_pending: HashSet::new(),
+            settings,
+            settings_path,
+            opening: None,
+            recent_model: parts.recent_model,
+            doc_generation: 0,
+            thumbs_model: parts.thumbs_model,
+            thumb_cache: HashMap::new(),
+            thumb_tick: 0,
+            thumb_inflight: HashMap::new(),
+            mode: 0,
+            motion_until: None,
+            warm_pending: false,
+            margins: Margins::default(),
+            current_thumb: None,
+            can_undo: false,
+            can_redo: false,
+            repaired: false,
+            untitled: None,
+            origin_dir: None,
+            outline_items: Vec::new(),
+            outline_expanded: Vec::new(),
+            outline_visible: Vec::new(),
+            outline_model: parts.outline_model,
+            search: SearchResults::default(),
+            search_generation: 0,
+            search_query: String::new(),
+            hits_model: parts.hits_model,
+            hit_rows: Vec::new(),
+            search_sent: None,
+            sel_generation: 0,
+            sel_anchor: None,
+            sel_focus: None,
+            sel_mode: SelectMode::Chars,
+            sel_pages: Vec::new(),
+            sel_text: String::new(),
+            sel_model: parts.sel_model,
+            sel_rows: Vec::new(),
+            sel_pressed: false,
+            last_double: None,
+            touch_down: None,
+            long_press: slint::Timer::default(),
+            touch_selecting: false,
+            text_lines: HashMap::new(),
+            lines_pending: HashSet::new(),
+            editable: false,
+            doc_path: None,
+            save_state: SaveState::new(),
+            saving: false,
+            after_save: None,
+            tool: Tool::Select,
+            colour: 0,
+            next_edit_id: 0,
+            page_revs: HashMap::new(),
+            annots: HashMap::new(),
+            annots_pending: HashSet::new(),
+            selected_annot: None,
+            annot_candidate: None,
+            press_at: (0.0, 0.0),
+            annot_sel_model: parts.annot_sel_model,
+            annot_sel_rows: Vec::new(),
+            sel_answered: 0,
+            pending_mark: None,
+            note_edit: None,
+            note_drag: None,
+            ink_width: 1,
+            ink: None,
+            ink_commands: String::new(),
+            ink_shown: None,
+            crop: None,
+            fields: HashMap::new(),
+            fields_pending: HashSet::new(),
+            field_edit: None,
+            form: pdf_core::form::FormSummary::default(),
+            field_model: parts.field_model,
+            field_rows: Vec::new(),
+            field_focus: None,
+            field_tab_pending: None,
+            scale_factor,
+            rendered: 0,
+            page_sel: std::collections::BTreeSet::new(),
+            page_sel_anchor: None,
+            drag_pages: Vec::new(),
+            layout_generation: 0,
+            running_tool: None,
+            next_job_id: 0,
+            merge_inputs: Vec::new(),
+            merge_model: parts.merge_model,
+            props_wanted: false,
+            props_shown: pdf_core::tools::Metadata::default(),
+            bench,
+        }
+    }
+
     fn sf(&self) -> f64 {
         self.scale_factor as f64
     }
@@ -1706,8 +1853,8 @@ impl AppState {
             return;
         }
         let at = at.min(count);
-        // 1: a blank page the size of the one before. Split from a gap waits for Phase 4's tabs,
-        // which open the second part on its own.
+        // 1: a blank page the size of the one before. Split (0) and pages from a file (2) need
+        // the state unborrowed, so they do not come here ([`tabs::split_at`]).
         if which == 1 {
             let size = self.page_sizes[at.saturating_sub(1) as usize];
             self.send_edit(EditOp::Pages(PageOp::InsertBlank {
@@ -1903,6 +2050,8 @@ impl AppState {
             HistoryChange::Redone => self.save_state.redone(),
             HistoryChange::None => {}
         }
+        self.can_undo = can_undo;
+        self.can_redo = can_redo;
         ui.set_dirty(self.has_unsaved_changes());
         ui.set_can_undo(self.editable && can_undo);
         ui.set_can_redo(self.editable && can_redo);
@@ -2028,6 +2177,9 @@ impl AppState {
                     self.save_settings();
                     self.update_recent();
                     self.doc_path = Some(path.clone());
+                    // A document made from pages has a file of its own now.
+                    self.untitled = None;
+                    self.origin_dir = None;
                 }
                 ui.set_status_text(SharedString::from(format!(
                     "Saved {} ({:.1} KB)",
@@ -2060,6 +2212,9 @@ impl AppState {
 
     /// The name the title bar shows for the document.
     fn doc_name(&self) -> String {
+        if let Some(title) = &self.untitled {
+            return title.clone();
+        }
         self.doc_path
             .as_deref()
             .and_then(Path::file_name)
@@ -2069,7 +2224,13 @@ impl AppState {
 
     /// Whether closing the document now would lose edits.
     fn has_unsaved_changes(&self) -> bool {
-        self.editable && self.save_state.is_dirty()
+        self.editable && (self.save_state.is_dirty() || self.untitled.is_some())
+    }
+
+    /// The user chose not to save: closing the document now loses nothing they want.
+    fn discard_changes(&mut self) {
+        self.save_state = SaveState::new();
+        self.untitled = None;
     }
 
     /// Ctrl+C: the selected text to the clipboard (Plan 0003, §3.3).
@@ -2938,15 +3099,15 @@ impl AppState {
         let Some(path) = self.opening.take() else {
             return;
         };
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        ui.set_doc_title(SharedString::from(name));
-        self.settings.opened(&path);
-        self.save_settings();
-        self.update_recent();
-        self.doc_path = Some(path);
+        self.doc_path = Some(path.clone());
+        ui.set_doc_title(SharedString::from(self.doc_name()));
+        // A document made from pages is a file the app wrote, not one to reopen from the list.
+        if self.untitled.is_none() {
+            self.settings.opened(&path);
+            self.save_settings();
+            self.update_recent();
+        }
+        ui.set_dirty(self.has_unsaved_changes());
     }
 
     /// The engine could not open the document: the one that was showing is still open there, so
@@ -3017,6 +3178,8 @@ impl AppState {
         ui.set_dirty(false);
         ui.set_can_undo(false);
         ui.set_can_redo(false);
+        self.can_undo = false;
+        self.can_redo = false;
         self.saving = false;
         self.after_save = None;
         if !editable {
@@ -3040,6 +3203,9 @@ impl AppState {
         self.clamp_pos(ui);
         self.reanchor(ui);
         self.refresh(ui);
+        // In the gallery the first cards are in view without a scroll that would ask for them:
+        // a document opened there (a tab made by Split) asks here.
+        self.pump_thumbs(ui);
     }
 
     /// Moves the viewport to `pos` (document pixels) without a new epoch, as a scroll does.
@@ -3117,6 +3283,8 @@ thread_local! {
     /// Set while Rust writes the scroll position itself, so `viewport_moved` does not run against
     /// a half-updated viewport.
     static PROGRAMMATIC: Cell<bool> = const { Cell::new(false) };
+    /// A `--bench-*` run's config until the first open takes it.
+    static BENCH_CFG: RefCell<Option<bench::Cfg>> = const { RefCell::new(None) };
     /// The one clipboard handle, created on the first copy. Kept outside [`APP`] so `main` can drop
     /// it explicitly after the event loop: on X11 that drop hands the copied text to the clipboard
     /// manager, and Rust does not promise to run the main thread's thread-local destructors.
@@ -3161,6 +3329,255 @@ fn warm_up(ui: &MainWindow) {
     });
 }
 
+/// Applies one engine event of the active tab (Plan 0007 Phase 4: [`tabs`] routes them, and keeps
+/// a parked tab's until it is shown again).
+fn apply_event(ui: &MainWindow, event: EngineEvent) {
+    match event {
+        EngineEvent::Opened {
+            page_count,
+            page_sizes,
+            unsized_pages,
+            editable,
+            repaired,
+            form,
+        } => {
+            ui.set_has_error(false);
+            ui.set_error_text(SharedString::from(""));
+            ui.set_total_pages(page_count as i32);
+            ui.set_current_page(0);
+            ui.set_is_loading(false);
+            // A page whose bounds could not be read is laid out as Letter; say so rather
+            // than draw it at a size the document never had without a word.
+            let pages = if page_count == 1 { "page" } else { "pages" };
+            let mut status = if unsized_pages.is_empty() {
+                format!("{page_count} {pages}")
+            } else {
+                format!(
+                    "{page_count} {pages} ({} with unreadable sizes, shown as Letter)",
+                    unsized_pages.len()
+                )
+            };
+            // A form whose scripts do not run here (Plan 0006, §0 question 2), or an XFA
+            // form MuPDF cannot read.
+            if form.xfa {
+                status.push_str(" - this form is XFA, which PODEFA cannot fill");
+            } else if form.scripts {
+                status.push_str(
+                    " - this form has scripts (calculations, checks), which PODEFA does not run",
+                );
+            }
+            ui.set_form_fields(form.fields);
+            with_state(|state| state.form = form);
+            // A damaged file MuPDF repaired: a full copy is a clean one (Plan 0005 Phase 4).
+            ui.set_repaired(repaired);
+            with_state(|state| state.repaired = repaired);
+            if repaired {
+                status.push_str(
+                    " - the file was damaged and repaired when opened: \
+                     Save > Save Repaired Copy writes a clean copy",
+                );
+            }
+            ui.set_status_text(SharedString::from(status));
+            with_state(|state| {
+                state.set_document(ui, page_sizes, editable);
+                state.document_opened(ui);
+                state.warm_pending = true;
+            });
+            // A scripted run starts on the open, so its first step is a real zoom or pan
+            // rather than a no-op against an empty document.
+            if let Some(cfg) = BENCH_CFG.with(|cell| cell.borrow_mut().take()) {
+                bench::start(ui, cfg);
+            }
+        }
+        EngineEvent::TileRendered {
+            key,
+            request_id,
+            revision,
+            bitmap,
+        } => {
+            if current_epoch() != Some(request_id) {
+                return;
+            }
+            with_state(|state| state.apply_tile(ui, &key, revision, &bitmap));
+        }
+        EngineEvent::BaseRendered {
+            page,
+            revision,
+            bitmap,
+            ..
+        } => {
+            // No epoch guard: a base layer belongs to a page, not to a zoom level, and it
+            // arrives while the epoch it was requested under is already superseded.
+            with_state(|state| state.apply_base(ui, page, revision, &bitmap));
+        }
+        EngineEvent::ThumbRendered {
+            page,
+            request_id,
+            revision,
+            bitmap,
+        } => {
+            with_state(|state| state.apply_thumb(ui, page, request_id, revision, &bitmap));
+        }
+        EngineEvent::SearchHits {
+            generation,
+            page,
+            hits,
+        } => {
+            with_state(|state| state.apply_hits(ui, generation, page, hits));
+        }
+        EngineEvent::SearchDone {
+            generation,
+            pages,
+            ms,
+        } => {
+            with_state(|state| state.search_done(ui, generation, pages, ms));
+        }
+        EngineEvent::Selection {
+            generation,
+            pages,
+            text,
+        } => {
+            with_state(|state| state.apply_selection(ui, generation, pages, text));
+        }
+        EngineEvent::TextLines {
+            page,
+            generation,
+            lines,
+        } => {
+            with_state(|state| state.apply_text_lines(page, generation, lines));
+        }
+        EngineEvent::Outline { items } => {
+            with_state(|state| state.set_outline(items));
+        }
+        EngineEvent::Annotations {
+            page,
+            generation,
+            items,
+        } => {
+            with_state(|state| state.apply_annotations(ui, page, generation, items));
+        }
+        EngineEvent::Fields {
+            page,
+            generation,
+            items,
+        } => {
+            with_state(|state| state.apply_fields(ui, page, generation, items));
+        }
+        EngineEvent::FieldPage {
+            generation,
+            page,
+            back,
+        } => {
+            with_state(|state| state.field_page(ui, generation, page, back));
+        }
+        EngineEvent::FormExported {
+            generation,
+            path,
+            result,
+        } => {
+            with_state(|state| state.form_exported(ui, generation, &path, result));
+        }
+        EngineEvent::PageChanged {
+            generation,
+            page,
+            revision,
+            items,
+        } => {
+            with_state(|state| state.page_changed(ui, generation, page, revision, items));
+        }
+        EngineEvent::Restructured {
+            generation,
+            page_sizes,
+            revision,
+            map,
+        } => {
+            with_state(|state| state.restructured(ui, generation, page_sizes, revision, map));
+        }
+        EngineEvent::ToolProgress {
+            job_id,
+            done,
+            total,
+        } => {
+            with_state(|state| state.tool_progress(ui, job_id, done, total));
+        }
+        EngineEvent::ToolDone {
+            job_id,
+            result,
+            sizes,
+        } => {
+            // A job a tab started (Plan 0007 Phase 4) hands its pages to the tab, not to a dialog.
+            let tab = with_state_ret(|state| {
+                state
+                    .running_tool
+                    .as_mut()
+                    .filter(|tool| tool.job_id == job_id)
+                    .and_then(|tool| tool.tab.take())
+            })
+            .flatten();
+            let written = result.is_ok();
+            let outcome =
+                with_state_ret(|state| state.tool_done(ui, job_id, result, sizes)).flatten();
+            match tab {
+                Some(action) if written => tabs::pages_written(ui, action),
+                Some(action) => {
+                    tabs::discard(action);
+                    tools_ui::tool_finished(ui, outcome);
+                }
+                None => tools_ui::tool_finished(ui, outcome),
+            }
+        }
+        EngineEvent::DocumentInfo { generation, info } => {
+            with_state(|state| state.document_info(ui, generation, info));
+        }
+        EngineEvent::Edited {
+            generation, result, ..
+        } => {
+            with_state(|state| state.edited(ui, generation, result));
+        }
+        EngineEvent::History {
+            generation,
+            change,
+            can_undo,
+            can_redo,
+        } => {
+            with_state(|state| state.history(ui, generation, change, can_undo, can_redo));
+        }
+        EngineEvent::Saved { path, result } => {
+            match with_state_ret(|state| state.saved(ui, path, result)).flatten() {
+                Some(SavedNext::Then(then)) => run_after(ui, then),
+                Some(SavedNext::SaveAs) => save_as(ui),
+                None => {}
+            }
+        }
+        EngineEvent::TileAborted { ms, .. } => {
+            with_state(|state| state.bench.aborted(ms));
+        }
+        EngineEvent::Error { message } => {
+            ui.set_has_error(true);
+            ui.set_error_text(SharedString::from(message.clone()));
+            ui.set_status_text(SharedString::from(format!("Error: {message}")));
+            ui.set_is_loading(false);
+            with_state(|state| state.open_failed(ui));
+        }
+    }
+}
+
+/// Ends a scripted run with `code`. The tabs' engines stop first: left in their thread-local
+/// slot, they would be torn down while the process exits and its other threads are already gone.
+pub(crate) fn exit_process(code: i32) -> ! {
+    tabs::shutdown();
+    std::process::exit(code)
+}
+
+/// The epoch the active tab's tiles belong to.
+fn current_epoch() -> Option<u64> {
+    APP.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|state| state.current_epoch.load(Ordering::Relaxed))
+    })
+}
+
 /// Runs `f` on the application state, if a document is loaded.
 fn with_state(f: impl FnOnce(&mut AppState)) {
     APP.with(|cell| {
@@ -3192,10 +3609,10 @@ fn proceed(ui: &MainWindow, then: AfterSave) {
         .set_buttons(rfd::MessageButtons::YesNoCancel)
         .show();
     match answer {
-        rfd::MessageDialogResult::Yes => with_state(|state| {
-            state.after_save = Some(then);
-            state.send_save(ui, None);
-        }),
+        rfd::MessageDialogResult::Yes => {
+            with_state(|state| state.after_save = Some(then));
+            save(ui);
+        }
         rfd::MessageDialogResult::No => run_after(ui, then),
         _ => {}
     }
@@ -3205,33 +3622,47 @@ fn proceed(ui: &MainWindow, then: AfterSave) {
 fn run_after(ui: &MainWindow, then: AfterSave) {
     match then {
         AfterSave::Quit => {
-            // Answered: the window may close now without asking again.
-            with_state(|state| state.save_state = SaveState::new());
-            let _ = slint::quit_event_loop();
+            // Answered: this document may close now without asking again; the next one asks.
+            with_state(|state| state.discard_changes());
+            tabs::quit(ui);
         }
-        AfterSave::Open(path) => with_state(|state| state.open_path(ui, path)),
-        AfterSave::Pick => {
-            if let Some(path) = pick_document() {
-                with_state(|state| state.open_path(ui, path));
-            }
-        }
+        AfterSave::CloseTab(id) => tabs::close_now(ui, id),
+    }
+}
+
+/// Save: in place, or through Save As for a document that has no file of its own yet.
+fn save(ui: &MainWindow) {
+    if with_state_ret(|state| state.untitled.is_some()).unwrap_or(false) {
+        save_as(ui);
+    } else {
+        with_state(|state| state.send_save(ui, None));
     }
 }
 
 /// File > Save As: the platform's save dialog, then a full copy that becomes the document.
 fn save_as(ui: &MainWindow) {
-    let Some(current) = with_state_ret(|state| state.editable.then(|| state.doc_path.clone()))
-        .flatten()
-        .flatten()
-    else {
+    let Some((dir, name)) = with_state_ret(|state| {
+        let current = state.doc_path.clone().filter(|_| state.editable)?;
+        // A document made from pages starts where the pages came from, under its tab's name.
+        Some(match &state.untitled {
+            Some(title) => (state.origin_dir.clone(), Some(format!("{title}.pdf"))),
+            None => (
+                current.parent().map(Path::to_path_buf),
+                current
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+            ),
+        })
+    })
+    .flatten() else {
         return;
     };
     let mut dialog = rfd::FileDialog::new().add_filter("PDF document", &["pdf"]);
-    if let Some(dir) = current.parent() {
+    if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(name) = current.file_name() {
-        dialog = dialog.set_file_name(name.to_string_lossy());
+    if let Some(name) = name {
+        dialog = dialog.set_file_name(name);
     }
     match dialog.save_file() {
         Some(path) => with_state(|state| state.send_save(ui, Some(path))),
@@ -3410,8 +3841,14 @@ enum KeyCommand {
     DeleteAnnotation,
     Undo,
     Redo,
-    /// Ctrl+W: closes the document's window, asking first about unsaved changes (Plan 0007 §0).
+    /// Ctrl+W: closes the tab, asking first about unsaved changes; the last tab closes the window
+    /// (Plan 0007 §0 and Phase 4).
     Close,
+    /// Ctrl+T: a file into a new tab.
+    NewTab,
+    /// Ctrl+Tab and Ctrl+Page Down; Ctrl+Shift+Tab and Ctrl+Page Up.
+    NextTab,
+    PreviousTab,
 }
 
 impl KeyCommand {
@@ -3425,6 +3862,9 @@ impl KeyCommand {
                 | KeyCommand::Save
                 | KeyCommand::SaveAs
                 | KeyCommand::Close
+                | KeyCommand::NewTab
+                | KeyCommand::NextTab
+                | KeyCommand::PreviousTab
                 | KeyCommand::Find
                 | KeyCommand::ToggleSidebar
                 | KeyCommand::ZoomIn
@@ -3442,6 +3882,19 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
         return None;
     };
     if ctrl {
+        if c == char::from(Key::Tab) || c == char::from(Key::Backtab) {
+            return Some(if shift || c == char::from(Key::Backtab) {
+                KeyCommand::PreviousTab
+            } else {
+                KeyCommand::NextTab
+            });
+        }
+        if c == char::from(Key::PageDown) {
+            return Some(KeyCommand::NextTab);
+        }
+        if c == char::from(Key::PageUp) {
+            return Some(KeyCommand::PreviousTab);
+        }
         return match c {
             '+' | '=' => Some(KeyCommand::ZoomIn),
             '-' => Some(KeyCommand::ZoomOut),
@@ -3456,6 +3909,7 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             'z' | 'Z' => Some(KeyCommand::Undo),
             'y' | 'Y' => Some(KeyCommand::Redo),
             'w' | 'W' => Some(KeyCommand::Close),
+            't' | 'T' => Some(KeyCommand::NewTab),
             _ => None,
         };
     }
@@ -3509,7 +3963,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // `--bench-*` flags script a run; `FA_PDF_TRACE=1` records one by hand. Both are inert
     // otherwise, and neither belongs in CI: every number here is machine-specific.
     let args: Vec<String> = env::args().collect();
-    let (path, cfg) = bench::parse_args(&args);
+    let (paths, cfg) = bench::parse_args(&args);
     let trace_on = bench::trace_enabled() || !cfg.is_empty();
     if trace_on {
         bench::count_frames(&main_window);
@@ -3528,13 +3982,11 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(rows) = cfg.cache_rows {
         bench::set_cache_rows(rows);
     }
-    // The `Opened` handler runs on the UI thread inside a `Send` closure, so the run's config
-    // crosses over in a shared cell and is taken by the first open.
-    let bench_cfg = Arc::new(Mutex::new((!cfg.is_empty()).then_some(cfg)));
+    // The run's config is taken by the first open.
+    BENCH_CFG.with(|cell| *cell.borrow_mut() = (!cfg.is_empty()).then_some(cfg));
 
-    // Spawn engine actor
-    let (engine, event_rx) = EngineHandle::spawn();
-    let cmd_tx = engine.sender().clone();
+    // The first tab's engine; every tab's engine rasterizes on one shared pool (ADR 0011).
+    let cmd_tx = tabs::init(&main_window);
 
     let next_epoch = Arc::new(AtomicU64::new(0));
     let current_epoch = Arc::new(AtomicU64::new(0));
@@ -3579,342 +4031,38 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.set_merge_files(ModelRc::from(merge_model.clone()));
 
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(AppState {
-            cmd_tx: cmd_tx.clone(),
-            next_epoch: Arc::clone(&next_epoch),
-            current_epoch: Arc::clone(&current_epoch),
-            page_sizes: Vec::new(),
-            layout: DocLayout::default(),
-            scale_milli: ZOOM_DEFAULT_MILLI,
-            pos: (0.0, 0.0),
-            win_x: CanvasWindow::default(),
-            win_y: CanvasWindow::default(),
-            shift_x: 0.0,
-            scheduler: TileScheduler::new(capacity, cache_bytes),
-            model: model.clone(),
-            pages_model: pages_model.clone(),
-            page_rows: Vec::new(),
-            bases: HashMap::new(),
-            base_pending: HashSet::new(),
+        *cell.borrow_mut() = Some(AppState::new(
+            cmd_tx.clone(),
+            WindowParts {
+                next_epoch: Arc::clone(&next_epoch),
+                current_epoch: Arc::clone(&current_epoch),
+                model: model.clone(),
+                pages_model: pages_model.clone(),
+                recent_model,
+                thumbs_model,
+                outline_model,
+                hits_model,
+                sel_model,
+                annot_sel_model,
+                field_model,
+                merge_model: merge_model.clone(),
+            },
+            TileScheduler::new(capacity, cache_bytes),
             settings,
             settings_path,
-            opening: None,
-            recent_model,
-            doc_generation: 0,
-            thumbs_model,
-            thumb_cache: HashMap::new(),
-            thumb_tick: 0,
-            thumb_inflight: HashMap::new(),
-            mode: 0,
-            motion_until: None,
-            warm_pending: false,
-            margins: Margins::default(),
-            current_thumb: None,
-            outline_items: Vec::new(),
-            outline_expanded: Vec::new(),
-            outline_visible: Vec::new(),
-            outline_model,
-            search: SearchResults::default(),
-            search_generation: 0,
-            search_query: String::new(),
-            hits_model,
-            hit_rows: Vec::new(),
-            search_sent: None,
-            sel_generation: 0,
-            sel_anchor: None,
-            sel_focus: None,
-            sel_mode: SelectMode::Chars,
-            sel_pages: Vec::new(),
-            sel_text: String::new(),
-            sel_model,
-            sel_rows: Vec::new(),
-            sel_pressed: false,
-            last_double: None,
-            touch_down: None,
-            long_press: slint::Timer::default(),
-            touch_selecting: false,
-            text_lines: HashMap::new(),
-            lines_pending: HashSet::new(),
-            editable: false,
-            doc_path: None,
-            save_state: SaveState::new(),
-            saving: false,
-            after_save: None,
-            tool: Tool::Select,
-            colour: 0,
-            next_edit_id: 0,
-            page_revs: HashMap::new(),
-            annots: HashMap::new(),
-            annots_pending: HashSet::new(),
-            selected_annot: None,
-            annot_candidate: None,
-            press_at: (0.0, 0.0),
-            annot_sel_model,
-            annot_sel_rows: Vec::new(),
-            sel_answered: 0,
-            pending_mark: None,
-            note_edit: None,
-            note_drag: None,
-            ink_width: 1,
-            ink: None,
-            ink_commands: String::new(),
-            ink_shown: None,
-            crop: None,
-            fields: HashMap::new(),
-            fields_pending: HashSet::new(),
-            field_edit: None,
-            form: pdf_core::form::FormSummary::default(),
-            field_model,
-            field_rows: Vec::new(),
-            field_focus: None,
-            field_tab_pending: None,
-            scale_factor: main_window.window().scale_factor(),
-            rendered: 0,
-            page_sel: std::collections::BTreeSet::new(),
-            page_sel_anchor: None,
-            drag_pages: Vec::new(),
-            layout_generation: 0,
-            running_tool: None,
-            next_job_id: 0,
-            merge_inputs: Vec::new(),
-            merge_model: merge_model.clone(),
-            props_wanted: false,
-            props_shown: pdf_core::tools::Metadata::default(),
-            bench: bench::Trace::new(trace_on),
-        });
+            main_window.window().scale_factor(),
+            bench::Trace::new(trace_on),
+        ));
     });
 
-    // Engine events are applied on the UI thread; a tile from a superseded epoch is dropped
-    // before it reaches the scheduler.
-    let weak = main_window.as_weak();
-
+    // Engine events are applied on the UI thread ([`apply_event`]); a tile from a superseded epoch
+    // is dropped before it reaches the scheduler.
     // The memory sampler starts here rather than at the first document: the resident set before
     // anything is open is the baseline a plateau is read against, and on a `--bench-*` run it also
     // covers the document's own first render.
     if trace_on {
         bench::start_sampler();
     }
-    let epoch_for_events = Arc::clone(&current_epoch);
-    let bench_for_events = Arc::clone(&bench_cfg);
-    thread::spawn(move || {
-        while let Ok(event) = event_rx.recv() {
-            let weak = weak.clone();
-            let epoch = Arc::clone(&epoch_for_events);
-            let bench_cfg = Arc::clone(&bench_for_events);
-            let _ = weak.upgrade_in_event_loop(move |ui| match event {
-                EngineEvent::Opened {
-                    page_count,
-                    page_sizes,
-                    unsized_pages,
-                    editable,
-                    repaired,
-                    form,
-                } => {
-                    ui.set_has_error(false);
-                    ui.set_error_text(SharedString::from(""));
-                    ui.set_total_pages(page_count as i32);
-                    ui.set_current_page(0);
-                    ui.set_is_loading(false);
-                    // A page whose bounds could not be read is laid out as Letter; say so rather
-                    // than draw it at a size the document never had without a word.
-                    let mut status = if unsized_pages.is_empty() {
-                        format!("{page_count} pages")
-                    } else {
-                        format!(
-                            "{page_count} pages ({} with unreadable sizes, shown as Letter)",
-                            unsized_pages.len()
-                        )
-                    };
-                    // A form whose scripts do not run here (Plan 0006, §0 question 2), or an XFA
-                    // form MuPDF cannot read.
-                    if form.xfa {
-                        status.push_str(" - this form is XFA, which PODEFA cannot fill");
-                    } else if form.scripts {
-                        status.push_str(
-                            " - this form has scripts (calculations, checks), which PODEFA does not run",
-                        );
-                    }
-                    ui.set_form_fields(form.fields);
-                    with_state(|state| state.form = form);
-                    // A damaged file MuPDF repaired: a full copy is a clean one (Plan 0005 Phase 4).
-                    ui.set_repaired(repaired);
-                    if repaired {
-                        status.push_str(
-                            " - the file was damaged and repaired when opened: \
-                             Save > Save Repaired Copy writes a clean copy",
-                        );
-                    }
-                    ui.set_status_text(SharedString::from(status));
-                    with_state(|state| {
-                        state.set_document(&ui, page_sizes, editable);
-                        state.document_opened(&ui);
-                        state.warm_pending = true;
-                    });
-                    // A scripted run starts on the open, so its first step is a real zoom or pan
-                    // rather than a no-op against an empty document.
-                    if let Some(cfg) = bench_cfg.lock().unwrap().take() {
-                        bench::start(&ui, cfg);
-                    }
-                }
-                EngineEvent::TileRendered {
-                    key,
-                    request_id,
-                    revision,
-                    bitmap,
-                } => {
-                    if epoch.load(Ordering::Relaxed) != request_id {
-                        return;
-                    }
-                    with_state(|state| state.apply_tile(&ui, &key, revision, &bitmap));
-                }
-                EngineEvent::BaseRendered {
-                    page,
-                    revision,
-                    bitmap,
-                    ..
-                } => {
-                    // No epoch guard: a base layer belongs to a page, not to a zoom level, and it
-                    // arrives while the epoch it was requested under is already superseded.
-                    with_state(|state| state.apply_base(&ui, page, revision, &bitmap));
-                }
-                EngineEvent::ThumbRendered {
-                    page,
-                    request_id,
-                    revision,
-                    bitmap,
-                } => {
-                    with_state(|state| state.apply_thumb(&ui, page, request_id, revision, &bitmap));
-                }
-                EngineEvent::SearchHits {
-                    generation,
-                    page,
-                    hits,
-                } => {
-                    with_state(|state| state.apply_hits(&ui, generation, page, hits));
-                }
-                EngineEvent::SearchDone {
-                    generation,
-                    pages,
-                    ms,
-                } => {
-                    with_state(|state| state.search_done(&ui, generation, pages, ms));
-                }
-                EngineEvent::Selection {
-                    generation,
-                    pages,
-                    text,
-                } => {
-                    with_state(|state| state.apply_selection(&ui, generation, pages, text));
-                }
-                EngineEvent::TextLines {
-                    page,
-                    generation,
-                    lines,
-                } => {
-                    with_state(|state| state.apply_text_lines(page, generation, lines));
-                }
-                EngineEvent::Outline { items } => {
-                    with_state(|state| state.set_outline(items));
-                }
-                EngineEvent::Annotations {
-                    page,
-                    generation,
-                    items,
-                } => {
-                    with_state(|state| state.apply_annotations(&ui, page, generation, items));
-                }
-                EngineEvent::Fields {
-                    page,
-                    generation,
-                    items,
-                } => {
-                    with_state(|state| state.apply_fields(&ui, page, generation, items));
-                }
-                EngineEvent::FieldPage {
-                    generation,
-                    page,
-                    back,
-                } => {
-                    with_state(|state| state.field_page(&ui, generation, page, back));
-                }
-                EngineEvent::FormExported {
-                    generation,
-                    path,
-                    result,
-                } => {
-                    with_state(|state| state.form_exported(&ui, generation, &path, result));
-                }
-                EngineEvent::PageChanged {
-                    generation,
-                    page,
-                    revision,
-                    items,
-                } => {
-                    with_state(|state| state.page_changed(&ui, generation, page, revision, items));
-                }
-                EngineEvent::Restructured {
-                    generation,
-                    page_sizes,
-                    revision,
-                    map,
-                } => {
-                    with_state(|state| {
-                        state.restructured(&ui, generation, page_sizes, revision, map)
-                    });
-                }
-                EngineEvent::ToolProgress {
-                    job_id,
-                    done,
-                    total,
-                } => {
-                    with_state(|state| state.tool_progress(&ui, job_id, done, total));
-                }
-                EngineEvent::ToolDone {
-                    job_id,
-                    result,
-                    sizes,
-                } => {
-                    let outcome =
-                        with_state_ret(|state| state.tool_done(&ui, job_id, result, sizes))
-                            .flatten();
-                    tools_ui::tool_finished(&ui, outcome);
-                }
-                EngineEvent::DocumentInfo { generation, info } => {
-                    with_state(|state| state.document_info(&ui, generation, info));
-                }
-                EngineEvent::Edited {
-                    generation, result, ..
-                } => {
-                    with_state(|state| state.edited(&ui, generation, result));
-                }
-                EngineEvent::History {
-                    generation,
-                    change,
-                    can_undo,
-                    can_redo,
-                } => {
-                    with_state(|state| state.history(&ui, generation, change, can_undo, can_redo));
-                }
-                EngineEvent::Saved { path, result } => {
-                    match with_state_ret(|state| state.saved(&ui, path, result)).flatten() {
-                        Some(SavedNext::Then(then)) => run_after(&ui, then),
-                        Some(SavedNext::SaveAs) => save_as(&ui),
-                        None => {}
-                    }
-                }
-                EngineEvent::TileAborted { ms, .. } => {
-                    with_state(|state| state.bench.aborted(ms));
-                }
-                EngineEvent::Error { message } => {
-                    ui.set_has_error(true);
-                    ui.set_error_text(SharedString::from(message.clone()));
-                    ui.set_status_text(SharedString::from(format!("Error: {message}")));
-                    ui.set_is_loading(false);
-                    with_state(|state| state.open_failed(&ui));
-                }
-            });
-        }
-    });
 
     // `viewport_moved` is raised by the Flickable on every content-x/y/size change.
     {
@@ -4015,8 +4163,12 @@ fn main() -> Result<(), slint::PlatformError> {
             let (ax, ay) = viewport_center(&ui);
             // The file dialogs are modal, so they run with the state unborrowed.
             match command {
-                KeyCommand::Open => {
-                    proceed(&ui, AfterSave::Pick);
+                KeyCommand::Open | KeyCommand::NewTab => {
+                    tabs::pick(&ui);
+                    return true;
+                }
+                KeyCommand::Save => {
+                    save(&ui);
                     return true;
                 }
                 KeyCommand::SaveAs => {
@@ -4024,7 +4176,15 @@ fn main() -> Result<(), slint::PlatformError> {
                     return true;
                 }
                 KeyCommand::Close => {
-                    proceed(&ui, AfterSave::Quit);
+                    tabs::close_active(&ui);
+                    return true;
+                }
+                KeyCommand::NextTab => {
+                    tabs::step(&ui, true);
+                    return true;
+                }
+                KeyCommand::PreviousTab => {
+                    tabs::step(&ui, false);
                     return true;
                 }
                 _ => {}
@@ -4046,7 +4206,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 KeyCommand::FindPrevious => state.step_hit(&ui, false),
                 KeyCommand::FindClose => state.escape(&ui),
                 KeyCommand::Copy => state.copy_selection(&ui),
-                KeyCommand::Save => state.send_save(&ui, None),
                 KeyCommand::Mark(kind) => {
                     if state.editable {
                         state.choose_tool(&ui, Tool::Markup(kind));
@@ -4057,7 +4216,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 KeyCommand::InkTool => state.choose_tool(&ui, Tool::Ink),
                 KeyCommand::Undo => state.undo(),
                 KeyCommand::Redo => state.redo(),
-                KeyCommand::Open | KeyCommand::SaveAs | KeyCommand::Close => {}
+                KeyCommand::Open
+                | KeyCommand::NewTab
+                | KeyCommand::Save
+                | KeyCommand::SaveAs
+                | KeyCommand::Close
+                | KeyCommand::NextTab
+                | KeyCommand::PreviousTab => {}
             });
             true
         });
@@ -4139,7 +4304,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = main_window.as_weak();
         main_window.on_open_file(move || {
             if let Some(ui) = weak.upgrade() {
-                proceed(&ui, AfterSave::Pick);
+                tabs::pick(&ui);
             }
         });
     }
@@ -4155,7 +4320,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 })
                 .flatten();
                 if let Some(path) = path {
-                    proceed(&ui, AfterSave::Open(path));
+                    tabs::open(&ui, path);
                 }
             }
         });
@@ -4512,7 +4677,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let Ok(at) = u32::try_from(at) else {
                 return;
             };
-            if which == 2 {
+            if which == 0 {
+                tabs::split_at(&ui, at);
+            } else if which == 2 {
                 tools_ui::insert_from_file_at(&ui, Some(at));
             } else {
                 with_state(|state| state.gallery_divider(at, which));
@@ -4649,7 +4816,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = main_window.as_weak();
         main_window.on_quit(move || {
             if let Some(ui) = weak.upgrade() {
-                proceed(&ui, AfterSave::Quit);
+                tabs::quit(&ui);
             }
         });
     }
@@ -4659,13 +4826,13 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let weak = main_window.as_weak();
         main_window.window().on_close_requested(move || {
-            if !with_state_ret(|state| state.has_unsaved_changes()).unwrap_or(false) {
+            if !tabs::any_unsaved() {
                 return slint::CloseRequestResponse::HideWindow;
             }
             let weak = weak.clone();
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 if let Some(ui) = weak.upgrade() {
-                    proceed(&ui, AfterSave::Quit);
+                    tabs::quit(&ui);
                 }
             });
             slint::CloseRequestResponse::KeepWindowShown
@@ -4676,7 +4843,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = main_window.as_weak();
         main_window.on_save(move || {
             if let Some(ui) = weak.upgrade() {
-                with_state(|state| state.send_save(&ui, None));
+                save(&ui);
             }
         });
     }
@@ -4759,23 +4926,28 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = weak.upgrade()
                 && let Some(path) = dropped_document(&data)
             {
-                proceed(&ui, AfterSave::Open(path));
+                tabs::open(&ui, path);
             }
         });
     }
 
     with_state(|state| state.update_recent());
 
-    // CLI argument handling: open the file passed as the first argument, through the same path as
-    // the menu, so it lands in the recent list too.
-    if let Some(path_arg) = path {
-        let weak = main_window.as_weak();
-        if let Some(ui) = weak.upgrade() {
-            with_state(|state| state.open_path(&ui, PathBuf::from(path_arg)));
+    tabs::wire(&main_window);
+
+    // CLI argument handling: each file on the command line opens in a tab, through the same path
+    // as the menu, so it lands in the recent list too.
+    for (index, path) in paths.into_iter().enumerate() {
+        if index == 0 {
+            with_state(|state| state.open_path(&main_window, PathBuf::from(path)));
+        } else {
+            tabs::open(&main_window, PathBuf::from(path));
         }
     }
 
     let result = main_window.run();
+    // Every tab's engine stops, and the files the tabs wrote are deleted.
+    tabs::shutdown();
     // Dropped here, not left to thread-local destruction: on X11 this hands the clipboard to the
     // clipboard manager, so text copied just before quitting can still be pasted.
     let clipboard = CLIPBOARD.with(|cell| cell.borrow_mut().take());
@@ -4829,6 +5001,41 @@ mod tests {
         text.set_plain_text("/home/u/b.pdf".into());
         assert_eq!(dropped_document(&text), None, "text is not a file");
         assert_eq!(dropped_document(&slint::DataTransfer::default()), None);
+    }
+
+    /// Plan 0007 Phase 4: Ctrl+T opens into a new tab; Ctrl+Tab and Ctrl+Page Down step right,
+    /// Ctrl+Shift+Tab (or Backtab) and Ctrl+Page Up left, from any field; Tab alone is not one.
+    #[test]
+    fn tab_shortcuts() {
+        assert_eq!(key_command("t", true, false), Some(KeyCommand::NewTab));
+        assert_eq!(
+            key_command(&key(Key::Tab), true, false),
+            Some(KeyCommand::NextTab)
+        );
+        assert_eq!(
+            key_command(&key(Key::Tab), true, true),
+            Some(KeyCommand::PreviousTab)
+        );
+        assert_eq!(
+            key_command(&key(Key::Backtab), true, true),
+            Some(KeyCommand::PreviousTab)
+        );
+        assert_eq!(
+            key_command(&key(Key::PageDown), true, false),
+            Some(KeyCommand::NextTab)
+        );
+        assert_eq!(
+            key_command(&key(Key::PageUp), true, false),
+            Some(KeyCommand::PreviousTab)
+        );
+        assert_eq!(key_command(&key(Key::Tab), false, false), None);
+        for command in [
+            KeyCommand::NewTab,
+            KeyCommand::NextTab,
+            KeyCommand::PreviousTab,
+        ] {
+            assert!(command.is_global(), "{command:?}");
+        }
     }
 
     #[test]

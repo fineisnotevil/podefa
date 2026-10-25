@@ -2,17 +2,190 @@
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 // The title row (Plan 0007 Phase 2): the brand island with the theme menu, and the title island
-// with Open, Save, Undo and Redo, the document's name over the area that moves the window, and
+// with Open, Save, Undo and Redo, the tabs (Phase 4) beside the area that moves the window, and
 // the window's own controls when it has no system frame.
 
 import { Theme } from "theme.slint";
 import { Island, IconButton, Separator, MenuRow, MenuSurface, MenuHeading } from "widgets.slint";
+import { TabItem } from "types.slint";
+
+// The widest and the narrowest a tab gets: tabs share the strip down to the narrow width, as a
+// browser's do, and only then does the strip scroll (DESIGN.md step 21).
+global TabMetrics {
+    out property <length> max-w: 180px;
+    out property <length> min-w: 76px;
+    out property <length> gap: 4px;
+    out property <length> plus-w: 28px;
+}
+
+// One tab: a click shows it, a middle click or its close button closes it, and pages dragged
+// onto it are copied into its document.
+component Tab inherits Rectangle {
+    in property <TabItem> item;
+    in property <bool> active;
+    in property <bool> closable;
+    callback select();
+    callback close();
+    callback pages-dropped();
+
+    property <string> name: root.item.title == "" ? "New Tab" : root.item.title;
+    property <bool> over: touch.has-hover || drop.has-drag;
+    // The fill behind the title, which the close button's fade runs into.
+    property <color> fill: drop.has-drag ? Theme.active : root.active ? Theme.active
+        : touch.has-hover ? Theme.hover : Theme.surface;
+
+    border-radius: Theme.radius-control;
+    background: drop.has-drag || root.active || touch.has-hover ? root.fill : transparent;
+    border-width: drop.has-drag ? 2px : 1px;
+    border-color: drop.has-drag ? Theme.focus : root.active ? Theme.line-strong : Theme.line;
+    animate background { duration: 120ms; }
+    clip: true;
+
+    // Outside the drop area, which does not keep what is under it in the hover chain.
+    touch := TouchArea {
+        clicked => { root.select(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.up
+                && root.closable) {
+                root.close();
+            }
+        }
+        drop := DropArea {
+            can-drop(event) => { return DragAction.copy; }
+            dropped(event) => {
+                root.pages-dropped();
+                return DragAction.copy;
+            }
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 8px;
+                spacing: 6px;
+                Text {
+                    text: root.name;
+                    color: root.active || root.over ? Theme.text : Theme.text-muted;
+                    font-size: 12px;
+                    font-weight: root.active ? 600 : 500;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.item.dirty && !(root.closable && root.over) : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 6px;
+                        height: 6px;
+                        border-radius: 3px;
+                        background: Theme.text-muted;
+                    }
+                }
+            }
+            // The close button lies over the end of the title on hover, the title fading out
+            // under it, so it takes no room from the name (DESIGN.md step 20).
+            if root.closable && root.over : Rectangle {
+                x: parent.width - self.width;
+                width: 40px;
+                background: @linear-gradient(90deg, root.fill.transparentize(100%) 0%, root.fill 45%);
+                IconButton {
+                    x: parent.width - self.width - 3px;
+                    width: 22px;
+                    height: 22px;
+                    icon-size: 12px;
+                    icon: @image-url("icons/x.svg");
+                    tip: "Close Tab (Ctrl+W)";
+                    clicked => { root.close(); }
+                }
+            }
+        }
+        Tooltip { text: @markdown("\{root.name}"); }
+    }
+}
+
+// The tabs and the new-tab button. Wider than the room it is given, it scrolls with the wheel;
+// the active tab is kept in view.
+component TabStrip inherits Rectangle {
+    in property <[TabItem]> tabs;
+    in property <int> active;
+    callback select(int);
+    callback close(int);
+    callback new-tab();
+    callback pages-to-tab(int);
+    callback pages-to-new-tab();
+
+    property <length> room: max(0px, root.width - TabMetrics.plus-w - TabMetrics.gap);
+    property <length> tab-w: root.tabs.length == 0 ? TabMetrics.max-w
+        : max(TabMetrics.min-w, min(TabMetrics.max-w,
+            (root.room - (root.tabs.length - 1) * TabMetrics.gap) / root.tabs.length));
+    property <length> pitch: root.tab-w + TabMetrics.gap;
+    property <length> row-w: root.tabs.length * root.pitch - TabMetrics.gap;
+    property <length> max-scroll: max(0px, root.row-w - root.room);
+    property <length> scroll: 0px;
+
+    // What the layout beside it should give: every tab at its widest, and the button.
+    out property <length> wanted-w: root.tabs.length * (TabMetrics.max-w + TabMetrics.gap)
+        + TabMetrics.plus-w;
+
+    function reveal() {
+        if (root.active * root.pitch < root.scroll) {
+            root.scroll = root.active * root.pitch;
+        } else if (root.active * root.pitch + root.tab-w > root.scroll + root.room) {
+            root.scroll = root.active * root.pitch + root.tab-w - root.room;
+        }
+        root.scroll = max(0px, min(root.max-scroll, root.scroll));
+    }
+    changed active => { root.reveal(); }
+    changed max-scroll => { root.reveal(); }
+
+    wheel := TouchArea {
+        width: min(root.row-w, root.room);
+        scroll-event(event) => {
+            root.scroll = max(0px, min(root.max-scroll,
+                root.scroll - event.delta-x - event.delta-y));
+            return accept;
+        }
+        Rectangle {
+            clip: true;
+            for item[index] in root.tabs : Tab {
+                x: index * root.pitch - root.scroll;
+                y: 0px;
+                width: root.tab-w;
+                height: parent.height;
+                item: item;
+                active: index == root.active;
+                closable: root.tabs.length > 1;
+                select => { root.select(index); }
+                close => { root.close(index); }
+                pages-dropped => { root.pages-to-tab(index); }
+            }
+        }
+    }
+
+    // The new-tab button opens a file in a new tab; pages dropped on it open as a new document.
+    plus-drop := DropArea {
+        x: wheel.width + TabMetrics.gap;
+        width: TabMetrics.plus-w;
+        can-drop(event) => { return DragAction.copy; }
+        dropped(event) => {
+            root.pages-to-new-tab();
+            return DragAction.copy;
+        }
+        IconButton {
+            width: TabMetrics.plus-w;
+            height: TabMetrics.plus-w;
+            y: (parent.height - self.height) / 2;
+            icon: @image-url("icons/plus.svg");
+            icon-size: 14px;
+            tip: "Open in a New Tab (Ctrl+T)";
+            checked: plus-drop.has-drag;
+            clicked => { root.new-tab(); }
+        }
+    }
+}
 
 export component TitleRow inherits Rectangle {
     in property <bool> own-frame;
     in property <bool> maximized;
-    in property <string> doc-title;
-    in property <bool> dirty;
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
     in property <bool> editable;
     in property <bool> repaired;
     in property <bool> can-undo;
@@ -29,6 +202,11 @@ export component TitleRow inherits Rectangle {
     callback minimize();
     callback toggle-maximize();
     callback close();
+    callback select-tab(int);
+    callback close-tab(int);
+    callback new-tab();
+    callback pages-to-tab(int);
+    callback pages-to-new-tab();
 
     // Whether the menu being opened was opened from the keyboard: its first row takes the focus.
     property <bool> menu-from-keyboard: false;
@@ -254,39 +432,31 @@ export component TitleRow inherits Rectangle {
                     Separator { vertical: true; }
                 }
 
-                // The document's name; dragging here moves the window, a double click maximizes
-                // or restores it.
+                // The tabs (Phase 4), then the area that moves the window: dragging there moves
+                // it, a double click maximizes or restores it.
+                Rectangle { width: 2px; }
+                // The tabs take the room first, up to their widest; what is left moves the window.
+                strip := TabStrip {
+                    horizontal-stretch: 1000;
+                    max-width: self.wanted-w;
+                    min-width: TabMetrics.min-w + TabMetrics.plus-w + TabMetrics.gap;
+                    tabs: root.tabs;
+                    active: root.active-tab;
+                    select(index) => { root.select-tab(index); }
+                    close(index) => { root.close-tab(index); }
+                    new-tab => { root.new-tab(); }
+                    pages-to-tab(index) => { root.pages-to-tab(index); }
+                    pages-to-new-tab => { root.pages-to-new-tab(); }
+                }
                 WindowMoveArea {
                     horizontal-stretch: 1;
+                    min-width: 40px;
                     enabled: root.own-frame;
                     TouchArea {
                         double-clicked => {
                             if (root.own-frame) {
                                 root.toggle-maximize();
                             }
-                        }
-                    }
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 6px;
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        if root.dirty : VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 6px;
-                                height: 6px;
-                                border-radius: 3px;
-                                background: Theme.text-muted;
-                            }
-                        }
-                        Text {
-                            text: root.doc-title == "" ? "No document" : root.doc-title;
-                            color: root.doc-title == "" ? Theme.text-faint : Theme.text;
-                            font-size: 12px;
-                            font-weight: 500;
-                            vertical-alignment: center;
-                            overflow: elide;
                         }
                     }
                 }
