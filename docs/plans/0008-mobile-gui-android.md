@@ -7,9 +7,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 0 (research, the plan itself) in progress - awaiting the maintainer's answers to §9.**
-The research that could be done from the pinned sources is done (§3). The trial build on the
-phone (§5, Phase 0, step 3) needs downloads that wait for the maintainer's OK (§9 q2).
+**Phase 0 (research, the plan itself) in progress.** The research that could be done from the
+pinned sources is done (§3) and the maintainer answered §9 (§0). The trial build on the phone
+(§5, Phase 0, step 3) is in progress.
 
 - Phase 0: in progress (2026-10-26).
 - Phases 1 to 5: not started.
@@ -25,7 +25,19 @@ code.
 
 ## 0. Gate record
 
-Phase 0 has not passed its gate.
+**The §9 answers, 2026-10-26** ("§9'daki önerilen cevaplar tamam; mini PC'deki indirmeleri
+onaylıyorum, deneme derlemesine başla"): every recommended answer stands.
+
+1. Plan 0007 Phase 4 passes its gate; this plan's Phases 0 and 1 run alongside Plan 0007 Phase 5,
+   and this plan's Phase 2 starts once Plan 0007 closes.
+2. The downloads on the mini PC are approved; the trial build goes ahead.
+3. One app, two shells, with `--mobile` on the desktop.
+4. Android 8.0 (API 26) and later.
+5. Landscape in this plan, with the phone layout (Phase 5).
+6. One column of cards in Tools.
+7. Rows MA-MC's figures are starting points, fixed after the trial build.
+
+Phase 0 has not passed its gate: the trial build (§5, Phase 0, step 3) is in progress.
 
 ## 1. Goal and scope
 
