@@ -40,3 +40,11 @@ path = "patches/mupdf/journal/include/**"
 precedence = "override"
 SPDX-FileCopyrightText = "2004-2025 Artifex Software, Inc."
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# Lucide icons (lucide-react 0.460.0), turned into SVG files for the window's islands (Plan 0007
+# Phase 2). Lucide is ISC; the parts that come from Feather are MIT.
+[[annotations]]
+path = "crates/app/ui/icons/**"
+precedence = "override"
+SPDX-FileCopyrightText = ["2022 Lucide Contributors", "2013-2022 Cole Bemis"]
+SPDX-License-Identifier = "ISC AND MIT"

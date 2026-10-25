@@ -50,6 +50,20 @@ export global Theme {
     // Popup shadow; the software renderer draws none, so a popup also keeps its line-strong edge.
     out property <color> shadow: dark ? #00000080 : #00000040;
 
+    // Islands (Plan 0007 Phase 2): their edge, their shadow (femtovg caches it; the software
+    // renderer draws none, and the surface ladder still sets them apart), the keyboard focus ring,
+    // and the close button's red under the pointer.
+    out property <color> island-line: dark ? #ffffff14 : #0000000f;
+    out property <color> island-shadow: dark ? #00000066 : #0000001f;
+    out property <brush> focus: Palette.accent-background;
+    out property <color> danger-fill: dark ? #dc2626 : #e5484d;
+    // The window's edge while it is not maximized: a frameless window has no system border.
+    out property <color> window-edge: dark ? #36363b : #c4c4cc;
+
+    // Radii and the islands' distance from the window's edge.
+    out property <length> radius-island: 8px;
+    out property <length> radius-control: 6px;
+
     // The canvas scroll bar.
     out property <color> scroll-track: dark ? #ffffff0d : #0000000d;
     out property <color> scroll-thumb: dark ? #71717a : #9ca3af;

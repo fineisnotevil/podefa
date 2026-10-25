@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The pieces the islands are built from (Plan 0007 Phase 2): the island surface, icon buttons,
+// menu rows and separators. Every one takes its colours from `Theme`.
+
+import { Theme } from "theme.slint";
+
+// A surface floating over the canvas. Opaque: Slint has no backdrop blur (Plan 0007 §3.2), and
+// the surface ladder keeps it apart from the canvas where the renderer draws no shadow.
+export component Island inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius-island;
+    border-width: 1px;
+    border-color: Theme.island-line;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.island-shadow;
+}
+
+// A square button with an icon. Clicks do not take the keyboard from the canvas; Tab reaches it,
+// and Enter or Space presses it. `tip` is its tooltip: the command's name and its shortcut.
+export component IconButton inherits FocusScope {
+    in property <image> icon;
+    in property <string> tip;
+    in property <bool> checked: false;
+    in property <length> icon-size: 16px;
+    // The icon's colour when it is neither checked nor under the pointer.
+    in property <color> tint: Theme.text-muted;
+    // The fill when checked; the danger red for the window's close button on hover.
+    in property <brush> checked-fill: Theme.active;
+    in property <bool> danger: false;
+    callback clicked();
+
+    property <bool> keyboard-focus: false;
+    width: 32px;
+    height: 32px;
+    focus-on-click: false;
+    focus-gained(reason) => { self.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { self.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == " ") {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        border-radius: Theme.radius-control;
+        background: root.danger && touch.has-hover && root.enabled ? Theme.danger-fill
+            : root.checked ? root.checked-fill
+            : touch.pressed && root.enabled ? Theme.active
+            : touch.has-hover && root.enabled ? Theme.hover : transparent;
+        border-width: root.keyboard-focus ? 2px : 0px;
+        border-color: Theme.focus;
+        animate background { duration: 120ms; }
+        Image {
+            source: root.icon;
+            width: root.icon-size;
+            height: root.icon-size;
+            colorize: root.danger && touch.has-hover && root.enabled ? #ffffff
+                : root.checked || (touch.has-hover && root.enabled) ? Theme.text : root.tint;
+            opacity: root.enabled ? 1.0 : 0.35;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+        Tooltip { text: @markdown("\{root.tip}"); }
+    }
+}
+
+// A thin line between groups of buttons in an island.
+export component Separator inherits Rectangle {
+    in property <bool> vertical: false;
+    width: vertical ? 1px : 20px;
+    height: vertical ? 20px : 1px;
+    background: Theme.line-strong;
+}
+
+// A row in a popup menu: an icon, the label, the shortcut and, for a choice, a tick.
+export component MenuRow inherits FocusScope {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> shortcut;
+    in property <bool> checkable: false;
+    in property <bool> checked: false;
+    callback activated();
+
+    property <bool> keyboard-focus: false;
+    height: 30px;
+    focus-on-click: false;
+    focus-gained(reason) => { self.keyboard-focus = reason != FocusReason.pointer-click; }
+    focus-lost => { self.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == " ") {
+            root.activated();
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        border-radius: Theme.radius-control;
+        background: (touch.has-hover || root.keyboard-focus) && root.enabled ? Theme.hover : transparent;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 8px;
+            Rectangle {
+                width: 14px;
+                Image {
+                    visible: !root.checkable || root.checked;
+                    source: root.checkable ? @image-url("icons/check.svg") : root.icon;
+                    width: 14px;
+                    height: 14px;
+                    colorize: root.checkable ? Theme.text : Theme.text-muted;
+                }
+            }
+            Text {
+                text: root.label;
+                color: Theme.text;
+                opacity: root.enabled ? 1.0 : 0.4;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if root.shortcut != "" : Text {
+                text: root.shortcut;
+                color: Theme.text-faint;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.activated(); }
+        }
+    }
+}
+
+// A popup menu's surface. The menu's `PopupWindow` holds one of these, with its rows inside.
+export component MenuSurface inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius-island;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: Theme.shadow;
+}
+
+// A small heading inside a menu.
+export component MenuHeading inherits Text {
+    color: Theme.text-faint;
+    font-size: 11px;
+    height: 22px;
+    vertical-alignment: center;
+}

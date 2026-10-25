@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The status islands (Plan 0007 Phase 2): page navigation and zoom at the bottom right, and the
+// status message, with Cancel for a running tool, at the bottom left.
+
+import { Theme } from "theme.slint";
+import { Island, IconButton, Separator } from "widgets.slint";
+
+// A small recessed text field, as the concept's page field.
+component SmallField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    out property <bool> editing: input.has-focus;
+    callback accepted(string);
+    height: 22px;
+    border-radius: 4px;
+    background: Theme.shell;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.focus : Theme.line-strong;
+    input := TextInput {
+        x: 4px;
+        width: parent.width - 8px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        single-line: true;
+        font-size: 11px;
+        font-weight: 600;
+        color: Theme.text;
+        selection-background-color: Theme.selection;
+        selection-foreground-color: Theme.selection-text;
+        accepted => { root.accepted(self.text); }
+    }
+}
+
+export component StatusIsland inherits Island {
+    in property <int> current-page;
+    in property <int> total-pages;
+    in property <bool> is-loading;
+    in property <float> zoom-percent;
+    in-out property <string> page-input;
+    out property <bool> page-field-focused: page-field.editing;
+    callback prev-page();
+    callback next-page();
+    callback go-to-page(string);
+    callback zoom-in();
+    callback zoom-out();
+    callback zoom-reset();
+    callback fit-width();
+    callback fit-page();
+
+    property <bool> ready: root.total-pages > 0 && !root.is-loading;
+
+    HorizontalLayout {
+        padding: 4px;
+        spacing: 2px;
+        IconButton {
+            width: 28px;
+            icon: @image-url("icons/chevron-left.svg");
+            icon-size: 14px;
+            tip: "Previous Page (PgUp)";
+            enabled: root.ready && root.current-page > 0;
+            clicked => { root.prev-page(); }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            padding-left: 2px;
+            padding-right: 2px;
+            alignment: center;
+            VerticalLayout {
+                alignment: center;
+                page-field := SmallField {
+                    width: 40px;
+                    text <=> root.page-input;
+                    accepted(text) => { root.go-to-page(text); }
+                }
+            }
+            Text {
+                text: "/ " + root.total-pages;
+                font-size: 11px;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+                min-width: 30px;
+            }
+        }
+        IconButton {
+            width: 28px;
+            icon: @image-url("icons/chevron-right.svg");
+            icon-size: 14px;
+            tip: "Next Page (PgDn)";
+            enabled: root.ready && root.current-page + 1 < root.total-pages;
+            clicked => { root.next-page(); }
+        }
+        VerticalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            alignment: center;
+            Separator { vertical: true; height: 16px; }
+        }
+        IconButton {
+            width: 28px;
+            icon: @image-url("icons/move-horizontal.svg");
+            icon-size: 14px;
+            tip: "Fit Width";
+            enabled: root.ready;
+            clicked => { root.fit-width(); }
+        }
+        IconButton {
+            width: 28px;
+            icon: @image-url("icons/move-vertical.svg");
+            icon-size: 14px;
+            tip: "Fit Page";
+            enabled: root.ready;
+            clicked => { root.fit-page(); }
+        }
+        actual := IconButton {
+            width: 34px;
+            tip: "Actual Size, 100% (Ctrl+0)";
+            enabled: root.ready;
+            clicked => { root.zoom-reset(); }
+            Text {
+                text: "1:1";
+                font-size: 10px;
+                font-weight: 700;
+                color: Theme.text-muted;
+                opacity: actual.enabled ? 1.0 : 0.35;
+            }
+        }
+        VerticalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            alignment: center;
+            Separator { vertical: true; height: 16px; }
+        }
+        IconButton {
+            width: 28px;
+            icon: @image-url("icons/zoom-out.svg");
+            icon-size: 14px;
+            tip: "Zoom Out (Ctrl+-)";
+            enabled: root.ready;
+            clicked => { root.zoom-out(); }
+        }
+        Text {
+            text: Math.round(root.zoom-percent) + "%";
+            font-size: 11px;
+            font-weight: 500;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            min-width: 46px;
+        }
+        IconButton {
+            width: 28px;
+            icon: @image-url("icons/zoom-in.svg");
+            icon-size: 14px;
+            tip: "Zoom In (Ctrl++)";
+            enabled: root.ready;
+            clicked => { root.zoom-in(); }
+        }
+    }
+}
+
+export component MessageIsland inherits Island {
+    in property <string> text;
+    in property <bool> tool-running;
+    // The tile counters for the manual checks, shown only when tracing.
+    in property <bool> diagnostics;
+    in property <int> tiles-rendered;
+    in property <int> tiles-requested;
+    callback cancel-tool();
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 8px;
+        Text {
+            text: root.text;
+            font-size: 11px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.tool-running : Rectangle {
+            width: cancel-text.preferred-width + 16px;
+            border-radius: 4px;
+            background: cancel-touch.has-hover ? Theme.hover : transparent;
+            cancel-text := Text {
+                text: "Cancel";
+                font-size: 11px;
+                font-weight: 600;
+                color: Theme.text;
+            }
+            cancel-touch := TouchArea { clicked => { root.cancel-tool(); } }
+        }
+        if root.diagnostics : Text {
+            text: root.tiles-rendered + " / " + root.tiles-requested + " tiles";
+            font-size: 11px;
+            color: Theme.text-faint;
+            vertical-alignment: center;
+        }
+    }
+}

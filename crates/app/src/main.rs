@@ -3040,6 +3040,28 @@ enum KeyCommand {
     DeleteAnnotation,
     Undo,
     Redo,
+    /// Ctrl+W: closes the document's window, asking first about unsaved changes (Plan 0007 §0).
+    Close,
+}
+
+impl KeyCommand {
+    /// Whether the key works wherever the keyboard is, a text field included (Plan 0007 Phase 2):
+    /// the commands the menu bar's shortcuts reached before the window lost its menu bar. Keys a
+    /// text field needs for itself (copy, undo, arrows, Delete, Esc) stay with the viewport.
+    fn is_global(self) -> bool {
+        matches!(
+            self,
+            KeyCommand::Open
+                | KeyCommand::Save
+                | KeyCommand::SaveAs
+                | KeyCommand::Close
+                | KeyCommand::Find
+                | KeyCommand::ToggleSidebar
+                | KeyCommand::ZoomIn
+                | KeyCommand::ZoomOut
+                | KeyCommand::ZoomReset
+        )
+    }
 }
 
 /// Maps a Slint key event onto a command (Plan 0002, §4.6). `text` is what Slint reports: a
@@ -3063,6 +3085,7 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             'z' | 'Z' if shift => Some(KeyCommand::Redo),
             'z' | 'Z' => Some(KeyCommand::Undo),
             'y' | 'Y' => Some(KeyCommand::Redo),
+            'w' | 'W' => Some(KeyCommand::Close),
             _ => None,
         };
     }
@@ -3121,6 +3144,10 @@ fn main() -> Result<(), slint::PlatformError> {
     if trace_on {
         bench::count_frames(&main_window);
     }
+    main_window.set_diagnostics(trace_on);
+    // macOS keeps its native frame and traffic lights (Plan 0007 §0, question 4); elsewhere the
+    // window draws its own.
+    main_window.set_own_frame(!cfg!(target_os = "macos"));
     // The two memory knobs describe the scheduler the app builds, not the run: `--cache-mib 8`
     // alone is a valid experiment (trace it by hand with `FA_PDF_TRACE=1`), and neither flag
     // starts one. `--cache-rows` is read where the model is sized, so it covers the rebuild
@@ -3340,7 +3367,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     if repaired {
                         status.push_str(
                             " - the file was damaged and repaired when opened: \
-                             File > Save Repaired Copy writes a clean copy",
+                             Save > Save Repaired Copy writes a clean copy",
                         );
                     }
                     ui.set_status_text(SharedString::from(status));
@@ -3609,6 +3636,10 @@ fn main() -> Result<(), slint::PlatformError> {
                     save_as(&ui);
                     return true;
                 }
+                KeyCommand::Close => {
+                    proceed(&ui, AfterSave::Quit);
+                    return true;
+                }
                 _ => {}
             }
             with_state(|state| match command {
@@ -3639,9 +3670,24 @@ fn main() -> Result<(), slint::PlatformError> {
                 KeyCommand::InkTool => state.choose_tool(&ui, Tool::Ink),
                 KeyCommand::Undo => state.undo(),
                 KeyCommand::Redo => state.redo(),
-                KeyCommand::Open | KeyCommand::SaveAs => {}
+                KeyCommand::Open | KeyCommand::SaveAs | KeyCommand::Close => {}
             });
             true
+        });
+    }
+
+    // The shortcuts that work from any field: the window sees each key before the focused
+    // element and hands these on as if the viewport had them.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_global_key(move |text, ctrl, shift| {
+            let Some(ui) = weak.upgrade() else {
+                return false;
+            };
+            match key_command(&text, ctrl, shift) {
+                Some(command) if command.is_global() => ui.invoke_nav_key(text, ctrl, shift),
+                _ => false,
+            }
         });
     }
 
@@ -4318,6 +4364,35 @@ mod tests {
         text.set_plain_text("/home/u/b.pdf".into());
         assert_eq!(dropped_document(&text), None, "text is not a file");
         assert_eq!(dropped_document(&slint::DataTransfer::default()), None);
+    }
+
+    #[test]
+    fn ctrl_w_closes_and_the_menu_shortcuts_work_from_any_field() {
+        assert_eq!(key_command("w", true, false), Some(KeyCommand::Close));
+        assert_eq!(key_command("w", false, false), None);
+        for (text, shift) in [
+            ("o", false),
+            ("s", false),
+            ("s", true),
+            ("w", false),
+            ("f", false),
+        ] {
+            let command = key_command(text, true, shift);
+            assert!(
+                command.is_some_and(KeyCommand::is_global),
+                "Ctrl+{text} {shift}"
+            );
+        }
+        assert!(key_command(&key(Key::F4), false, false).is_some_and(KeyCommand::is_global));
+        // A text field keeps copy, undo, redo and its arrows.
+        for (text, ctrl) in [("c", true), ("z", true), ("y", true)] {
+            assert!(!key_command(text, ctrl, false).is_some_and(KeyCommand::is_global));
+        }
+        assert!(
+            !key_command(&key(Key::LeftArrow), false, false).is_some_and(KeyCommand::is_global)
+        );
+        assert!(!key_command(&key(Key::Escape), false, false).is_some_and(KeyCommand::is_global));
+        assert!(!key_command(&key(Key::Delete), false, false).is_some_and(KeyCommand::is_global));
     }
 
     #[test]

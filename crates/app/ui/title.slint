@@ -1,0 +1,393 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The title row (Plan 0007 Phase 2): the brand island with the theme menu, and the title island
+// with Open, Save, Undo and Redo, the document's name over the area that moves the window, and
+// the window's own controls when it has no system frame.
+
+import { Theme } from "theme.slint";
+import { Island, IconButton, Separator, MenuRow, MenuSurface, MenuHeading } from "widgets.slint";
+
+export component TitleRow inherits Rectangle {
+    in property <bool> own-frame;
+    in property <bool> maximized;
+    in property <string> doc-title;
+    in property <bool> dirty;
+    in property <bool> editable;
+    in property <bool> repaired;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    in property <[string]> recent-files;
+    in property <int> theme;
+    callback open-file();
+    callback open-recent(int);
+    callback save();
+    callback save-as();
+    callback undo();
+    callback redo();
+    callback choose-theme(int);
+    callback minimize();
+    callback toggle-maximize();
+    callback close();
+
+    // Whether the menu being opened was opened from the keyboard: its first row takes the focus.
+    property <bool> menu-from-keyboard: false;
+
+    height: 40px;
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        // The brand island: PODEFA's menu, with the theme.
+        brand := Island {
+            HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                alignment: center;
+                brand-button := FocusScope {
+                    property <bool> keyboard-focus: false;
+                    focus-on-click: false;
+                    focus-gained(reason) => { self.keyboard-focus = reason == FocusReason.tab-navigation; }
+                    focus-lost => { self.keyboard-focus = false; }
+                    key-pressed(event) => {
+                        if (event.text == Key.Return || event.text == " " || event.text == Key.DownArrow) {
+                            root.menu-from-keyboard = true;
+                            brand-menu.show();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    Rectangle {
+                        border-radius: Theme.radius-control;
+                        background: brand-menu.is-open || brand-touch.has-hover ? Theme.hover : transparent;
+                        border-width: brand-button.keyboard-focus ? 2px : 0px;
+                        border-color: Theme.focus;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            spacing: 6px;
+                            VerticalLayout {
+                              alignment: center;
+                              Rectangle {
+                                width: 22px;
+                                height: 22px;
+                                border-radius: 5px;
+                                background: Theme.text;
+                                Text {
+                                    text: "P";
+                                    color: Theme.surface;
+                                    font-size: 11px;
+                                    font-weight: 900;
+                                }
+                              }
+                            }
+                            Text {
+                                text: "PODEFA";
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 700;
+                                letter-spacing: 0.4px;
+                                vertical-alignment: center;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Image {
+                                    source: @image-url("icons/chevron-down.svg");
+                                    width: 12px;
+                                    height: 12px;
+                                    colorize: Theme.text-faint;
+                                    transform-rotation: brand-menu.is-open ? 180deg : 0deg;
+                                }
+                            }
+                        }
+                        brand-touch := TouchArea {
+                            clicked => {
+                                root.menu-from-keyboard = false;
+                                brand-menu.show();
+                            }
+                        }
+                    }
+                }
+            }
+
+            brand-menu := PopupWindow {
+                x: 0px;
+                y: brand.height + 6px;
+                width: 232px;
+                MenuSurface {
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 4px;
+                        MenuHeading { text: "Theme"; x: 8px; }
+                        Rectangle {
+                            height: 48px;
+                            border-radius: Theme.radius-control;
+                            background: Theme.shell;
+                            HorizontalLayout {
+                                padding: 3px;
+                                spacing: 2px;
+                                for option[index] in [
+                                    { label: "Light", icon: @image-url("icons/sun.svg"), value: 1 },
+                                    { label: "Dark", icon: @image-url("icons/moon.svg"), value: 2 },
+                                    { label: "System", icon: @image-url("icons/monitor.svg"), value: 0 },
+                                ] : FocusScope {
+                                    property <bool> chosen: root.theme == option.value;
+                                    property <bool> keyboard-focus: false;
+                                    focus-on-click: false;
+                                    init => {
+                                        if (root.menu-from-keyboard && index == 0) {
+                                            self.focus();
+                                        }
+                                    }
+                                    focus-gained(reason) => { self.keyboard-focus = reason != FocusReason.pointer-click; }
+                                    focus-lost => { self.keyboard-focus = false; }
+                                    key-pressed(event) => {
+                                        if (event.text == Key.Return || event.text == " ") {
+                                            root.choose-theme(option.value);
+                                            brand-menu.close();
+                                            return accept;
+                                        }
+                                        return reject;
+                                    }
+                                    Rectangle {
+                                        border-radius: 4px;
+                                        background: parent.chosen ? Theme.surface
+                                            : option-touch.has-hover ? Theme.hover : transparent;
+                                        border-width: parent.keyboard-focus ? 2px : (parent.chosen ? 1px : 0px);
+                                        border-color: parent.keyboard-focus ? Theme.focus : Theme.line-strong;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 3px;
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                Image {
+                                                    source: option.icon;
+                                                    width: 14px;
+                                                    height: 14px;
+                                                    colorize: chosen ? Theme.text : Theme.text-muted;
+                                                }
+                                            }
+                                            Text {
+                                                text: option.label;
+                                                font-size: 11px;
+                                                horizontal-alignment: center;
+                                                color: chosen ? Theme.text : Theme.text-muted;
+                                            }
+                                        }
+                                        option-touch := TouchArea {
+                                            clicked => { root.choose-theme(option.value); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The title island.
+        title-island := Island {
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                spacing: 2px;
+
+                IconButton {
+                    icon: @image-url("icons/folder-open.svg");
+                    tip: "Open (Ctrl+O)";
+                    clicked => { root.open-file(); }
+                }
+                recent-button := IconButton {
+                    width: 18px;
+                    icon: @image-url("icons/chevron-down.svg");
+                    icon-size: 12px;
+                    tip: "Open Recent";
+                    enabled: root.recent-files.length > 0;
+                    checked: recent-menu.is-open;
+                    clicked => {
+                        root.menu-from-keyboard = self.has-focus;
+                        recent-menu.show();
+                    }
+                }
+                Rectangle { width: 4px; }
+                IconButton {
+                    icon: @image-url("icons/save.svg");
+                    tip: "Save (Ctrl+S)";
+                    enabled: root.editable;
+                    clicked => { root.save(); }
+                }
+                save-button := IconButton {
+                    width: 18px;
+                    icon: @image-url("icons/chevron-down.svg");
+                    icon-size: 12px;
+                    tip: "Save Options";
+                    enabled: root.editable || root.repaired;
+                    checked: save-menu.is-open;
+                    clicked => {
+                        root.menu-from-keyboard = self.has-focus;
+                        save-menu.show();
+                    }
+                }
+                Rectangle { width: 4px; }
+                IconButton {
+                    icon: @image-url("icons/undo-2.svg");
+                    tip: "Undo (Ctrl+Z)";
+                    enabled: root.can-undo;
+                    clicked => { root.undo(); }
+                }
+                IconButton {
+                    icon: @image-url("icons/redo-2.svg");
+                    tip: "Redo (Ctrl+Y)";
+                    enabled: root.can-redo;
+                    clicked => { root.redo(); }
+                }
+                VerticalLayout {
+                    padding-left: 6px;
+                    padding-right: 2px;
+                    alignment: center;
+                    Separator { vertical: true; }
+                }
+
+                // The document's name; dragging here moves the window, a double click maximizes
+                // or restores it.
+                WindowMoveArea {
+                    horizontal-stretch: 1;
+                    enabled: root.own-frame;
+                    TouchArea {
+                        double-clicked => {
+                            if (root.own-frame) {
+                                root.toggle-maximize();
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        if root.dirty : VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 6px;
+                                height: 6px;
+                                border-radius: 3px;
+                                background: Theme.text-muted;
+                            }
+                        }
+                        Text {
+                            text: root.doc-title == "" ? "No document" : root.doc-title;
+                            color: root.doc-title == "" ? Theme.text-faint : Theme.text;
+                            font-size: 12px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                if root.own-frame : HorizontalLayout {
+                    spacing: 2px;
+                    VerticalLayout {
+                        padding-left: 2px;
+                        padding-right: 6px;
+                        alignment: center;
+                        Separator { vertical: true; }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/minus.svg");
+                        icon-size: 14px;
+                        tip: "Minimize";
+                        clicked => { root.minimize(); }
+                    }
+                    IconButton {
+                        icon: root.maximized ? @image-url("icons/copy.svg") : @image-url("icons/square.svg");
+                        icon-size: 12px;
+                        tip: root.maximized ? "Restore" : "Maximize";
+                        clicked => { root.toggle-maximize(); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/x.svg");
+                        icon-size: 14px;
+                        tip: "Close (Ctrl+W)";
+                        danger: true;
+                        clicked => { root.close(); }
+                    }
+                }
+            }
+
+            recent-menu := PopupWindow {
+                x: recent-button.x - 36px;
+                y: title-island.height + 6px;
+                width: min(420px, title-island.width);
+                MenuSurface {
+                    VerticalLayout {
+                        padding: 6px;
+                        MenuHeading { text: "Open Recent"; x: 8px; }
+                        for path[index] in root.recent-files : MenuRow {
+                            label: path;
+                            init => {
+                                if (root.menu-from-keyboard && index == 0) {
+                                    self.focus();
+                                }
+                            }
+                            activated => {
+                                recent-menu.close();
+                                root.open-recent(index);
+                            }
+                        }
+                    }
+                }
+            }
+
+            save-menu := PopupWindow {
+                x: save-button.x - 36px;
+                y: title-island.height + 6px;
+                width: 240px;
+                MenuSurface {
+                    VerticalLayout {
+                        padding: 6px;
+                        MenuRow {
+                            icon: @image-url("icons/save.svg");
+                            label: "Save";
+                            shortcut: "Ctrl+S";
+                            enabled: root.editable;
+                            init => {
+                                if (root.menu-from-keyboard) {
+                                    self.focus();
+                                }
+                            }
+                            activated => {
+                                save-menu.close();
+                                root.save();
+                            }
+                        }
+                        MenuRow {
+                            icon: @image-url("icons/file-pen.svg");
+                            label: "Save As...";
+                            shortcut: "Ctrl+Shift+S";
+                            enabled: root.editable;
+                            activated => {
+                                save-menu.close();
+                                root.save-as();
+                            }
+                        }
+                        if root.repaired : MenuRow {
+                            icon: @image-url("icons/wrench.svg");
+                            label: "Save Repaired Copy...";
+                            activated => {
+                                save-menu.close();
+                                root.save-as();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

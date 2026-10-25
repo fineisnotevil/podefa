@@ -1,0 +1,726 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The sidebar (Plan 0007 Phase 2): the mode island (Read, Edit, Tools) and, under it, the island
+// with the chosen mode's commands; the colours and line widths of the active tool fly out beside
+// it. The drawer next to it holds the page thumbnails or the outline.
+//
+// Until the gallery of Phase 3, Tools also reaches the page operations through its own island
+// and chooses pages in the drawer's thumbnails.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ThumbRow, OutlineRow } from "types.slint";
+import { Island, IconButton, Separator, MenuRow, MenuSurface, MenuHeading } from "widgets.slint";
+
+// The island's padding and the gap before a flyout or menu beside it.
+global SidebarMetrics {
+    out property <length> pad: 4px;
+    out property <length> flyout-gap: 8px;
+}
+
+// A column of swatches beside the active tool.
+component Swatches inherits VerticalLayout {
+    in property <[color]> swatches;
+    in property <int> chosen;
+    callback choose(int);
+    spacing: 6px;
+    for swatch[index] in root.swatches : Rectangle {
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+        background: swatch;
+        border-width: index == root.chosen ? 2px : 1px;
+        border-color: index == root.chosen ? Theme.text : Theme.line-strong;
+        TouchArea { clicked => { root.choose(index); } }
+    }
+}
+
+export component SidebarColumn inherits Rectangle {
+    // 0 Read, 1 Edit, 2 Tools.
+    in-out property <int> mode: 0;
+    in property <bool> editable;
+    in property <int> total-pages;
+    in property <bool> tool-running;
+    in property <int> tool;
+    in property <int> colour-index;
+    in property <[color]> swatches;
+    in property <int> ink-width-index;
+    in property <bool> sidebar-visible;
+    in property <int> sidebar-tab;
+    in property <bool> find-visible;
+    in property <bool> field-highlight;
+    in property <bool> form-fields;
+    in property <bool> has-field-focus;
+    in property <bool> word-export;
+
+    callback choose-tool(int);
+    callback choose-colour(int);
+    callback choose-ink-width(int);
+    // Shows the drawer on a tab (0 thumbnails, 1 outline), or hides it when it already shows it.
+    callback show-drawer(int);
+    callback find-open();
+    callback page-op(int);
+    callback crop-tool();
+    callback toggle-field-highlight();
+    callback reset-field();
+    callback reset-form();
+    callback import-form-data();
+    callback export-form-data();
+    callback flatten-form();
+    callback merge-open();
+    callback split-open();
+    callback extract-pages();
+    callback insert-from-file();
+    callback stamp-open(int);
+    callback convert-open(int);
+    callback images-to-pdf();
+    callback export-word();
+    callback props-open();
+
+    property <bool> has-pages: root.total-pages > 0;
+    property <bool> can-edit: root.editable && root.has-pages;
+    property <bool> menu-from-keyboard: false;
+
+    function set-mode(mode: int) {
+        // Leaving Edit puts the tool back to Select, so Read and Tools never draw or mark.
+        if (mode != 1 && root.tool != 0) {
+            root.choose-tool(0);
+        }
+        root.mode = mode;
+    }
+
+    function pick(tool: int) {
+        root.choose-tool(root.tool == tool ? 0 : tool);
+    }
+
+    width: modes.width;
+
+    VerticalLayout {
+        spacing: 8px;
+        alignment: start;
+
+        modes := Island {
+            width: 32px + 2 * SidebarMetrics.pad;
+            VerticalLayout {
+                padding: SidebarMetrics.pad;
+                spacing: 2px;
+                IconButton {
+                    icon: @image-url("icons/book-open.svg");
+                    tip: "Read";
+                    checked: root.mode == 0;
+                    clicked => { root.set-mode(0); }
+                }
+                IconButton {
+                    icon: @image-url("icons/pen-line.svg");
+                    tip: "Edit: markup, notes, ink, forms";
+                    checked: root.mode == 1;
+                    clicked => { root.set-mode(1); }
+                }
+                IconButton {
+                    icon: @image-url("icons/layers.svg");
+                    tip: "Tools: pages and conversions";
+                    checked: root.mode == 2;
+                    clicked => { root.set-mode(2); }
+                }
+            }
+        }
+
+        commands := Island {
+            width: modes.width;
+            VerticalLayout {
+                // Read: the drawer's two tabs and search.
+                if root.mode == 0 : VerticalLayout {
+                    padding: SidebarMetrics.pad;
+                    spacing: 2px;
+                    IconButton {
+                        icon: @image-url("icons/layout-grid.svg");
+                        tip: "Page Thumbnails (F4)";
+                        enabled: root.has-pages;
+                        checked: root.sidebar-visible && root.sidebar-tab == 0;
+                        clicked => { root.show-drawer(0); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/list-tree.svg");
+                        tip: "Outline";
+                        enabled: root.has-pages;
+                        checked: root.sidebar-visible && root.sidebar-tab == 1;
+                        clicked => { root.show-drawer(1); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/search.svg");
+                        tip: "Find (Ctrl+F)";
+                        enabled: root.has-pages;
+                        checked: root.find-visible;
+                        clicked => { root.find-open(); }
+                    }
+                }
+
+                // Edit: markup, notes, ink, crop, rotation and the form.
+                if root.mode == 1 : VerticalLayout {
+                    padding: SidebarMetrics.pad;
+                    spacing: 2px;
+                    IconButton {
+                        icon: @image-url("icons/mouse-pointer-2.svg");
+                        tip: "Select (Esc)";
+                        enabled: root.has-pages;
+                        checked: root.tool == 0;
+                        clicked => { root.choose-tool(0); }
+                    }
+                    highlight-button := IconButton {
+                        icon: @image-url("icons/highlighter.svg");
+                        tip: "Highlight (H)";
+                        enabled: root.can-edit;
+                        checked: root.tool == 1;
+                        clicked => { root.pick(1); }
+                    }
+                    underline-button := IconButton {
+                        icon: @image-url("icons/underline.svg");
+                        tip: "Underline (U)";
+                        enabled: root.can-edit;
+                        checked: root.tool == 2;
+                        clicked => { root.pick(2); }
+                    }
+                    strike-button := IconButton {
+                        icon: @image-url("icons/strikethrough.svg");
+                        tip: "Strike-out (K)";
+                        enabled: root.can-edit;
+                        checked: root.tool == 3;
+                        clicked => { root.pick(3); }
+                    }
+                    squiggly-button := IconButton {
+                        icon: @image-url("icons/spell-check-2.svg");
+                        tip: "Squiggly Underline";
+                        enabled: root.can-edit;
+                        checked: root.tool == 4;
+                        clicked => { root.pick(4); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/sticky-note.svg");
+                        tip: "Note (N)";
+                        enabled: root.can-edit;
+                        checked: root.tool == 5;
+                        clicked => { root.pick(5); }
+                    }
+                    ink-button := IconButton {
+                        icon: @image-url("icons/pen-tool.svg");
+                        tip: "Ink (I)";
+                        enabled: root.can-edit;
+                        checked: root.tool == 6;
+                        clicked => { root.pick(6); }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        Separator {}
+                    }
+                    IconButton {
+                        icon: @image-url("icons/crop.svg");
+                        tip: "Crop Pages";
+                        enabled: root.can-edit;
+                        checked: root.tool == 7;
+                        clicked => { root.crop-tool(); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/rotate-ccw.svg");
+                        tip: "Rotate Left";
+                        enabled: root.can-edit;
+                        clicked => { root.page-op(0); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/rotate-cw.svg");
+                        tip: "Rotate Right";
+                        enabled: root.can-edit;
+                        clicked => { root.page-op(1); }
+                    }
+                    if root.form-fields : HorizontalLayout {
+                        alignment: center;
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        Separator {}
+                    }
+                    if root.form-fields : IconButton {
+                        icon: @image-url("icons/text-cursor-input.svg");
+                        tip: "Highlight Form Fields";
+                        checked: root.field-highlight;
+                        clicked => { root.toggle-field-highlight(); }
+                    }
+                    if root.form-fields : IconButton {
+                        icon: @image-url("icons/eraser.svg");
+                        tip: "Reset Form (a single field: the button beside it)";
+                        enabled: root.editable;
+                        clicked => { root.reset-form(); }
+                    }
+                    if root.form-fields : IconButton {
+                        icon: @image-url("icons/clipboard-list.svg");
+                        tip: "Form Data and Flatten";
+                        checked: form-menu.is-open;
+                        clicked => {
+                            root.menu-from-keyboard = self.has-focus;
+                            form-menu.show();
+                        }
+                    }
+                }
+
+                // Tools: the page operations and the tools that write new files.
+                if root.mode == 2 : VerticalLayout {
+                    padding: SidebarMetrics.pad;
+                    spacing: 2px;
+                    IconButton {
+                        icon: @image-url("icons/layout-grid.svg");
+                        tip: "Page Thumbnails: Ctrl+click or Shift+click chooses pages (F4)";
+                        enabled: root.has-pages;
+                        checked: root.sidebar-visible && root.sidebar-tab == 0;
+                        clicked => { root.show-drawer(0); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/rotate-ccw.svg");
+                        tip: "Rotate Left";
+                        enabled: root.can-edit;
+                        clicked => { root.page-op(0); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/rotate-cw.svg");
+                        tip: "Rotate Right";
+                        enabled: root.can-edit;
+                        clicked => { root.page-op(1); }
+                    }
+                    pages-button := IconButton {
+                        icon: @image-url("icons/copy-plus.svg");
+                        tip: "Pages: duplicate, delete, move, insert, extract";
+                        enabled: root.can-edit;
+                        checked: pages-menu.is-open;
+                        clicked => {
+                            root.menu-from-keyboard = self.has-focus;
+                            pages-menu.show();
+                        }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/combine.svg");
+                        tip: "Merge Files";
+                        enabled: !root.tool-running;
+                        clicked => { root.merge-open(); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/split.svg");
+                        tip: "Split";
+                        enabled: root.editable && !root.tool-running;
+                        clicked => { root.split-open(); }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        Separator {}
+                    }
+                    stamp-button := IconButton {
+                        icon: @image-url("icons/stamp.svg");
+                        tip: "Watermark and Page Numbers";
+                        enabled: root.can-edit;
+                        checked: stamp-menu.is-open;
+                        clicked => {
+                            root.menu-from-keyboard = self.has-focus;
+                            stamp-menu.show();
+                        }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/file-archive.svg");
+                        tip: "Compress";
+                        enabled: root.editable && !root.tool-running;
+                        clicked => { root.convert-open(0); }
+                    }
+                    export-button := IconButton {
+                        icon: @image-url("icons/file-output.svg");
+                        tip: root.word-export ? "Export as Images or Word" : "Export as Images";
+                        enabled: root.has-pages && !root.tool-running;
+                        checked: export-menu.is-open;
+                        clicked => {
+                            if (root.word-export) {
+                                root.menu-from-keyboard = self.has-focus;
+                                export-menu.show();
+                            } else {
+                                root.convert-open(1);
+                            }
+                        }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/image-plus.svg");
+                        tip: "Images to PDF";
+                        enabled: !root.tool-running;
+                        clicked => { root.images-to-pdf(); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/info.svg");
+                        tip: "Document Properties";
+                        enabled: root.has-pages;
+                        clicked => { root.props-open(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // The active markup tool's colours, beside its button.
+    if root.mode == 1 && root.tool >= 1 && root.tool <= 4 : Island {
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: commands.x + commands.width + SidebarMetrics.flyout-gap;
+        y: commands.y + SidebarMetrics.pad + root.tool * 34px + 16px - self.height / 2;
+        Swatches {
+            padding: 6px;
+            swatches: root.swatches;
+            chosen: root.colour-index;
+            choose(index) => { root.choose-colour(index); }
+        }
+    }
+
+    // The Ink tool's colours and line widths.
+    if root.mode == 1 && root.tool == 6 : Island {
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: commands.x + commands.width + SidebarMetrics.flyout-gap;
+        y: commands.y + SidebarMetrics.pad + 6 * 34px + 16px - self.height / 2;
+        HorizontalLayout {
+            padding: 6px;
+            spacing: 6px;
+            Swatches {
+                swatches: root.swatches;
+                chosen: root.colour-index;
+                choose(index) => { root.choose-colour(index); }
+            }
+            Rectangle { width: 1px; background: Theme.line-strong; }
+            VerticalLayout {
+                spacing: 6px;
+                alignment: start;
+                for line[index] in [1px, 2px, 4px] : Rectangle {
+                    width: 18px;
+                    height: 18px;
+                    border-radius: 4px;
+                    border-width: index == root.ink-width-index ? 2px : 1px;
+                    border-color: index == root.ink-width-index ? Theme.text : Theme.line-strong;
+                    Rectangle {
+                        width: 12px;
+                        height: line;
+                        background: Theme.text;
+                    }
+                    TouchArea { clicked => { root.choose-ink-width(index); } }
+                }
+            }
+        }
+    }
+
+    form-menu := PopupWindow {
+        x: commands.x + commands.width + SidebarMetrics.flyout-gap;
+        y: commands.y + 9 * 34px;
+        width: 220px;
+        MenuSurface {
+            VerticalLayout {
+                padding: 6px;
+                MenuHeading { text: "Form"; x: 8px; }
+                MenuRow {
+                    icon: @image-url("icons/eraser.svg");
+                    label: "Reset Field";
+                    enabled: root.editable && root.has-field-focus;
+                    activated => { form-menu.close(); root.reset-field(); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/file-input.svg");
+                    label: "Import Data...";
+                    enabled: root.editable;
+                    init => {
+                        if (root.menu-from-keyboard) {
+                            self.focus();
+                        }
+                    }
+                    activated => { form-menu.close(); root.import-form-data(); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/file-output.svg");
+                    label: "Export Data...";
+                    activated => { form-menu.close(); root.export-form-data(); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/layers.svg");
+                    label: "Flatten Form";
+                    enabled: root.editable;
+                    activated => { form-menu.close(); root.flatten-form(); }
+                }
+            }
+        }
+    }
+
+    pages-menu := PopupWindow {
+        x: commands.x + commands.width + SidebarMetrics.flyout-gap;
+        y: commands.y + 3 * 34px;
+        width: 240px;
+        MenuSurface {
+            VerticalLayout {
+                padding: 6px;
+                MenuHeading { text: "Chosen pages, or the current page"; x: 8px; }
+                MenuRow {
+                    icon: @image-url("icons/copy-plus.svg");
+                    label: "Duplicate";
+                    init => {
+                        if (root.menu-from-keyboard) {
+                            self.focus();
+                        }
+                    }
+                    activated => { pages-menu.close(); root.page-op(2); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/trash-2.svg");
+                    label: "Delete Pages";
+                    enabled: root.total-pages > 1;
+                    activated => { pages-menu.close(); root.page-op(3); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/arrow-up.svg");
+                    label: "Move Earlier";
+                    enabled: root.total-pages > 1;
+                    activated => { pages-menu.close(); root.page-op(4); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/arrow-down.svg");
+                    label: "Move Later";
+                    enabled: root.total-pages > 1;
+                    activated => { pages-menu.close(); root.page-op(5); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/square-plus.svg");
+                    label: "Insert Blank Page";
+                    activated => { pages-menu.close(); root.page-op(6); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/file-plus.svg");
+                    label: "Insert Pages from File...";
+                    activated => { pages-menu.close(); root.insert-from-file(); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/file-output.svg");
+                    label: "Extract Pages...";
+                    enabled: !root.tool-running;
+                    activated => { pages-menu.close(); root.extract-pages(); }
+                }
+            }
+        }
+    }
+
+    stamp-menu := PopupWindow {
+        x: commands.x + commands.width + SidebarMetrics.flyout-gap;
+        y: commands.y + 6 * 34px + 6px;
+        width: 200px;
+        MenuSurface {
+            VerticalLayout {
+                padding: 6px;
+                MenuRow {
+                    icon: @image-url("icons/stamp.svg");
+                    label: "Watermark...";
+                    init => {
+                        if (root.menu-from-keyboard) {
+                            self.focus();
+                        }
+                    }
+                    activated => { stamp-menu.close(); root.stamp-open(0); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/list-ordered.svg");
+                    label: "Page Numbers...";
+                    activated => { stamp-menu.close(); root.stamp-open(1); }
+                }
+            }
+        }
+    }
+
+    export-menu := PopupWindow {
+        x: commands.x + commands.width + SidebarMetrics.flyout-gap;
+        y: commands.y + 8 * 34px + 6px;
+        width: 200px;
+        MenuSurface {
+            VerticalLayout {
+                padding: 6px;
+                MenuRow {
+                    icon: @image-url("icons/image.svg");
+                    label: "Export as Images...";
+                    init => {
+                        if (root.menu-from-keyboard) {
+                            self.focus();
+                        }
+                    }
+                    activated => { export-menu.close(); root.convert-open(1); }
+                }
+                MenuRow {
+                    icon: @image-url("icons/file-text.svg");
+                    label: "Export as Word...";
+                    enabled: root.editable;
+                    activated => { export-menu.close(); root.export-word(); }
+                }
+            }
+        }
+    }
+}
+
+// The drawer beside the sidebar: page thumbnails (drag to reorder, Ctrl or Shift+click to choose)
+// or the outline.
+export component Drawer inherits Island {
+    in property <int> sidebar-tab;
+    in property <[ThumbRow]> thumbs;
+    in property <[OutlineRow]> outline-rows;
+    in-out property <length> thumb-scroll-y;
+    in property <data-transfer> page-drag-data;
+    in-out property <int> drop-row;
+    in-out property <bool> drop-after;
+    in property <int> pages-chosen;
+    in property <bool> editable;
+    // Where the thumbnail list is in the window, for the bench harness's drags.
+    out property <length> thumb-list-x;
+    out property <length> thumb-list-y;
+    callback thumbs-moved();
+    callback thumb-clicked(int, bool, bool);
+    callback thumb-drag-started(int);
+    callback thumb-dropped(int, bool);
+    callback outline-clicked(int);
+    callback outline-toggled(int);
+
+    clip: true;
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 4px;
+        if root.sidebar-tab == 0 : ListView {
+            vertical-stretch: 1;
+            content-y <=> root.thumb-scroll-y;
+            changed absolute-position => {
+                root.thumb-list-x = self.absolute-position.x;
+                root.thumb-list-y = self.absolute-position.y;
+            }
+            init => {
+                root.thumb-list-x = self.absolute-position.x;
+                root.thumb-list-y = self.absolute-position.y;
+            }
+            changed content-y => { root.thumbs-moved(); }
+            for row[index] in root.thumbs : Rectangle {
+                // Fixed height: Rust derives the rows in view from the scroll position alone
+                // (THUMB_ROW_LOGICAL_PX).
+                height: 232px;
+                border-radius: Theme.radius-control;
+                background: row.selected ? Theme.accent.with-alpha(0.30)
+                    : row.current ? Theme.active : transparent;
+                // Dragging a thumbnail moves its pages; the drop lands before or after the row
+                // under the pointer, which a line shows. The click area is the drag area's
+                // child, so a click still reaches it and a drag starts past the drag threshold.
+                DragArea {
+                    enabled: root.editable;
+                    allow-move: true;
+                    data: root.page-drag-data;
+                    changed dragging => {
+                        if (self.dragging) { root.thumb-drag-started(index); }
+                    }
+                    drag-finished(action) => { root.drop-row = -1; }
+                    DropArea {
+                        enabled: root.editable;
+                        can-drop(event) => {
+                            root.drop-row = index;
+                            root.drop-after = event.position.y > self.height / 2;
+                            return DragAction.move;
+                        }
+                        dropped(event) => {
+                            root.drop-row = -1;
+                            root.thumb-dropped(index, event.position.y > self.height / 2);
+                            return DragAction.move;
+                        }
+                        TouchArea {
+                            property <bool> ctrl;
+                            property <bool> shift;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    self.ctrl = event.modifiers.control;
+                                    self.shift = event.modifiers.shift;
+                                }
+                            }
+                            clicked => { root.thumb-clicked(index, self.ctrl, self.shift); }
+                        }
+                    }
+                }
+                if root.drop-row == index : Rectangle {
+                    y: root.drop-after ? parent.height - 3px : 0px;
+                    height: 3px;
+                    background: Theme.accent;
+                }
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+                    Rectangle {
+                        height: 200px;
+                        border-width: row.has-image ? 0px : 1px;
+                        border-color: Theme.line-strong;
+                        Image {
+                            source: row.image;
+                            image-fit: contain;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                    }
+                    Text {
+                        text: row.label;
+                        horizontal-alignment: center;
+                        font-size: 11px;
+                        color: row.current ? Theme.text : Theme.text-muted;
+                    }
+                }
+            }
+        }
+        if root.sidebar-tab == 0 && root.editable : Text {
+            text: root.pages-chosen > 0 ? root.pages-chosen + " chosen (Ctrl/Shift+click)"
+                : "Current page (Ctrl/Shift+click to choose)";
+            font-size: 11px;
+            color: Theme.text-faint;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        if root.sidebar-tab == 1 : ListView {
+            vertical-stretch: 1;
+            for row[index] in root.outline-rows : Rectangle {
+                height: 26px;
+                border-radius: 4px;
+                background: outline-touch.has-hover ? Theme.hover : transparent;
+                outline-touch := TouchArea {
+                    clicked => { root.outline-clicked(index); }
+                }
+                HorizontalLayout {
+                    padding-left: 4px + row.depth * 14px;
+                    spacing: 4px;
+                    Rectangle {
+                        width: 14px;
+                        if row.expandable : Image {
+                            source: @image-url("icons/chevron-right.svg");
+                            width: 12px;
+                            height: 12px;
+                            colorize: Theme.text-muted;
+                            transform-rotation: row.expanded ? 90deg : 0deg;
+                        }
+                        TouchArea {
+                            enabled: row.expandable;
+                            clicked => { root.outline-toggled(index); }
+                        }
+                    }
+                    Text {
+                        text: row.title;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        font-size: 12px;
+                        color: Theme.text;
+                        opacity: row.enabled ? 1.0 : 0.5;
+                    }
+                }
+            }
+        }
+        if root.sidebar-tab == 1 && root.outline-rows.length == 0 : Text {
+            text: "This document has no outline";
+            color: Theme.text-faint;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-stretch: 1;
+        }
+    }
+}

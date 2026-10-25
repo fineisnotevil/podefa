@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-// The main window: today's layout (menu bar, toolbar, sidebar, canvas, status line), moved
-// out of `main.rs` unchanged apart from its colours, which come from `Theme` (Plan 0007
-// Phase 1).
+// The main window (Plan 0007 Phase 2): its own frame, and islands floating over the canvas - the
+// title row, the sidebar with the three modes, the drawer, search, and the status islands. Every
+// command the menu bar had lives in the island it belongs to (plan §0, question 1).
 
 import { Button, ComboBox, LineEdit, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
 import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView } from "types.slint";
 import { Theme } from "theme.slint";
+import { Island, IconButton } from "widgets.slint";
+import { TitleRow } from "title.slint";
+import { SidebarColumn, Drawer } from "sidebar.slint";
+import { StatusIsland, MessageIsland } from "statusbar.slint";
+import { SearchIsland } from "search.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
 export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView }
@@ -19,11 +24,38 @@ export component MainWindow inherits Window {
         root.apply-theme();
         viewport-keys.focus();
     }
-    background: Theme.surface;
-    min-width: 600px;
-    min-height: 500px;
+    // The window draws its own frame (no system title bar or border), except where Rust turns
+    // this off (macOS keeps its native frame, plan §0 question 4). Every edge resizes it while
+    // it is not maximized.
+    in-out property <bool> own-frame: true;
+    no-frame: root.own-frame;
+    resize-border-width: root.own-frame && !root.maximized ? 6px : 0px;
+    background: Theme.canvas;
+    min-width: 640px;
+    min-height: 660px;
     preferred-width: 900px;
     preferred-height: 700px;
+
+    // The islands' distance from the window's edge: smaller when maximized.
+    property <length> inset: root.maximized || !root.own-frame ? 8px : 12px;
+    property <length> island-gap: 8px;
+    property <length> canvas-top: root.inset + 40px + root.island-gap;
+    property <bool> drawer-shown: root.sidebar-visible && root.total_pages > 0;
+    property <length> drawer-width: 212px;
+    property <length> canvas-left: root.inset + sidebar.width + root.island-gap
+        + (root.drawer-shown ? root.drawer-width + root.island-gap : 0px);
+
+    // The mode (Plan 0007 §4): 0 Read, 1 Edit, 2 Tools. Phase 2 switches the sidebar's commands;
+    // Phase 3 adds the gallery and the transitions. Choosing a tool by its key moves to Edit.
+    in-out property <int> mode: 0;
+    changed tool => {
+        if (root.tool != 0 && root.mode != 1) {
+            root.mode = 1;
+        }
+    }
+    // Shows the tile counters in the status island (when tracing).
+    in-out property <bool> diagnostics: false;
+
 
     in-out property <[TileView]> tiles;
     in-out property <[PageView]> pages;
@@ -215,7 +247,7 @@ export component MainWindow inherits Window {
     // The go-to-page field's text; Rust follows the current page while the field is not
     // being edited.
     in-out property <string> page-input: "";
-    out property <bool> page-field-focused: page-field.has-focus;
+    out property <bool> page-field-focused: status.page-field-focused;
 
     callback prev_page();
     callback next_page();
@@ -227,6 +259,9 @@ export component MainWindow inherits Window {
     callback fit_page();
     // A key on the viewport: text as Slint reports it, plus ctrl and shift; true when handled.
     callback nav_key(string, bool, bool) -> bool;
+    // A key anywhere in the window, before the focused element sees it: the shortcuts that work
+    // from every field (open, save, close, find, sidebar, zoom); true when handled.
+    callback global_key(string, bool, bool) -> bool;
     // Ctrl+wheel: the wheel delta and the cursor, viewport-relative, in logical pixels.
     callback wheel_zoom(length, length, length);
     callback go_to_page(string);
@@ -316,1694 +351,1268 @@ export component MainWindow inherits Window {
     // A drop: open the document it carries.
     callback open_drop(data-transfer);
 
+
     function apply-theme() {
         Palette.color-scheme = root.theme == 1 ? ColorScheme.light
             : root.theme == 2 ? ColorScheme.dark : ColorScheme.unknown;
     }
     changed theme => { root.apply-theme(); }
 
-    MenuBar {
-        Menu {
-            title: "File";
-            MenuItem {
-                title: "Open...";
-                shortcut: @keys(Control + O);
-                activated => { root.open_file(); }
+    global-keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            if (root.global_key(event.text, event.modifiers.control, event.modifiers.shift)) {
+                return accept;
             }
-            Menu {
-                title: "Open Recent";
-                enabled: root.recent-files.length > 0;
-                for path[index] in root.recent-files : MenuItem {
-                    title: path;
-                    activated => { root.open_recent(index); }
-                }
-            }
-            MenuItem {
-                title: "Save";
-                shortcut: @keys(Control + S);
-                enabled: root.editable;
-                activated => { root.save(); }
-            }
-            MenuItem {
-                title: "Save As...";
-                shortcut: @keys(Control + Shift + S);
-                enabled: root.editable;
-                activated => { root.save_as(); }
-            }
-            if root.repaired : MenuItem {
-                title: "Save Repaired Copy...";
-                activated => { root.save_as(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Quit";
-                shortcut: @keys(Control + Q);
-                activated => { root.quit(); }
-            }
-        }
-        Menu {
-            title: "Edit";
-            MenuItem {
-                title: "Undo";
-                shortcut: @keys(Control + Z);
-                enabled: root.can-undo;
-                activated => { root.undo(); }
-            }
-            MenuItem {
-                title: "Redo";
-                shortcut: @keys(Control + Y);
-                enabled: root.can-redo;
-                activated => { root.redo(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Copy";
-                shortcut: @keys(Control + C);
-                activated => { root.copy_selection(); }
-            }
-            MenuItem {
-                title: "Find...";
-                shortcut: @keys(Control + F);
-                activated => { root.find_open(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Delete Annotation";
-                enabled: root.has-annot-selection;
-                activated => { root.delete_annotation(); }
-            }
-        }
-        Menu {
-            title: "Pages";
-            MenuItem {
-                title: "Rotate Left";
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.page_op(0); }
-            }
-            MenuItem {
-                title: "Rotate Right";
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.page_op(1); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Duplicate";
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.page_op(2); }
-            }
-            MenuItem {
-                title: "Delete Pages";
-                enabled: root.editable && root.total_pages > 1;
-                activated => { root.page_op(3); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Move Earlier";
-                enabled: root.editable && root.total_pages > 1;
-                activated => { root.page_op(4); }
-            }
-            MenuItem {
-                title: "Move Later";
-                enabled: root.editable && root.total_pages > 1;
-                activated => { root.page_op(5); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Insert Pages from File...";
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.insert_from_file(); }
-            }
-            MenuItem {
-                title: "Insert Blank Page";
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.page_op(6); }
-            }
-        }
-        Menu {
-            title: "Tools";
-            MenuItem {
-                title: "Merge Files...";
-                enabled: !root.tool-running;
-                activated => { root.merge_open(); }
-            }
-            MenuItem {
-                title: "Split...";
-                enabled: root.editable && !root.tool-running;
-                activated => { root.split_open(); }
-            }
-            MenuItem {
-                title: "Extract Pages...";
-                enabled: root.editable && !root.tool-running;
-                activated => { root.extract_pages(); }
-            }
-            MenuItem {
-                title: "Insert Pages from File...";
-                enabled: root.editable;
-                activated => { root.insert_from_file(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Watermark...";
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.stamp_open(0); }
-            }
-            MenuItem {
-                title: "Page Numbers...";
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.stamp_open(1); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Compress...";
-                enabled: root.editable && !root.tool-running;
-                activated => { root.convert_open(0); }
-            }
-            MenuItem {
-                title: "Export as Images...";
-                enabled: root.total_pages > 0 && !root.tool-running;
-                activated => { root.convert_open(1); }
-            }
-            MenuItem {
-                title: "Images to PDF...";
-                enabled: !root.tool-running;
-                activated => { root.images_to_pdf(); }
-            }
-            if root.word-export : MenuItem {
-                title: "Export as Word...";
-                enabled: root.total_pages > 0 && root.editable && !root.tool-running;
-                activated => { root.export_word(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Crop Pages";
-                checkable: true;
-                checked: root.tool == 7;
-                enabled: root.editable && root.total_pages > 0;
-                activated => { root.crop_tool(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Document Properties...";
-                enabled: root.total_pages > 0;
-                activated => { root.props_open(); }
-            }
-        }
-        Menu {
-            title: "Form";
-            MenuItem {
-                title: "Reset Field";
-                enabled: root.editable && root.has-field-focus;
-                activated => { root.reset_field(); }
-            }
-            MenuItem {
-                title: "Reset Form";
-                enabled: root.editable && root.form-fields;
-                activated => { root.reset_form(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Import Data...";
-                enabled: root.editable && root.form-fields;
-                activated => { root.import_form_data(); }
-            }
-            MenuItem {
-                title: "Export Data...";
-                enabled: root.form-fields;
-                activated => { root.export_form_data(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Flatten Form";
-                enabled: root.editable && root.form-fields;
-                activated => { root.flatten_form(); }
-            }
-        }
-        Menu {
-            title: "View";
-            MenuItem {
-                title: "Sidebar";
-                checkable: true;
-                checked: root.sidebar-visible;
-                shortcut: @keys(F4);
-                activated => { root.toggle_sidebar(); }
-            }
-            MenuItem {
-                title: "Highlight Form Fields";
-                checkable: true;
-                checked: root.field-highlight;
-                activated => { root.toggle_field_highlight(); }
-            }
-            Menu {
-                title: "Theme";
-                MenuItem {
-                    title: "System";
-                    checkable: true;
-                    checked: root.theme == 0;
-                    activated => { root.choose_theme(0); }
-                }
-                MenuItem {
-                    title: "Light";
-                    checkable: true;
-                    checked: root.theme == 1;
-                    activated => { root.choose_theme(1); }
-                }
-                MenuItem {
-                    title: "Dark";
-                    checkable: true;
-                    checked: root.theme == 2;
-                    activated => { root.choose_theme(2); }
-                }
-            }
-        }
-    }
-
-    VerticalLayout {
-        padding: 8px;
-        spacing: 8px;
-
-        // Toolbar
-        HorizontalLayout {
-            spacing: 8px;
-            height: 36px;
-
-            Button {
-                text: "Sidebar";
-                checkable: true;
-                checked: root.sidebar-visible;
-                enabled: root.total_pages > 0;
-                clicked => { root.toggle_sidebar(); }
-            }
-
-            Button {
-                text: "Previous";
-                enabled: root.current_page > 0 && !root.is_loading;
-                clicked => { root.prev_page(); }
-            }
-
-            Button {
-                text: "Next";
-                enabled: root.current_page + 1 < root.total_pages && !root.is_loading;
-                clicked => { root.next_page(); }
-            }
-
-            page-field := LineEdit {
-                width: 64px;
-                enabled: root.total_pages > 0;
-                horizontal-alignment: right;
-                text <=> root.page-input;
-                accepted(text) => {
-                    root.go_to_page(text);
-                    viewport-keys.focus();
-                }
-            }
-
-            Text {
-                text: root.total_pages > 0 ? "of " + root.total_pages : "No pages";
-                vertical-alignment: center;
-                min-width: 60px;
-            }
-
-            Rectangle { horizontal-stretch: 1; }
-
-            Button {
-                text: "- Zoom";
-                enabled: !root.is_loading && root.total_pages > 0;
-                clicked => { root.zoom_out(); }
-            }
-
-            Button {
-                text: "+ Zoom";
-                enabled: !root.is_loading && root.total_pages > 0;
-                clicked => { root.zoom_in(); }
-            }
-
-            Button {
-                text: "Reset (100%)";
-                enabled: !root.is_loading && root.total_pages > 0;
-                clicked => { root.zoom_reset(); }
-            }
-
-            Button {
-                text: "Fit width";
-                enabled: !root.is_loading && root.total_pages > 0;
-                clicked => { root.fit_width(); }
-            }
-
-            Button {
-                text: "Fit page";
-                enabled: !root.is_loading && root.total_pages > 0;
-                clicked => { root.fit_page(); }
-            }
-
-            Text {
-                text: Math.round(root.zoom_percent) + "%";
-                vertical-alignment: center;
-                min-width: 70px;
-            }
+            return reject;
         }
 
-        // The tool strip (Plan 0004, §4.2): with text selected a markup button marks it; with
-        // nothing selected it stays on, so every drag over text marks. Esc goes back to Select.
-        if root.editable : HorizontalLayout {
-            spacing: 6px;
-            height: 30px;
-            Button {
-                text: "Select";
-                primary: root.tool == 0;
-                clicked => { root.choose_tool(0); }
-            }
-            Button {
-                text: "Highlight (H)";
-                primary: root.tool == 1;
-                clicked => { root.choose_tool(1); }
-            }
-            Button {
-                text: "Underline (U)";
-                primary: root.tool == 2;
-                clicked => { root.choose_tool(2); }
-            }
-            Button {
-                text: "Strike-out (K)";
-                primary: root.tool == 3;
-                clicked => { root.choose_tool(3); }
-            }
-            Button {
-                text: "Squiggly";
-                primary: root.tool == 4;
-                clicked => { root.choose_tool(4); }
-            }
-            Button {
-                text: "Note (N)";
-                primary: root.tool == 5;
-                clicked => { root.choose_tool(5); }
-            }
-            Button {
-                text: "Ink (I)";
-                primary: root.tool == 6;
-                clicked => { root.choose_tool(6); }
-            }
-            Rectangle { width: 6px; }
-            for swatch[index] in root.swatches : VerticalLayout {
-                alignment: center;
-                Rectangle {
-                    width: 22px;
-                    height: 22px;
-                    border-radius: 4px;
-                    background: swatch;
-                    border-width: index == root.colour-index ? 2px : 1px;
-                    border-color: index == root.colour-index ? Theme.text : Theme.line-strong;
-                    TouchArea { clicked => { root.choose_colour(index); } }
-                }
-            }
-            Rectangle { width: 6px; }
-            // The Ink tool draws instead of selecting, so its line widths take Delete's place.
-            if root.tool != 6 : Button {
-                text: "Delete";
-                enabled: root.has-annot-selection;
-                clicked => { root.delete_annotation(); }
-            }
-            if root.tool == 6 : HorizontalLayout {
-                spacing: 6px;
-                for line[index] in [1px, 2px, 4px] : VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        width: 22px;
-                        height: 22px;
-                        border-radius: 4px;
-                        border-width: index == root.ink-width-index ? 2px : 1px;
-                        border-color: index == root.ink-width-index ? Theme.text : Theme.line-strong;
-                        Rectangle {
-                            width: 14px;
-                            height: line;
-                            background: Theme.text;
-                        }
-                        TouchArea { clicked => { root.choose_ink_width(index); } }
-                    }
-                }
-            }
-            Rectangle { horizontal-stretch: 1; }
-        }
-
-        // The find bar: Enter / F3 next, Shift+Enter / Shift+F3 previous, Esc closes.
-        if root.find-visible : FocusScope {
-            height: 32px;
-            capture-key-pressed(event) => {
-                if (event.text == Key.Escape) {
-                    root.find_close();
-                    return accept;
-                }
-                if (event.text == Key.Return && event.modifiers.shift) {
-                    root.find_previous();
-                    return accept;
-                }
-                if (event.text == Key.F3) {
-                    if (event.modifiers.shift) { root.find_previous(); } else { root.find_next(); }
+        // Document viewport. The FocusScope takes the navigation keys (Plan 0002, §4.6); it has
+        // focus from startup and takes it back on a click into the page.
+        viewport-keys := FocusScope {
+            x: root.canvas-left;
+            y: root.canvas-top;
+            width: root.width - root.canvas-left;
+            height: root.height - root.canvas-top;
+            key-pressed(event) => {
+                if (root.nav_key(event.text, event.modifiers.control, event.modifiers.shift)) {
                     return accept;
                 }
                 return reject;
             }
-            HorizontalLayout {
-                spacing: 8px;
-                LineEdit {
-                    placeholder-text: "Find  (Enter: next, Shift+Enter: previous)";
-                    text <=> root.find-text;
-                    init => { self.focus(); }
-                    edited(text) => { root.find_changed(text); }
-                    accepted => { root.find_next(); }
+            // Files dropped from other applications (Plan 0003, §3.2): Slint 1.18.1's winit backend
+            // never delivers them, so this is inert until the Slint release carrying
+            // slint-ui/slint#13527, and needs no change then.
+            DropArea {
+                can-drop(event) => {
+                    return root.can_open_drop(event.data) ? DragAction.copy : DragAction.none;
                 }
-                Text {
-                    text: root.find-counter;
-                    vertical-alignment: center;
-                    min-width: 90px;
-                    color: Theme.text;
+                dropped(event) => {
+                    root.open_drop(event.data);
+                    return DragAction.copy;
                 }
-                Button { text: "Previous"; clicked => { root.find_previous(); } }
-                Button { text: "Next"; clicked => { root.find_next(); } }
-                Button { text: "Close"; clicked => { root.find_close(); } }
+                canvas := Rectangle {
+                    background: Theme.canvas;
+
+                    viewport := Flickable {
+                        // A failed open keeps the document that was already showing.
+                        visible: root.total_pages > 0;
+                        content-width: root.canvas-w;
+                        content-height: root.canvas-h;
+                        content-x <=> root.scroll-x;
+                        content-y <=> root.scroll-y;
+                        // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
+                        // except while a long press is selecting or the Ink tool draws.
+                        mouse-drag-pan-enabled: false;
+                        interactive: !root.touch-selecting && root.tool != 6;
+
+                        // These fire on every change, user or programmatic, including each tick of
+                        // the 180 ms wheel animation, which makes them the viewport source of truth.
+                        changed content-x => { root.viewport_moved(); }
+                        changed content-y => { root.viewport_moved(); }
+                        changed width  => { root.view-w = viewport.width;  root.viewport_moved(); }
+                        changed height => { root.view-h = viewport.height; root.viewport_moved(); }
+
+                        // Declared before the tiles so they paint under them: a cell still in flight
+                        // shows its page's base layer, or white paper on a page drawn as one image.
+                        for page in root.pages : Rectangle {
+                            x: page.x; y: page.y; width: page.w; height: page.h;
+                            background: white;
+                            Image {
+                                source: page.image;
+                                width: parent.width; height: parent.height;
+                            }
+                        }
+
+                        for tile in root.tiles : Image {
+                            source: tile.image;
+                            visible: tile.visible;
+                            x: tile.x; y: tile.y; width: tile.w; height: tile.h;
+                        }
+
+                        // Form fields over the tiles, so they show before they are touched; a required
+                        // field has a red edge.
+                        for field in root.field-rects : Rectangle {
+                            visible: root.field-highlight;
+                            x: field.x; y: field.y; width: field.w; height: field.h;
+                            background: rgba(64, 128, 255, 0.16);
+                            border-width: 1px;
+                            border-color: field.required ? rgba(220, 38, 38, 0.85) : rgba(64, 128, 255, 0.5);
+                        }
+
+                        // Search hits over the tiles: page-relative rectangles placed like tiles.
+                        for hit in root.hit-rects : Rectangle {
+                            x: hit.x; y: hit.y; width: hit.w; height: hit.h;
+                            background: hit.current ? #ff8c0080 : #ffd60066;
+                            border-width: hit.current ? 1px : 0px;
+                            border-color: #e65100;
+                        }
+
+                        // The text selection, over the tiles and the search hits.
+                        for sel in root.sel-rects : Rectangle {
+                            x: sel.x; y: sel.y; width: sel.w; height: sel.h;
+                            background: rgba(37, 99, 235, 0.35);
+                        }
+
+                        // The selected annotation's bounds.
+                        for annot in root.annot-sel-rects : Rectangle {
+                            x: annot.x - 2px; y: annot.y - 2px;
+                            width: annot.w + 4px; height: annot.h + 4px;
+                            border-width: 2px;
+                            border-radius: 2px;
+                            border-color: rgba(37, 99, 235, 0.9);
+                        }
+
+                        // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
+                        // children first, so this area - kept over the viewport, not the canvas -
+                        // sees them; without ctrl it rejects them and the Flickable scrolls.
+                        TouchArea {
+                            x: -root.scroll-x; y: -root.scroll-y;
+                            width: viewport.width; height: viewport.height;
+                            scroll-event(event) => {
+                                if (event.modifiers.control) {
+                                    root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                            mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
+                                : root.field-cursor == 1 ? MouseCursor.text
+                                : root.field-cursor == 2 ? MouseCursor.pointer
+                                : root.text-cursor ? MouseCursor.text : MouseCursor.default;
+                            changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
+                            changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    viewport-keys.focus();
+                                }
+                                if (event.button == PointerEventButton.left || event.touch-finger-id != 0) {
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.select_pointer(0, self.mouse-x, self.mouse-y, event.modifiers.shift, event.touch-finger-id != 0);
+                                    } else if (event.kind == PointerEventKind.up) {
+                                        root.select_pointer(1, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                    } else if (event.kind == PointerEventKind.cancel) {
+                                        root.select_pointer(4, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                    }
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.select_pointer(2, self.mouse-x, self.mouse-y, false, false);
+                                }
+                            }
+                            double-clicked => {
+                                root.select_pointer(3, self.mouse-x, self.mouse-y, false, false);
+                            }
+                        }
+                    }
+
+                    // The document scrollbar, over the right edge of the viewport.
+                    Rectangle {
+                        x: parent.width - 12px;
+                        width: 12px;
+                        visible: root.sb-visible;
+                        background: Theme.scroll-track;
+                        Rectangle {
+                            y: root.sb-thumb-y;
+                            height: root.sb-thumb-h;
+                            x: 2px;
+                            width: parent.width - 4px;
+                            border-radius: 4px;
+                            background: thumb-area.pressed ? Theme.scroll-thumb-pressed : Theme.scroll-thumb;
+                        }
+                        thumb-area := TouchArea {
+                            // Where in the thumb it was grabbed, so a drag does not snap its top to
+                            // the cursor.
+                            property <length> grab: 0px;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    if (self.mouse-y >= root.sb-thumb-y && self.mouse-y < root.sb-thumb-y + root.sb-thumb-h) {
+                                        self.grab = self.mouse-y - root.sb-thumb-y;
+                                    } else {
+                                        self.grab = root.sb-thumb-h / 2;
+                                        root.scrollbar_moved(self.mouse-y - self.grab, self.height);
+                                    }
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.scrollbar_moved(self.mouse-y - self.grab, self.height);
+                                }
+                            }
+                        }
+                    }
+
+                    // The ink stroke being drawn, over the page until MuPDF draws it in the tiles.
+                    if root.ink-commands != "" : Rectangle {
+                        x: viewport.x;
+                        y: viewport.y;
+                        width: viewport.width;
+                        height: viewport.height;
+                        clip: true;
+                        Path {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            commands: root.ink-commands;
+                            stroke: root.ink-colour;
+                            stroke-width: root.ink-stroke-width;
+                            stroke-line-cap: round;
+                            stroke-line-join: round;
+                            // Unscaled: the commands are in this element's logical pixels.
+                            fit: preserve;
+                        }
+                    }
+
+                    // A note's text while the pointer rests on it.
+                    if root.note-hover-visible && !root.note-editor-visible : Rectangle {
+                        x: root.note-hover-x;
+                        y: root.note-hover-y;
+                        width: min(280px, hover-text.preferred-width + 16px);
+                        height: hover-text.preferred-height + 12px;
+                        background: #fff8c4;
+                        border-width: 1px;
+                        border-color: #c9b458;
+                        border-radius: 4px;
+                        hover-text := Text {
+                            x: 8px;
+                            y: 6px;
+                            width: parent.width - 16px;
+                            text: root.note-hover-text;
+                            wrap: word-wrap;
+                            color: #3b3000;
+                        }
+                    }
+
+                    // The field with the keyboard focus (Plan 0006 Phase 2): Space or Enter sets a check
+                    // box or radio button, Tab moves on.
+                    if root.field-focus-visible && !root.field-editor-visible && !root.field-choices-visible : Rectangle {
+                        x: root.field-focus-x - 2px;
+                        y: root.field-focus-y - 2px;
+                        width: root.field-focus-w + 4px;
+                        height: root.field-focus-h + 4px;
+                        border-width: 2px;
+                        border-radius: 2px;
+                        border-color: Theme.accent;
+                    }
+
+                    // The editor over a text field (Plan 0006): Enter (Ctrl+Enter in a multi-line field)
+                    // or Tab keeps the text, Esc drops it; a click elsewhere keeps it too.
+                    if root.field-editor-visible : FocusScope {
+                        x: root.field-editor-x;
+                        y: root.field-editor-y;
+                        width: root.field-editor-w;
+                        height: root.field-editor-h;
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.field_cancel();
+                                return accept;
+                            }
+                            if (event.text == Key.Tab || event.text == Key.Backtab) {
+                                root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
+                                return accept;
+                            }
+                            if (event.text == Key.Return
+                                && (!root.field-editor-multiline || event.modifiers.control)) {
+                                root.field_commit();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: #e8f0ff;
+                            border-width: 1px;
+                            border-color: Theme.accent;
+                            clip: true;
+                            TextInput {
+                                x: 2px;
+                                y: root.field-editor-multiline ? 1px : 0px;
+                                width: parent.width - 4px;
+                                height: parent.height - (root.field-editor-multiline ? 2px : 0px);
+                                text <=> root.field-editor-text;
+                                font-size: root.field-editor-font-size;
+                                single-line: !root.field-editor-multiline;
+                                wrap: root.field-editor-multiline ? TextWrap.word-wrap : TextWrap.no-wrap;
+                                vertical-alignment: root.field-editor-multiline
+                                    ? TextVerticalAlignment.top : TextVerticalAlignment.center;
+                                input-type: root.field-editor-password ? InputType.password : InputType.text;
+                                // A comb field's characters are drawn in their boxes below.
+                                color: root.field-editor-cells > 0 ? transparent : #000000;
+                                selection-background-color: root.field-editor-cells > 0
+                                    ? transparent : Theme.selection;
+                                edited => { root.field_edited(self.text); }
+                                init => {
+                                    self.focus();
+                                    self.select-all();
+                                }
+                                property <int> serial: root.field-editor-serial;
+                                changed serial => {
+                                    self.focus();
+                                    self.select-all();
+                                }
+                            }
+                            // A comb field: one character in each box, the next box to fill outlined.
+                            if root.field-editor-cells > 0 : Rectangle {
+                                property <length> cell: self.width / root.field-editor-cells;
+                                for i in root.field-editor-cells - 1 : Rectangle {
+                                    x: (i + 1) * parent.cell;
+                                    width: 1px;
+                                    background: rgba(37, 99, 235, 0.25);
+                                }
+                                for ch[i] in root.field-editor-chars : Text {
+                                    x: i * parent.cell;
+                                    width: parent.cell;
+                                    height: parent.height;
+                                    text: ch;
+                                    font-size: root.field-editor-font-size;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    color: #000000;
+                                }
+                                Rectangle {
+                                    x: min(root.field-editor-chars.length, root.field-editor-cells - 1) * parent.cell;
+                                    width: parent.cell;
+                                    border-width: 2px;
+                                    border-color: Theme.accent;
+                                }
+                            }
+                        }
+                    }
+
+                    // A choice field's options, under the field: a click chooses, Esc closes.
+                    if root.field-choices-visible : FocusScope {
+                        x: root.field-choices-x;
+                        y: root.field-choices-y;
+                        width: root.field-choices-w;
+                        height: min(8, root.field-choices.length) * 24px + 4px;
+                        init => {
+                            if (!root.field-editor-visible) {
+                                self.focus();
+                            }
+                        }
+                        property <int> serial: root.field-editor-serial;
+                        changed serial => {
+                            if (!root.field-editor-visible) {
+                                self.focus();
+                            }
+                        }
+                        // Up and Down move through the options, Space chooses (ticks, in a multi-select
+                        // list), Enter chooses or keeps the ticks, Tab keeps them and moves on.
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.field_cancel();
+                                return accept;
+                            }
+                            if (event.text == Key.Tab || event.text == Key.Backtab) {
+                                root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
+                                return accept;
+                            }
+                            if (root.field-editor-visible) {
+                                return reject;
+                            }
+                            if (event.text == Key.UpArrow) {
+                                root.field-choice-selected = max(0, root.field-choice-selected - 1);
+                                return accept;
+                            }
+                            if (event.text == Key.DownArrow) {
+                                root.field-choice-selected = min(root.field-choices.length - 1, root.field-choice-selected + 1);
+                                return accept;
+                            }
+                            if (event.text == " " || (event.text == Key.Return && !root.field-choices-multi)) {
+                                root.field_choose(root.field-choice-selected);
+                                return accept;
+                            }
+                            if (event.text == Key.Return) {
+                                root.field_commit();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            drop-shadow-blur: 6px;
+                            drop-shadow-color: Theme.shadow;
+                            ListView {
+                                x: 2px;
+                                y: 2px;
+                                width: parent.width - 4px;
+                                height: parent.height - 4px;
+                                for label[index] in root.field-choices : Rectangle {
+                                    property <bool> chosen: root.field-choices-multi
+                                        ? root.field-choice-marks[index] : index == root.field-choice-selected;
+                                    height: 24px;
+                                    background: self.chosen ? Theme.selection : transparent;
+                                    // In a multi-select list the keyboard's place is outlined.
+                                    border-width: root.field-choices-multi && index == root.field-choice-selected ? 1px : 0px;
+                                    border-color: Theme.accent;
+                                    Text {
+                                        x: 6px;
+                                        width: 14px;
+                                        visible: root.field-choices-multi;
+                                        text: root.field-choice-marks[index] ? "✓" : "";
+                                        vertical-alignment: center;
+                                        color: parent.chosen ? Theme.selection-text : Theme.text;
+                                    }
+                                    Text {
+                                        x: root.field-choices-multi ? 22px : 6px;
+                                        width: parent.width - self.x - 6px;
+                                        text: label;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        color: parent.chosen ? Theme.selection-text : Theme.text;
+                                    }
+                                    TouchArea { clicked => { root.field_choose(index); } }
+                                }
+                            }
+                        }
+                    }
+
+                    // The note editor: Ctrl+Enter or Save keeps the text, Esc or Cancel drops it.
+                    if root.note-editor-visible : FocusScope {
+                        x: root.note-editor-x;
+                        y: root.note-editor-y;
+                        width: 280px;
+                        height: 170px;
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.note_cancel();
+                                return accept;
+                            }
+                            if (event.text == Key.Return && event.modifiers.control) {
+                                root.note_save();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 6px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 6px;
+                                TextEdit {
+                                    text <=> root.note-text;
+                                    wrap: word-wrap;
+                                    init => { self.focus(); }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Text {
+                                        text: "Ctrl+Enter";
+                                        color: Theme.text;
+                                        opacity: 0.6;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Cancel"; clicked => { root.note_cancel(); } }
+                                    Button { text: "Save"; primary: true; clicked => { root.note_save(); } }
+                                }
+                            }
+                        }
+                    }
+
+                    // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
+                    // document; the open one can be among them, as it is now.
+                    if root.merge-visible : FocusScope {
+                        x: (parent.width - self.width) / 2;
+                        y: 16px;
+                        width: min(parent.width - 32px, 460px);
+                        height: min(parent.height - 32px, 360px);
+                        init => { self.focus(); }
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.merge_close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 8px;
+                                Text {
+                                    text: root.merge-images ? "Images to PDF - one page each, in this order"
+                                        : "Merge files - in this order";
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                ListView {
+                                    vertical-stretch: 1;
+                                    for name[index] in root.merge-files : Rectangle {
+                                        height: 26px;
+                                        background: index == root.merge-selected
+                                            ? Theme.selection : transparent;
+                                        Text {
+                                            x: 6px;
+                                            text: (index + 1) + ". " + name;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                            color: index == root.merge-selected
+                                                ? Theme.selection-text : Theme.text;
+                                        }
+                                        TouchArea { clicked => { root.merge-selected = index; } }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Button {
+                                        text: root.merge-images ? "Add images..." : "Add files...";
+                                        clicked => { root.merge_add(); }
+                                    }
+                                    if !root.merge-images : Button {
+                                        text: "Add open document";
+                                        enabled: root.total_pages > 0;
+                                        clicked => { root.merge_add_current(); }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Button {
+                                        text: "Up";
+                                        enabled: root.merge-selected > 0;
+                                        clicked => { root.merge_move(-1); }
+                                    }
+                                    Button {
+                                        text: "Down";
+                                        enabled: root.merge-selected >= 0
+                                            && root.merge-selected + 1 < root.merge-files.length;
+                                        clicked => { root.merge_move(1); }
+                                    }
+                                    Button {
+                                        text: "Remove";
+                                        enabled: root.merge-selected >= 0;
+                                        clicked => { root.merge_remove(); }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Cancel"; clicked => { root.merge_close(); } }
+                                    Button {
+                                        text: root.merge-images ? "Make PDF..." : "Merge...";
+                                        primary: true;
+                                        enabled: root.merge-files.length >= 1 && !root.tool-running;
+                                        clicked => { root.merge_run(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Split: the open document, as it is now, into files of N pages or by ranges.
+                    if root.split-visible : FocusScope {
+                        x: (parent.width - self.width) / 2;
+                        y: 16px;
+                        width: min(parent.width - 32px, 420px);
+                        height: 220px;
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.split_close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 8px;
+                                Text {
+                                    text: "Split into files";
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Button {
+                                        text: "Every";
+                                        checkable: true;
+                                        checked: root.split-mode == 0;
+                                        clicked => { root.split-mode = 0; }
+                                    }
+                                    LineEdit {
+                                        width: 60px;
+                                        text <=> root.split-every;
+                                        enabled: root.split-mode == 0;
+                                    }
+                                    Text {
+                                        text: "pages";
+                                        vertical-alignment: center;
+                                        color: Theme.text;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Button {
+                                        text: "Ranges";
+                                        checkable: true;
+                                        checked: root.split-mode == 1;
+                                        clicked => { root.split-mode = 1; }
+                                    }
+                                    LineEdit {
+                                        placeholder-text: "1-3, 4, 5-";
+                                        text <=> root.split-ranges;
+                                        enabled: root.split-mode == 1;
+                                    }
+                                }
+                                Text {
+                                    text: root.split-error;
+                                    color: Theme.danger;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Cancel"; clicked => { root.split_close(); } }
+                                    Button {
+                                        text: "Split...";
+                                        primary: true;
+                                        enabled: !root.tool-running;
+                                        clicked => { root.split_run(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Document Properties: the fields readers show, and what else the file says.
+                    // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
+                    if root.stamp-visible : FocusScope {
+                        x: (parent.width - self.width) / 2;
+                        y: 16px;
+                        width: min(parent.width - 32px, 440px);
+                        height: root.stamp-mode == 0 ? 300px : 330px;
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.stamp_close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 6px;
+                                Text {
+                                    text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                if root.stamp-mode == 0 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
+                                }
+                                if root.stamp-mode == 0 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
+                                    Button {
+                                        text: "Diagonal";
+                                        checkable: true;
+                                        checked: root.stamp-diagonal;
+                                        clicked => { root.stamp-diagonal = true; }
+                                    }
+                                    Button {
+                                        text: "Horizontal";
+                                        checkable: true;
+                                        checked: !root.stamp-diagonal;
+                                        clicked => { root.stamp-diagonal = false; }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                if root.stamp-mode == 0 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Theme.text; }
+                                    Slider {
+                                        minimum: 5;
+                                        maximum: 100;
+                                        value <=> root.stamp-opacity;
+                                    }
+                                    Text {
+                                        width: 40px;
+                                        text: round(root.stamp-opacity) + "%";
+                                        vertical-alignment: center;
+                                        color: Theme.text;
+                                    }
+                                }
+                                if root.stamp-mode == 1 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit {
+                                        text <=> root.stamp-format;
+                                        placeholder-text: "{n} / {total}";
+                                        init => { self.focus(); }
+                                    }
+                                }
+                                if root.stamp-mode == 1 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit { width: 70px; text <=> root.stamp-first; }
+                                    Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit { width: 70px; text <=> root.stamp-size; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                if root.stamp-mode == 1 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Position"; vertical-alignment: center; color: Theme.text; }
+                                    ComboBox {
+                                        model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
+                                        current-index <=> root.stamp-corner;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Theme.text; }
+                                    ComboBox {
+                                        model: ["Grey", "Red", "Blue", "Black"];
+                                        current-index <=> root.stamp-colour;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit {
+                                        text <=> root.stamp-pages;
+                                        placeholder-text: "All, or 1-3, 5, 8-";
+                                    }
+                                }
+                                Text {
+                                    vertical-stretch: 1;
+                                    text: root.stamp-error;
+                                    color: Theme.danger;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Cancel"; clicked => { root.stamp_close(); } }
+                                    Button {
+                                        text: "Apply";
+                                        primary: true;
+                                        clicked => { root.stamp_apply(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Compress or export as images (Plan 0005 Phase 4): new files from the document as
+                    // it is now.
+                    if root.convert-visible : FocusScope {
+                        x: (parent.width - self.width) / 2;
+                        y: 16px;
+                        width: min(parent.width - 32px, 420px);
+                        height: root.convert-mode == 0 ? 170px : 230px;
+                        init => { self.focus(); }
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.convert_close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 6px;
+                                Text {
+                                    text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                if root.convert-mode == 0 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Theme.text; }
+                                    ComboBox {
+                                        model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
+                                        current-index <=> root.convert-preset;
+                                    }
+                                }
+                                if root.convert-mode == 1 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                                    ComboBox {
+                                        model: ["PNG", "JPEG"];
+                                        current-index <=> root.convert-format;
+                                    }
+                                    Text { text: "Resolution"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit { width: 70px; text <=> root.convert-dpi; }
+                                    Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
+                                }
+                                if root.convert-mode == 1 : HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit {
+                                        text <=> root.convert-pages;
+                                        placeholder-text: "All, or 1-3, 5, 8-";
+                                    }
+                                }
+                                Text {
+                                    vertical-stretch: 1;
+                                    text: root.convert-error;
+                                    color: Theme.danger;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Cancel"; clicked => { root.convert_close(); } }
+                                    Button {
+                                        text: root.convert-mode == 0 ? "Compress..." : "Export...";
+                                        primary: true;
+                                        enabled: !root.tool-running;
+                                        clicked => { root.convert_run(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Crop: the rectangle the Crop tool drew, applied to its page or to every page.
+                    if root.crop-visible : FocusScope {
+                        x: (parent.width - self.width) / 2;
+                        y: 16px;
+                        width: min(parent.width - 32px, 380px);
+                        height: 96px;
+                        init => { self.focus(); }
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.crop_cancel();
+                                return accept;
+                            }
+                            if (event.text == Key.Return) {
+                                root.crop_apply(false);
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 8px;
+                                Text {
+                                    text: "Crop to the drawn area (" + root.crop-size + ")";
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
+                                    Button { text: "All pages"; clicked => { root.crop_apply(true); } }
+                                    Button {
+                                        text: "This page";
+                                        primary: true;
+                                        clicked => { root.crop_apply(false); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.props-visible : FocusScope {
+                        x: (parent.width - self.width) / 2;
+                        y: 16px;
+                        width: min(parent.width - 32px, 460px);
+                        height: min(parent.height - 32px, 380px);
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.props_close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 6px;
+                                Text {
+                                    text: "Document properties";
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit {
+                                        text <=> root.props-title;
+                                        read-only: !root.editable;
+                                        init => { self.focus(); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit { text <=> root.props-author; read-only: !root.editable; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit { text <=> root.props-subject; read-only: !root.editable; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 30px;
+                                    Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
+                                    LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
+                                }
+                                Text {
+                                    vertical-stretch: 1;
+                                    text: root.props-info;
+                                    wrap: word-wrap;
+                                    font-size: 12px;
+                                    color: Theme.text;
+                                    opacity: 0.75;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Close"; clicked => { root.props_close(); } }
+                                    if root.editable : Button {
+                                        text: "Save";
+                                        primary: true;
+                                        clicked => { root.props_save(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+
+                    // The selected annotation's colours and Delete, over its top edge.
+                    if root.has-annot-selection && root.annot-sel-rects.length > 0 && root.tool != 6 : Island {
+                        property <HitView> first: root.annot-sel-rects[0];
+                        width: self.preferred-width;
+                        height: self.preferred-height;
+                        x: max(4px, min(canvas.width - self.width - 16px, self.first.x + root.scroll-x));
+                        y: self.first.y + root.scroll-y > self.height + 12px
+                            ? self.first.y + root.scroll-y - self.height - 8px
+                            : self.first.y + self.first.h + root.scroll-y + 8px;
+                        HorizontalLayout {
+                            padding: 4px;
+                            padding-left: 8px;
+                            spacing: 6px;
+                            for swatch[index] in root.swatches : VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    background: swatch;
+                                    border-width: index == root.colour-index ? 2px : 1px;
+                                    border-color: index == root.colour-index ? Theme.text : Theme.line-strong;
+                                    TouchArea { clicked => { root.choose_colour(index); } }
+                                }
+                            }
+                            Rectangle { width: 1px; background: Theme.line-strong; }
+                            IconButton {
+                                width: 28px;
+                                height: 28px;
+                                icon: @image-url("icons/trash-2.svg");
+                                icon-size: 14px;
+                                tip: "Delete (Delete)";
+                                danger: true;
+                                clicked => { root.delete_annotation(); }
+                            }
+                        }
+                    }
+
+                    // Reset Field, beside the field with the keyboard focus (concept step 37).
+                    if root.editable && root.has-field-focus && (root.field-focus-visible || root.field-editor-visible) : IconButton {
+                        property <bool> over-editor: root.field-editor-visible;
+                        x: (self.over-editor ? root.field-editor-x + root.field-editor-w : root.field-focus-x + root.field-focus-w) + 6px;
+                        y: self.over-editor ? root.field-editor-y : root.field-focus-y;
+                        width: 24px;
+                        height: 24px;
+                        icon: @image-url("icons/eraser.svg");
+                        icon-size: 13px;
+                        tip: "Reset Field";
+                        clicked => { root.reset_field(); }
+                    }
+
+                    if (root.total_pages == 0 && !root.has_error) : VerticalLayout {
+                        alignment: center;
+                        spacing: 12px;
+                        Text {
+                            text: "Open a PDF to start";
+                            color: Theme.text-muted;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            Button {
+                                text: "Open a File...";
+                                clicked => { root.open_file(); }
+                            }
+                        }
+                        Text {
+                            text: "or press Ctrl+O";
+                            color: Theme.text-faint;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
             }
         }
 
-        // Error message banner
-        if (root.has_error) : Rectangle {
+        title-row := TitleRow {
+            x: root.inset;
+            y: root.inset;
+            width: root.width - 2 * root.inset;
+            own-frame: root.own-frame;
+            maximized: root.maximized;
+            doc-title: root.doc-title;
+            dirty: root.dirty;
+            editable: root.editable;
+            repaired: root.repaired;
+            can-undo: root.can-undo;
+            can-redo: root.can-redo;
+            recent-files: root.recent-files;
+            theme: root.theme;
+            open-file => { root.open_file(); }
+            open-recent(index) => { root.open_recent(index); }
+            save => { root.save(); }
+            save-as => { root.save_as(); }
+            undo => { root.undo(); }
+            redo => { root.redo(); }
+            choose-theme(index) => { root.choose_theme(index); }
+            minimize => { root.minimized = true; }
+            toggle-maximize => { root.maximized = !root.maximized; }
+            close => { root.quit(); }
+        }
+
+        sidebar := SidebarColumn {
+            x: root.inset;
+            y: root.canvas-top;
+            height: root.height - root.canvas-top - root.inset;
+            mode <=> root.mode;
+            editable: root.editable;
+            total-pages: root.total_pages;
+            tool-running: root.tool-running;
+            tool: root.tool;
+            colour-index: root.colour-index;
+            swatches: root.swatches;
+            ink-width-index: root.ink-width-index;
+            sidebar-visible: root.sidebar-visible;
+            sidebar-tab: root.sidebar-tab;
+            find-visible: root.find-visible;
+            field-highlight: root.field-highlight;
+            form-fields: root.form-fields;
+            has-field-focus: root.has-field-focus;
+            word-export: root.word-export;
+            choose-tool(tool) => { root.choose_tool(tool); }
+            choose-colour(index) => { root.choose_colour(index); }
+            choose-ink-width(index) => { root.choose_ink_width(index); }
+            show-drawer(tab) => {
+                if (root.sidebar-visible && root.sidebar-tab == tab) {
+                    root.toggle_sidebar();
+                } else {
+                    if (root.sidebar-tab != tab) {
+                        root.sidebar-tab = tab;
+                        root.sidebar_tab_changed();
+                    }
+                    if (!root.sidebar-visible) {
+                        root.toggle_sidebar();
+                    }
+                }
+            }
+            find-open => { root.find_open(); }
+            page-op(op) => { root.page_op(op); }
+            crop-tool => { root.crop_tool(); }
+            toggle-field-highlight => { root.toggle_field_highlight(); }
+            reset-field => { root.reset_field(); }
+            reset-form => { root.reset_form(); }
+            import-form-data => { root.import_form_data(); }
+            export-form-data => { root.export_form_data(); }
+            flatten-form => { root.flatten_form(); }
+            merge-open => { root.merge_open(); }
+            split-open => { root.split_open(); }
+            extract-pages => { root.extract_pages(); }
+            insert-from-file => { root.insert_from_file(); }
+            stamp-open(mode) => { root.stamp_open(mode); }
+            convert-open(mode) => { root.convert_open(mode); }
+            images-to-pdf => { root.images_to_pdf(); }
+            export-word => { root.export_word(); }
+            props-open => { root.props_open(); }
+        }
+
+        if root.drawer-shown : Drawer {
+            x: root.inset + sidebar.width + root.island-gap;
+            y: root.canvas-top;
+            width: root.drawer-width;
+            height: root.height - root.canvas-top - root.inset;
+            sidebar-tab: root.sidebar-tab;
+            thumbs: root.thumbs;
+            outline-rows: root.outline-rows;
+            thumb-scroll-y <=> root.thumb-scroll-y;
+            page-drag-data: root.page-drag-data;
+            drop-row <=> root.drop-row;
+            drop-after <=> root.drop-after;
+            pages-chosen: root.pages-chosen;
+            editable: root.editable;
+            changed thumb-list-x => { root.thumb-list-x = self.thumb-list-x; }
+            changed thumb-list-y => { root.thumb-list-y = self.thumb-list-y; }
+            thumbs-moved => { root.thumbs_moved(); }
+            thumb-clicked(index, ctrl, shift) => { root.thumb_clicked(index, ctrl, shift); }
+            thumb-drag-started(index) => { root.thumb_drag_started(index); }
+            thumb-dropped(index, after) => { root.thumb_dropped(index, after); }
+            outline-clicked(index) => { root.outline_clicked(index); }
+            outline-toggled(index) => { root.outline_toggled(index); }
+        }
+
+        // The search island, under the title row.
+        if root.find-visible : SearchIsland {
+            width: self.preferred-width;
+            height: self.preferred-height;
+            x: root.canvas-left + (root.width - root.canvas-left - self.width) / 2;
+            y: root.canvas-top + root.island-gap;
+            find-text <=> root.find-text;
+            find-counter: root.find-counter;
+            find-changed(text) => { root.find_changed(text); }
+            find-next => { root.find_next(); }
+            find-previous => { root.find_previous(); }
+            find-close => { root.find_close(); }
+        }
+
+        // An error, under the title row (and the search island).
+        if root.has_error : Rectangle {
+            x: root.canvas-left + (root.width - root.canvas-left - self.width) / 2;
+            y: root.canvas-top + root.island-gap + (root.find-visible ? 48px : 0px);
+            width: min(560px, root.width - root.canvas-left - 32px);
+            height: 36px;
             background: Theme.danger-surface;
             border-color: Theme.danger-line;
             border-width: 1px;
-            border-radius: 4px;
-            height: 40px;
-
+            border-radius: Theme.radius-island;
             Text {
+                x: 12px;
+                width: parent.width - 24px;
                 text: root.error_text;
                 color: Theme.danger-text;
+                font-size: 12px;
                 vertical-alignment: center;
                 horizontal-alignment: center;
                 overflow: elide;
             }
         }
 
-        HorizontalLayout {
-          spacing: 8px;
-          vertical-stretch: 1;
-
-          if root.sidebar-visible && root.total_pages > 0 : Rectangle {
-            width: 196px;
-            border-width: 1px;
-            border-color: Theme.line-strong;
-            VerticalLayout {
-                padding: 4px;
-                spacing: 4px;
-                HorizontalLayout {
-                    spacing: 4px;
-                    height: 30px;
-                    Button {
-                        text: "Pages";
-                        checkable: true;
-                        checked: root.sidebar-tab == 0;
-                        clicked => { root.sidebar-tab = 0; root.sidebar_tab_changed(); }
-                    }
-                    Button {
-                        text: "Outline";
-                        checkable: true;
-                        checked: root.sidebar-tab == 1;
-                        clicked => { root.sidebar-tab = 1; root.sidebar_tab_changed(); }
-                    }
-                }
-                // Page operations (Plan 0005 Phase 1): on the chosen thumbnails, or on the
-                // current page when none is chosen.
-                if root.sidebar-tab == 0 && root.editable : VerticalLayout {
-                    spacing: 4px;
-                    HorizontalLayout {
-                        spacing: 4px;
-                        height: 28px;
-                        Button { text: "Rotate L"; clicked => { root.page_op(0); } }
-                        Button { text: "Rotate R"; clicked => { root.page_op(1); } }
-                    }
-                    HorizontalLayout {
-                        spacing: 4px;
-                        height: 28px;
-                        Button { text: "Duplicate"; clicked => { root.page_op(2); } }
-                        Button {
-                            text: "Delete";
-                            enabled: root.total_pages > 1;
-                            clicked => { root.page_op(3); }
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 4px;
-                        height: 28px;
-                        Button { text: "Up"; clicked => { root.page_op(4); } }
-                        Button { text: "Down"; clicked => { root.page_op(5); } }
-                        Button { text: "Blank"; clicked => { root.page_op(6); } }
-                    }
-                    Text {
-                        text: root.pages-chosen > 0 ? root.pages-chosen + " chosen (Ctrl/Shift+click)"
-                            : "Current page (Ctrl/Shift+click to choose)";
-                        font-size: 11px;
-                        color: Theme.text;
-                        opacity: 0.6;
-                        overflow: elide;
-                    }
-                }
-                if root.sidebar-tab == 0 : ListView {
-                    vertical-stretch: 1;
-                    content-y <=> root.thumb-scroll-y;
-                    changed absolute-position => {
-                        root.thumb-list-x = self.absolute-position.x;
-                        root.thumb-list-y = self.absolute-position.y;
-                    }
-                    init => {
-                        root.thumb-list-x = self.absolute-position.x;
-                        root.thumb-list-y = self.absolute-position.y;
-                    }
-                    changed content-y => { root.thumbs_moved(); }
-                    for row[index] in root.thumbs : Rectangle {
-                        // Fixed height: Rust derives the rows in view from the scroll
-                        // position alone (THUMB_ROW_LOGICAL_PX).
-                        height: 232px;
-                        background: row.selected ? Theme.accent.with-alpha(0.35)
-                            : row.current ? Theme.selection : transparent;
-                        // Dragging a thumbnail moves its pages; the drop lands before or after
-                        // the row under the pointer, which a line shows. The click area is the
-                        // drag area's child, so a click still reaches it and a drag starts
-                        // past the drag threshold.
-                        DragArea {
-                            enabled: root.editable;
-                            allow-move: true;
-                            data: root.page-drag-data;
-                            changed dragging => {
-                                if (self.dragging) { root.thumb_drag_started(index); }
-                            }
-                            drag-finished(action) => { root.drop-row = -1; }
-                            DropArea {
-                                enabled: root.editable;
-                                can-drop(event) => {
-                                    root.drop-row = index;
-                                    root.drop-after = event.position.y > self.height / 2;
-                                    return DragAction.move;
-                                }
-                                dropped(event) => {
-                                    root.drop-row = -1;
-                                    root.thumb_dropped(index, event.position.y > self.height / 2);
-                                    return DragAction.move;
-                                }
-                                TouchArea {
-                                    property <bool> ctrl;
-                                    property <bool> shift;
-                                    pointer-event(event) => {
-                                        if (event.kind == PointerEventKind.down) {
-                                            self.ctrl = event.modifiers.control;
-                                            self.shift = event.modifiers.shift;
-                                        }
-                                    }
-                                    clicked => { root.thumb_clicked(index, self.ctrl, self.shift); }
-                                }
-                            }
-                        }
-                        if root.drop-row == index : Rectangle {
-                            y: root.drop-after ? parent.height - 3px : 0px;
-                            height: 3px;
-                            background: Theme.accent;
-                        }
-                        VerticalLayout {
-                            padding: 6px;
-                            spacing: 4px;
-                            Rectangle {
-                                height: 200px;
-                                border-width: row.has-image ? 0px : 1px;
-                                border-color: Theme.line-strong;
-                                Image {
-                                    source: row.image;
-                                    image-fit: contain;
-                                    width: parent.width;
-                                    height: parent.height;
-                                }
-                            }
-                            Text {
-                                text: row.label;
-                                horizontal-alignment: center;
-                                color: row.current ? Theme.selection-text : Theme.text;
-                            }
-                        }
-                    }
-                }
-                if root.sidebar-tab == 1 : ListView {
-                    vertical-stretch: 1;
-                    for row[index] in root.outline-rows : Rectangle {
-                        height: 26px;
-                        TouchArea {
-                            clicked => { root.outline_clicked(index); }
-                        }
-                        HorizontalLayout {
-                            padding-left: 4px + row.depth * 14px;
-                            spacing: 4px;
-                            Rectangle {
-                                width: 14px;
-                                Text {
-                                    text: row.expandable ? (row.expanded ? "v" : ">") : "";
-                                    color: Theme.text;
-                                    vertical-alignment: center;
-                                }
-                                TouchArea {
-                                    enabled: row.expandable;
-                                    clicked => { root.outline_toggled(index); }
-                                }
-                            }
-                            Text {
-                                text: row.title;
-                                overflow: elide;
-                                vertical-alignment: center;
-                                color: Theme.text;
-                                opacity: row.enabled ? 1.0 : 0.5;
-                            }
-                        }
-                    }
-                }
-                if root.sidebar-tab == 1 && root.outline-rows.length == 0 : Text {
-                    text: "This document has no outline";
-                    color: Theme.text;
-                    opacity: 0.6;
-                    horizontal-alignment: center;
-                    vertical-stretch: 1;
-                }
+        status := StatusIsland {
+            width: self.preferred-width;
+            height: self.preferred-height;
+            // Clear of the scroll bar at the window's right edge.
+            x: root.width - self.width - max(root.inset, 12px) - 8px;
+            y: root.height - self.height - root.inset;
+            current-page: root.current_page;
+            total-pages: root.total_pages;
+            is-loading: root.is_loading;
+            zoom-percent: root.zoom_percent;
+            page-input <=> root.page-input;
+            prev-page => { root.prev_page(); }
+            next-page => { root.next_page(); }
+            go-to-page(text) => {
+                root.go_to_page(text);
+                viewport-keys.focus();
             }
-          }
-
-        // Document viewport. The FocusScope takes the navigation keys (Plan 0002, §4.6); it has
-        // focus from startup and takes it back on a click into the page.
-        viewport-keys := FocusScope {
-          horizontal-stretch: 1;
-          key-pressed(event) => {
-              if (root.nav_key(event.text, event.modifiers.control, event.modifiers.shift)) {
-                  return accept;
-              }
-              return reject;
-          }
-          // Files dropped from other applications (Plan 0003, §3.2): Slint 1.18.1's winit backend
-          // never delivers them, so this is inert until the Slint release carrying
-          // slint-ui/slint#13527, and needs no change then.
-          DropArea {
-            can-drop(event) => {
-                return root.can_open_drop(event.data) ? DragAction.copy : DragAction.none;
-            }
-            dropped(event) => {
-                root.open_drop(event.data);
-                return DragAction.copy;
-            }
-          Rectangle {
-            background: Theme.canvas;
-            border-width: 1px;
-            border-color: Theme.line-strong;
-
-            viewport := Flickable {
-                // A failed open keeps the document that was already showing.
-                visible: root.total_pages > 0;
-                content-width: root.canvas-w;
-                content-height: root.canvas-h;
-                content-x <=> root.scroll-x;
-                content-y <=> root.scroll-y;
-                // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
-                // except while a long press is selecting or the Ink tool draws.
-                mouse-drag-pan-enabled: false;
-                interactive: !root.touch-selecting && root.tool != 6;
-
-                // These fire on every change, user or programmatic, including each tick of
-                // the 180 ms wheel animation, which makes them the viewport source of truth.
-                changed content-x => { root.viewport_moved(); }
-                changed content-y => { root.viewport_moved(); }
-                changed width  => { root.view-w = viewport.width;  root.viewport_moved(); }
-                changed height => { root.view-h = viewport.height; root.viewport_moved(); }
-
-                // Declared before the tiles so they paint under them: a cell still in flight
-                // shows its page's base layer, or white paper on a page drawn as one image.
-                for page in root.pages : Rectangle {
-                    x: page.x; y: page.y; width: page.w; height: page.h;
-                    background: white;
-                    Image {
-                        source: page.image;
-                        width: parent.width; height: parent.height;
-                    }
-                }
-
-                for tile in root.tiles : Image {
-                    source: tile.image;
-                    visible: tile.visible;
-                    x: tile.x; y: tile.y; width: tile.w; height: tile.h;
-                }
-
-                // Form fields over the tiles, so they show before they are touched; a required
-                // field has a red edge.
-                for field in root.field-rects : Rectangle {
-                    visible: root.field-highlight;
-                    x: field.x; y: field.y; width: field.w; height: field.h;
-                    background: rgba(64, 128, 255, 0.16);
-                    border-width: 1px;
-                    border-color: field.required ? rgba(220, 38, 38, 0.85) : rgba(64, 128, 255, 0.5);
-                }
-
-                // Search hits over the tiles: page-relative rectangles placed like tiles.
-                for hit in root.hit-rects : Rectangle {
-                    x: hit.x; y: hit.y; width: hit.w; height: hit.h;
-                    background: hit.current ? #ff8c0080 : #ffd60066;
-                    border-width: hit.current ? 1px : 0px;
-                    border-color: #e65100;
-                }
-
-                // The text selection, over the tiles and the search hits.
-                for sel in root.sel-rects : Rectangle {
-                    x: sel.x; y: sel.y; width: sel.w; height: sel.h;
-                    background: rgba(37, 99, 235, 0.35);
-                }
-
-                // The selected annotation's bounds.
-                for annot in root.annot-sel-rects : Rectangle {
-                    x: annot.x - 2px; y: annot.y - 2px;
-                    width: annot.w + 4px; height: annot.h + 4px;
-                    border-width: 2px;
-                    border-radius: 2px;
-                    border-color: rgba(37, 99, 235, 0.9);
-                }
-
-                // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
-                // children first, so this area - kept over the viewport, not the canvas -
-                // sees them; without ctrl it rejects them and the Flickable scrolls.
-                TouchArea {
-                    x: -root.scroll-x; y: -root.scroll-y;
-                    width: viewport.width; height: viewport.height;
-                    scroll-event(event) => {
-                        if (event.modifiers.control) {
-                            root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
-                            return accept;
-                        }
-                        return reject;
-                    }
-                    mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
-                        : root.field-cursor == 1 ? MouseCursor.text
-                        : root.field-cursor == 2 ? MouseCursor.pointer
-                        : root.text-cursor ? MouseCursor.text : MouseCursor.default;
-                    changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
-                    changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down) {
-                            viewport-keys.focus();
-                        }
-                        if (event.button == PointerEventButton.left || event.touch-finger-id != 0) {
-                            if (event.kind == PointerEventKind.down) {
-                                root.select_pointer(0, self.mouse-x, self.mouse-y, event.modifiers.shift, event.touch-finger-id != 0);
-                            } else if (event.kind == PointerEventKind.up) {
-                                root.select_pointer(1, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
-                            } else if (event.kind == PointerEventKind.cancel) {
-                                root.select_pointer(4, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
-                            }
-                        }
-                    }
-                    moved => {
-                        if (self.pressed) {
-                            root.select_pointer(2, self.mouse-x, self.mouse-y, false, false);
-                        }
-                    }
-                    double-clicked => {
-                        root.select_pointer(3, self.mouse-x, self.mouse-y, false, false);
-                    }
-                }
-            }
-
-            // The document scrollbar, over the right edge of the viewport.
-            Rectangle {
-                x: parent.width - 12px;
-                width: 12px;
-                visible: root.sb-visible;
-                background: Theme.scroll-track;
-                Rectangle {
-                    y: root.sb-thumb-y;
-                    height: root.sb-thumb-h;
-                    x: 2px;
-                    width: parent.width - 4px;
-                    border-radius: 4px;
-                    background: thumb-area.pressed ? Theme.scroll-thumb-pressed : Theme.scroll-thumb;
-                }
-                thumb-area := TouchArea {
-                    // Where in the thumb it was grabbed, so a drag does not snap its top to
-                    // the cursor.
-                    property <length> grab: 0px;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down) {
-                            if (self.mouse-y >= root.sb-thumb-y && self.mouse-y < root.sb-thumb-y + root.sb-thumb-h) {
-                                self.grab = self.mouse-y - root.sb-thumb-y;
-                            } else {
-                                self.grab = root.sb-thumb-h / 2;
-                                root.scrollbar_moved(self.mouse-y - self.grab, self.height);
-                            }
-                        }
-                    }
-                    moved => {
-                        if (self.pressed) {
-                            root.scrollbar_moved(self.mouse-y - self.grab, self.height);
-                        }
-                    }
-                }
-            }
-
-            // The ink stroke being drawn, over the page until MuPDF draws it in the tiles.
-            if root.ink-commands != "" : Rectangle {
-                x: viewport.x;
-                y: viewport.y;
-                width: viewport.width;
-                height: viewport.height;
-                clip: true;
-                Path {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.width;
-                    height: parent.height;
-                    commands: root.ink-commands;
-                    stroke: root.ink-colour;
-                    stroke-width: root.ink-stroke-width;
-                    stroke-line-cap: round;
-                    stroke-line-join: round;
-                    // Unscaled: the commands are in this element's logical pixels.
-                    fit: preserve;
-                }
-            }
-
-            // A note's text while the pointer rests on it.
-            if root.note-hover-visible && !root.note-editor-visible : Rectangle {
-                x: root.note-hover-x;
-                y: root.note-hover-y;
-                width: min(280px, hover-text.preferred-width + 16px);
-                height: hover-text.preferred-height + 12px;
-                background: #fff8c4;
-                border-width: 1px;
-                border-color: #c9b458;
-                border-radius: 4px;
-                hover-text := Text {
-                    x: 8px;
-                    y: 6px;
-                    width: parent.width - 16px;
-                    text: root.note-hover-text;
-                    wrap: word-wrap;
-                    color: #3b3000;
-                }
-            }
-
-            // The field with the keyboard focus (Plan 0006 Phase 2): Space or Enter sets a check
-            // box or radio button, Tab moves on.
-            if root.field-focus-visible && !root.field-editor-visible && !root.field-choices-visible : Rectangle {
-                x: root.field-focus-x - 2px;
-                y: root.field-focus-y - 2px;
-                width: root.field-focus-w + 4px;
-                height: root.field-focus-h + 4px;
-                border-width: 2px;
-                border-radius: 2px;
-                border-color: Theme.accent;
-            }
-
-            // The editor over a text field (Plan 0006): Enter (Ctrl+Enter in a multi-line field)
-            // or Tab keeps the text, Esc drops it; a click elsewhere keeps it too.
-            if root.field-editor-visible : FocusScope {
-                x: root.field-editor-x;
-                y: root.field-editor-y;
-                width: root.field-editor-w;
-                height: root.field-editor-h;
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.field_cancel();
-                        return accept;
-                    }
-                    if (event.text == Key.Tab || event.text == Key.Backtab) {
-                        root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
-                        return accept;
-                    }
-                    if (event.text == Key.Return
-                        && (!root.field-editor-multiline || event.modifiers.control)) {
-                        root.field_commit();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: #e8f0ff;
-                    border-width: 1px;
-                    border-color: Theme.accent;
-                    clip: true;
-                    TextInput {
-                        x: 2px;
-                        y: root.field-editor-multiline ? 1px : 0px;
-                        width: parent.width - 4px;
-                        height: parent.height - (root.field-editor-multiline ? 2px : 0px);
-                        text <=> root.field-editor-text;
-                        font-size: root.field-editor-font-size;
-                        single-line: !root.field-editor-multiline;
-                        wrap: root.field-editor-multiline ? TextWrap.word-wrap : TextWrap.no-wrap;
-                        vertical-alignment: root.field-editor-multiline
-                            ? TextVerticalAlignment.top : TextVerticalAlignment.center;
-                        input-type: root.field-editor-password ? InputType.password : InputType.text;
-                        // A comb field's characters are drawn in their boxes below.
-                        color: root.field-editor-cells > 0 ? transparent : #000000;
-                        selection-background-color: root.field-editor-cells > 0
-                            ? transparent : Theme.selection;
-                        edited => { root.field_edited(self.text); }
-                        init => {
-                            self.focus();
-                            self.select-all();
-                        }
-                        property <int> serial: root.field-editor-serial;
-                        changed serial => {
-                            self.focus();
-                            self.select-all();
-                        }
-                    }
-                    // A comb field: one character in each box, the next box to fill outlined.
-                    if root.field-editor-cells > 0 : Rectangle {
-                        property <length> cell: self.width / root.field-editor-cells;
-                        for i in root.field-editor-cells - 1 : Rectangle {
-                            x: (i + 1) * parent.cell;
-                            width: 1px;
-                            background: rgba(37, 99, 235, 0.25);
-                        }
-                        for ch[i] in root.field-editor-chars : Text {
-                            x: i * parent.cell;
-                            width: parent.cell;
-                            height: parent.height;
-                            text: ch;
-                            font-size: root.field-editor-font-size;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            color: #000000;
-                        }
-                        Rectangle {
-                            x: min(root.field-editor-chars.length, root.field-editor-cells - 1) * parent.cell;
-                            width: parent.cell;
-                            border-width: 2px;
-                            border-color: Theme.accent;
-                        }
-                    }
-                }
-            }
-
-            // A choice field's options, under the field: a click chooses, Esc closes.
-            if root.field-choices-visible : FocusScope {
-                x: root.field-choices-x;
-                y: root.field-choices-y;
-                width: root.field-choices-w;
-                height: min(8, root.field-choices.length) * 24px + 4px;
-                init => {
-                    if (!root.field-editor-visible) {
-                        self.focus();
-                    }
-                }
-                property <int> serial: root.field-editor-serial;
-                changed serial => {
-                    if (!root.field-editor-visible) {
-                        self.focus();
-                    }
-                }
-                // Up and Down move through the options, Space chooses (ticks, in a multi-select
-                // list), Enter chooses or keeps the ticks, Tab keeps them and moves on.
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.field_cancel();
-                        return accept;
-                    }
-                    if (event.text == Key.Tab || event.text == Key.Backtab) {
-                        root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
-                        return accept;
-                    }
-                    if (root.field-editor-visible) {
-                        return reject;
-                    }
-                    if (event.text == Key.UpArrow) {
-                        root.field-choice-selected = max(0, root.field-choice-selected - 1);
-                        return accept;
-                    }
-                    if (event.text == Key.DownArrow) {
-                        root.field-choice-selected = min(root.field-choices.length - 1, root.field-choice-selected + 1);
-                        return accept;
-                    }
-                    if (event.text == " " || (event.text == Key.Return && !root.field-choices-multi)) {
-                        root.field_choose(root.field-choice-selected);
-                        return accept;
-                    }
-                    if (event.text == Key.Return) {
-                        root.field_commit();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    drop-shadow-blur: 6px;
-                    drop-shadow-color: Theme.shadow;
-                    ListView {
-                        x: 2px;
-                        y: 2px;
-                        width: parent.width - 4px;
-                        height: parent.height - 4px;
-                        for label[index] in root.field-choices : Rectangle {
-                            property <bool> chosen: root.field-choices-multi
-                                ? root.field-choice-marks[index] : index == root.field-choice-selected;
-                            height: 24px;
-                            background: self.chosen ? Theme.selection : transparent;
-                            // In a multi-select list the keyboard's place is outlined.
-                            border-width: root.field-choices-multi && index == root.field-choice-selected ? 1px : 0px;
-                            border-color: Theme.accent;
-                            Text {
-                                x: 6px;
-                                width: 14px;
-                                visible: root.field-choices-multi;
-                                text: root.field-choice-marks[index] ? "✓" : "";
-                                vertical-alignment: center;
-                                color: parent.chosen ? Theme.selection-text : Theme.text;
-                            }
-                            Text {
-                                x: root.field-choices-multi ? 22px : 6px;
-                                width: parent.width - self.x - 6px;
-                                text: label;
-                                vertical-alignment: center;
-                                overflow: elide;
-                                color: parent.chosen ? Theme.selection-text : Theme.text;
-                            }
-                            TouchArea { clicked => { root.field_choose(index); } }
-                        }
-                    }
-                }
-            }
-
-            // The note editor: Ctrl+Enter or Save keeps the text, Esc or Cancel drops it.
-            if root.note-editor-visible : FocusScope {
-                x: root.note-editor-x;
-                y: root.note-editor-y;
-                width: 280px;
-                height: 170px;
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.note_cancel();
-                        return accept;
-                    }
-                    if (event.text == Key.Return && event.modifiers.control) {
-                        root.note_save();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: 4px;
-                    drop-shadow-blur: 6px;
-                    drop-shadow-color: Theme.shadow;
-                    VerticalLayout {
-                        padding: 6px;
-                        spacing: 6px;
-                        TextEdit {
-                            text <=> root.note-text;
-                            wrap: word-wrap;
-                            init => { self.focus(); }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Text {
-                                text: "Ctrl+Enter";
-                                color: Theme.text;
-                                opacity: 0.6;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.note_cancel(); } }
-                            Button { text: "Save"; primary: true; clicked => { root.note_save(); } }
-                        }
-                    }
-                }
-            }
-
-            // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
-            // document; the open one can be among them, as it is now.
-            if root.merge-visible : FocusScope {
-                x: (parent.width - self.width) / 2;
-                y: 16px;
-                width: min(parent.width - 32px, 460px);
-                height: min(parent.height - 32px, 360px);
-                init => { self.focus(); }
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.merge_close();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 8px;
-                        Text {
-                            text: root.merge-images ? "Images to PDF - one page each, in this order"
-                                : "Merge files - in this order";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        ListView {
-                            vertical-stretch: 1;
-                            for name[index] in root.merge-files : Rectangle {
-                                height: 26px;
-                                background: index == root.merge-selected
-                                    ? Theme.selection : transparent;
-                                Text {
-                                    x: 6px;
-                                    text: (index + 1) + ". " + name;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                    color: index == root.merge-selected
-                                        ? Theme.selection-text : Theme.text;
-                                }
-                                TouchArea { clicked => { root.merge-selected = index; } }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Button {
-                                text: root.merge-images ? "Add images..." : "Add files...";
-                                clicked => { root.merge_add(); }
-                            }
-                            if !root.merge-images : Button {
-                                text: "Add open document";
-                                enabled: root.total_pages > 0;
-                                clicked => { root.merge_add_current(); }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Button {
-                                text: "Up";
-                                enabled: root.merge-selected > 0;
-                                clicked => { root.merge_move(-1); }
-                            }
-                            Button {
-                                text: "Down";
-                                enabled: root.merge-selected >= 0
-                                    && root.merge-selected + 1 < root.merge-files.length;
-                                clicked => { root.merge_move(1); }
-                            }
-                            Button {
-                                text: "Remove";
-                                enabled: root.merge-selected >= 0;
-                                clicked => { root.merge_remove(); }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.merge_close(); } }
-                            Button {
-                                text: root.merge-images ? "Make PDF..." : "Merge...";
-                                primary: true;
-                                enabled: root.merge-files.length >= 1 && !root.tool-running;
-                                clicked => { root.merge_run(); }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Split: the open document, as it is now, into files of N pages or by ranges.
-            if root.split-visible : FocusScope {
-                x: (parent.width - self.width) / 2;
-                y: 16px;
-                width: min(parent.width - 32px, 420px);
-                height: 220px;
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.split_close();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 8px;
-                        Text {
-                            text: "Split into files";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Button {
-                                text: "Every";
-                                checkable: true;
-                                checked: root.split-mode == 0;
-                                clicked => { root.split-mode = 0; }
-                            }
-                            LineEdit {
-                                width: 60px;
-                                text <=> root.split-every;
-                                enabled: root.split-mode == 0;
-                            }
-                            Text {
-                                text: "pages";
-                                vertical-alignment: center;
-                                color: Theme.text;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Button {
-                                text: "Ranges";
-                                checkable: true;
-                                checked: root.split-mode == 1;
-                                clicked => { root.split-mode = 1; }
-                            }
-                            LineEdit {
-                                placeholder-text: "1-3, 4, 5-";
-                                text <=> root.split-ranges;
-                                enabled: root.split-mode == 1;
-                            }
-                        }
-                        Text {
-                            text: root.split-error;
-                            color: Theme.danger;
-                            font-size: 12px;
-                            overflow: elide;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.split_close(); } }
-                            Button {
-                                text: "Split...";
-                                primary: true;
-                                enabled: !root.tool-running;
-                                clicked => { root.split_run(); }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Document Properties: the fields readers show, and what else the file says.
-            // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
-            if root.stamp-visible : FocusScope {
-                x: (parent.width - self.width) / 2;
-                y: 16px;
-                width: min(parent.width - 32px, 440px);
-                height: root.stamp-mode == 0 ? 300px : 330px;
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.stamp_close();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 6px;
-                        Text {
-                            text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        if root.stamp-mode == 0 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
-                        }
-                        if root.stamp-mode == 0 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
-                            Button {
-                                text: "Diagonal";
-                                checkable: true;
-                                checked: root.stamp-diagonal;
-                                clicked => { root.stamp-diagonal = true; }
-                            }
-                            Button {
-                                text: "Horizontal";
-                                checkable: true;
-                                checked: !root.stamp-diagonal;
-                                clicked => { root.stamp-diagonal = false; }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        if root.stamp-mode == 0 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Theme.text; }
-                            Slider {
-                                minimum: 5;
-                                maximum: 100;
-                                value <=> root.stamp-opacity;
-                            }
-                            Text {
-                                width: 40px;
-                                text: round(root.stamp-opacity) + "%";
-                                vertical-alignment: center;
-                                color: Theme.text;
-                            }
-                        }
-                        if root.stamp-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.stamp-format;
-                                placeholder-text: "{n} / {total}";
-                                init => { self.focus(); }
-                            }
-                        }
-                        if root.stamp-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { width: 70px; text <=> root.stamp-first; }
-                            Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { width: 70px; text <=> root.stamp-size; }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        if root.stamp-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Position"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
-                                current-index <=> root.stamp-corner;
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["Grey", "Red", "Blue", "Black"];
-                                current-index <=> root.stamp-colour;
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.stamp-pages;
-                                placeholder-text: "All, or 1-3, 5, 8-";
-                            }
-                        }
-                        Text {
-                            vertical-stretch: 1;
-                            text: root.stamp-error;
-                            color: Theme.danger;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.stamp_close(); } }
-                            Button {
-                                text: "Apply";
-                                primary: true;
-                                clicked => { root.stamp_apply(); }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Compress or export as images (Plan 0005 Phase 4): new files from the document as
-            // it is now.
-            if root.convert-visible : FocusScope {
-                x: (parent.width - self.width) / 2;
-                y: 16px;
-                width: min(parent.width - 32px, 420px);
-                height: root.convert-mode == 0 ? 170px : 230px;
-                init => { self.focus(); }
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.convert_close();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 6px;
-                        Text {
-                            text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        if root.convert-mode == 0 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
-                                current-index <=> root.convert-preset;
-                            }
-                        }
-                        if root.convert-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["PNG", "JPEG"];
-                                current-index <=> root.convert-format;
-                            }
-                            Text { text: "Resolution"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { width: 70px; text <=> root.convert-dpi; }
-                            Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
-                        }
-                        if root.convert-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.convert-pages;
-                                placeholder-text: "All, or 1-3, 5, 8-";
-                            }
-                        }
-                        Text {
-                            vertical-stretch: 1;
-                            text: root.convert-error;
-                            color: Theme.danger;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.convert_close(); } }
-                            Button {
-                                text: root.convert-mode == 0 ? "Compress..." : "Export...";
-                                primary: true;
-                                enabled: !root.tool-running;
-                                clicked => { root.convert_run(); }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Crop: the rectangle the Crop tool drew, applied to its page or to every page.
-            if root.crop-visible : FocusScope {
-                x: (parent.width - self.width) / 2;
-                y: 16px;
-                width: min(parent.width - 32px, 380px);
-                height: 96px;
-                init => { self.focus(); }
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.crop_cancel();
-                        return accept;
-                    }
-                    if (event.text == Key.Return) {
-                        root.crop_apply(false);
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 8px;
-                        Text {
-                            text: "Crop to the drawn area (" + root.crop-size + ")";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
-                            Button { text: "All pages"; clicked => { root.crop_apply(true); } }
-                            Button {
-                                text: "This page";
-                                primary: true;
-                                clicked => { root.crop_apply(false); }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if root.props-visible : FocusScope {
-                x: (parent.width - self.width) / 2;
-                y: 16px;
-                width: min(parent.width - 32px, 460px);
-                height: min(parent.height - 32px, 380px);
-                capture-key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.props_close();
-                        return accept;
-                    }
-                    return reject;
-                }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 6px;
-                        Text {
-                            text: "Document properties";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.props-title;
-                                read-only: !root.editable;
-                                init => { self.focus(); }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.props-author; read-only: !root.editable; }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.props-subject; read-only: !root.editable; }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 30px;
-                            Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
-                        }
-                        Text {
-                            vertical-stretch: 1;
-                            text: root.props-info;
-                            wrap: word-wrap;
-                            font-size: 12px;
-                            color: Theme.text;
-                            opacity: 0.75;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: 28px;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Close"; clicked => { root.props_close(); } }
-                            if root.editable : Button {
-                                text: "Save";
-                                primary: true;
-                                clicked => { root.props_save(); }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (root.total_pages == 0 && !root.has_error) : Text {
-                text: "Open a PDF with File > Open (Ctrl+O)";
-                color: Theme.text;
-                opacity: 0.6;
-                vertical-alignment: center;
-                horizontal-alignment: center;
-            }
-          }
-          }
-        }
+            zoom-in => { root.zoom_in(); }
+            zoom-out => { root.zoom_out(); }
+            zoom-reset => { root.zoom_reset(); }
+            fit-width => { root.fit_width(); }
+            fit-page => { root.fit_page(); }
         }
 
-        // Status bar
-        HorizontalLayout {
-            height: 20px;
-            Text {
-                text: root.status_text;
-                color: Theme.text;
-                opacity: 0.8;
-                font-size: 12px;
-                vertical-alignment: center;
-            }
-            // A running tool can be stopped from here.
-            if root.tool-running : Text {
-                text: "  Cancel";
-                color: Theme.accent;
-                font-size: 12px;
-                vertical-alignment: center;
-                TouchArea { clicked => { root.cancel_tool(); } }
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Text {
-                text: root.tiles_rendered + " tiles rendered / " + root.tiles_requested + " requested";
-                color: Theme.text;
-                opacity: 0.5;
-                font-size: 12px;
-                vertical-alignment: center;
-            }
+        if root.status_text != "" || root.tool-running : MessageIsland {
+            x: root.canvas-left + root.island-gap;
+            y: root.height - self.height - root.inset;
+            height: 32px;
+            width: min(self.preferred-width, status.x - self.x - root.island-gap);
+            text: root.status_text;
+            tool-running: root.tool-running;
+            diagnostics: root.diagnostics;
+            tiles-rendered: root.tiles_rendered;
+            tiles-requested: root.tiles_requested;
+            cancel-tool => { root.cancel_tool(); }
+        }
+
+        // The window's edge while it is not maximized: a frameless window has no system border.
+        if root.own-frame && !root.maximized : Rectangle {
+            width: 100%;
+            height: 100%;
+            border-width: 1px;
+            border-color: Theme.window-edge;
         }
     }
 }
