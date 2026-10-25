@@ -224,6 +224,9 @@ pub enum EngineCmd {
     DocumentInfo { generation: u64 },
     /// Cancel a pending render request.
     Cancel { request_id: RequestId },
+    /// Drop the caches that only serve drawing (display lists, raster buffers): the document is in
+    /// a tab out of view (Plan 0007 Phase 4). Its pages, history and edits stay.
+    Trim,
     /// Shut down the engine thread.
     Shutdown,
 }

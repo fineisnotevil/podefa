@@ -37,6 +37,25 @@ use thiserror::Error;
 
 use pool::{Job, Pool, Prepared, run_tile};
 pub use pool::{MID_RASTER_ABORT, worker_count};
+
+/// The render worker pool, shared by every engine it is given to (Plan 0007 Phase 4, ADR 0011):
+/// a window with several documents rasterizes on one set of workers rather than one set each.
+/// Cloning shares it; the workers stop when the last clone is dropped.
+#[derive(Clone)]
+pub struct RasterPool(Arc<Pool>);
+
+impl RasterPool {
+    /// Starts [`worker_count`] raster workers.
+    pub fn new() -> Self {
+        Self(Arc::new(Pool::start(worker_count())))
+    }
+}
+
+impl Default for RasterPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 use search::SearchThread;
 use tools::ToolThread;
 
@@ -831,6 +850,13 @@ impl MupdfEngine {
         Ok(self.restructured(map))
     }
 
+    /// The document went out of view (a tab in the background, Plan 0007 Phase 4): its display
+    /// lists and its raster buffer go; the next tile builds them again.
+    pub fn trim(&mut self) {
+        self.display_lists.clear();
+        self.scratch = None;
+    }
+
     /// The pages changed: every display list goes, every page gets the same new revision, and the
     /// new sizes are read.
     fn restructured(&mut self, map: PageMap) -> Change {
@@ -1187,11 +1213,16 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    /// Spawns a new dedicated engine actor thread and its render worker pool.
+    /// Spawns a new dedicated engine actor thread and its own render worker pool.
     ///
     /// The returned handle provides command sending, and events from the engine
     /// are received on the returned `Receiver<EngineEvent>`.
     pub fn spawn() -> (Self, Receiver<EngineEvent>) {
+        Self::spawn_with(RasterPool::new())
+    }
+
+    /// Spawns an engine actor thread that rasterizes on `pool`, which other engines may share.
+    pub fn spawn_with(pool: RasterPool) -> (Self, Receiver<EngineEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>();
         let (event_tx, event_rx) = mpsc::channel::<EngineEvent>();
 
@@ -1201,7 +1232,7 @@ impl EngineHandle {
                 let mut engine = MupdfEngine::new();
                 // One core is left for the UI thread; `FA_PDF_WORKERS` overrides the count, and a
                 // count of one gives a single-worker pool, i.e. serial rasterization.
-                let pool = Pool::start(worker_count(), event_tx.clone());
+                let pool = pool.0;
                 // Search runs beside the pool, on a document of its own (Plan 0003, §3.6).
                 let search = SearchThread::start(event_tx.clone());
                 // Tools that write new files run beside them (Plan 0005, §4.2).
@@ -1244,12 +1275,15 @@ impl EngineHandle {
                             // nothing to coalesce: each command is one tile, resolved here and
                             // rasterized by the pool. A superseded epoch costs no raster time.
                             match engine.prepare(&geometry) {
-                                Ok(prepared) => pool.dispatch(Job::Tile {
-                                    prepared,
-                                    col,
-                                    row,
-                                    request_id,
-                                }),
+                                Ok(prepared) => pool.dispatch(
+                                    Job::Tile {
+                                        prepared,
+                                        col,
+                                        row,
+                                        request_id,
+                                    },
+                                    &event_tx,
+                                ),
                                 Err(err) => Self::report(&event_tx, &err),
                             }
                         }
@@ -1262,10 +1296,13 @@ impl EngineHandle {
                             // the only job that can put a whole page on screen, and watching it
                             // appear beats watching a grid fill in.
                             match engine.prepare_base(page, scale_milli) {
-                                Ok(prepared) => pool.dispatch_first(Job::Base {
-                                    prepared,
-                                    request_id,
-                                }),
+                                Ok(prepared) => pool.dispatch_first(
+                                    Job::Base {
+                                        prepared,
+                                        request_id,
+                                    },
+                                    &event_tx,
+                                ),
                                 Err(err) => Self::report(&event_tx, &err),
                             }
                         }
@@ -1276,10 +1313,13 @@ impl EngineHandle {
                         } => {
                             // Behind the tiles already queued: the viewport comes first.
                             match engine.prepare_thumb(page, width_px) {
-                                Ok(prepared) => pool.dispatch(Job::Thumb {
-                                    prepared,
-                                    request_id,
-                                }),
+                                Ok(prepared) => pool.dispatch(
+                                    Job::Thumb {
+                                        prepared,
+                                        request_id,
+                                    },
+                                    &event_tx,
+                                ),
                                 Err(err) => Self::report(&event_tx, &err),
                             }
                         }
@@ -1480,12 +1520,13 @@ impl EngineHandle {
                             }
                         }
                         EngineCmd::Cancel { request_id } => pool.cancel(request_id),
+                        EngineCmd::Trim => engine.trim(),
                         EngineCmd::Shutdown => break,
                     }
                 }
 
-                // Dropping the pool and the search thread stops and joins them before the actor
-                // thread exits.
+                // Dropping the search and tool threads stops and joins them before the actor
+                // thread exits; so does dropping the pool, when no other engine shares it.
                 drop(tools);
                 drop(search);
                 drop(pool);

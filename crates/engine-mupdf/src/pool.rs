@@ -37,6 +37,13 @@
 //! `engine-mupdf/tests/pool_test.rs` asserts against a 500 ms smoke ceiling on a Letter fixture; a
 //! page whose content is a single expensive node (one big fill, one slow shading) cannot be
 //! interrupted until that node ends, however stale its epoch is. The same test measures both.
+//!
+//! Sharing: one pool serves every open document of a window (Plan 0007 Phase 4, ADR 0011). A job
+//! carries the event channel of the engine that queued it, so its pixels go back to that
+//! document; epochs come from one counter across documents, so a `Cancel` names one document's
+//! work. This is safe because every MuPDF context in the process is a clone of one base context
+//! (`patches/mupdf/src/context.rs:66-80`), so a display list one engine built can be replayed on a
+//! worker another engine shares.
 
 use mupdf::{Colorspace, Cookie, CookieAbort, Device, DisplayList, Matrix, Pixmap};
 use pdf_core::{
@@ -282,9 +289,10 @@ fn tight_copy(source: &Pixmap, at: (usize, usize), w: u32, h: u32) -> Bitmap {
     Bitmap::new(w, h, row_bytes, PixelFormat::Rgb8, data)
 }
 
-/// Everything the workers pull from: the queue, the abort registry and the event channel.
+/// Everything the workers pull from: the queue and the abort registry. Each queued job has the
+/// event channel of the engine that sent it.
 struct Shared {
-    queue: Mutex<VecDeque<Job>>,
+    queue: Mutex<VecDeque<(Job, Sender<EngineEvent>)>>,
     /// Signalled on a new job and on shutdown.
     work: Condvar,
     /// Epoch named by the most recent `Cancel` (Plan 0001, §4.5 steps 1-4): its queued jobs are
@@ -296,7 +304,6 @@ struct Shared {
     running: Mutex<Vec<Running>>,
     next_id: AtomicU64,
     stop: AtomicBool,
-    events: Sender<EngineEvent>,
 }
 
 /// A tile that is inside the rasterizer right now.
@@ -393,7 +400,7 @@ pub(crate) struct Pool {
 
 impl Pool {
     /// Spawns the raster threads; each gets its own cloned MuPDF context through `Context::get`.
-    pub(crate) fn start(workers: usize, events: Sender<EngineEvent>) -> Self {
+    pub(crate) fn start(workers: usize) -> Self {
         let shared = Arc::new(Shared {
             queue: Mutex::new(VecDeque::new()),
             work: Condvar::new(),
@@ -401,7 +408,6 @@ impl Pool {
             running: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
             stop: AtomicBool::new(false),
-            events,
         });
         let threads = (0..workers.max(1))
             .filter_map(|index| {
@@ -418,16 +424,24 @@ impl Pool {
         }
     }
 
-    /// Queues a tile behind whatever is already pending.
-    pub(crate) fn dispatch(&self, job: Job) {
-        self.shared.queue.lock().unwrap().push_back(job);
+    /// Queues a tile behind whatever is already pending; its result goes to `events`.
+    pub(crate) fn dispatch(&self, job: Job, events: &Sender<EngineEvent>) {
+        self.shared
+            .queue
+            .lock()
+            .unwrap()
+            .push_back((job, events.clone()));
         self.shared.work.notify_one();
     }
 
     /// Queues a job ahead of every pending tile: the base layer uses this so a cold open shows a
     /// whole page as soon as the display list exists, rather than a partly filled grid.
-    pub(crate) fn dispatch_first(&self, job: Job) {
-        self.shared.queue.lock().unwrap().push_front(job);
+    pub(crate) fn dispatch_first(&self, job: Job, events: &Sender<EngineEvent>) {
+        self.shared
+            .queue
+            .lock()
+            .unwrap()
+            .push_front((job, events.clone()));
         self.shared.work.notify_one();
     }
 
@@ -451,26 +465,31 @@ impl Drop for Pool {
 /// The worker loop: pull, drop cancelled work, rasterize, publish.
 fn worker(shared: Arc<Shared>) {
     let colorspace = Colorspace::device_rgb();
-    let mut scratch = match Pixmap::new(
+    let mut scratch = Pixmap::new(
         &colorspace,
         0,
         0,
         TILE_STRIDE_PX as i32,
         TILE_STRIDE_PX as i32,
         false,
-    ) {
-        Ok(scratch) => scratch,
-        Err(error) => {
-            let _ = shared.events.send(EngineEvent::Error {
-                message: format!("raster worker could not allocate its scratch buffer: {error}"),
-            });
-            return;
-        }
-    };
+    );
 
     loop {
-        let Some(job) = next_job(&shared) else {
+        let Some((job, events)) = next_job(&shared) else {
             return;
+        };
+        // A worker without its buffer answers every job it takes with the reason, to the engine
+        // that sent it: the pool has no channel of its own.
+        let scratch = match scratch.as_mut() {
+            Ok(scratch) => scratch,
+            Err(error) => {
+                let _ = events.send(EngineEvent::Error {
+                    message: format!(
+                        "raster worker could not allocate its scratch buffer: {error}"
+                    ),
+                });
+                continue;
+            }
         };
         let request_id = job.request_id();
         if job.cancellable() && shared.is_cancelled(request_id) {
@@ -486,7 +505,7 @@ fn worker(shared: Arc<Shared>) {
         } else {
             None
         };
-        let outcome = job.run(&mut scratch, cookie.as_ref());
+        let outcome = job.run(scratch, cookie.as_ref());
         // The base layer never enters the registry, so no cancel can have reached it.
         let retired = match running {
             Some(id) => shared.retire(id, request_id),
@@ -502,27 +521,25 @@ fn worker(shared: Arc<Shared>) {
             // cancel to that end; the pixels are still never published.
             (_, Retired::Aborted(at)) => {
                 let ms = at.elapsed().as_millis() as u64;
-                let _ = shared
-                    .events
-                    .send(EngineEvent::TileAborted { request_id, ms });
+                let _ = events.send(EngineEvent::TileAborted { request_id, ms });
             }
             // Reported even for superseded work: a raster that fails is news whether or not the
             // epoch that asked for it is still current.
             (Err(error), _) => {
-                let _ = shared.events.send(EngineEvent::Error {
+                let _ = events.send(EngineEvent::Error {
                     message: error.to_string(),
                 });
             }
             // Finished before the cancel reached it, but its epoch is gone: the UI would discard
             // these pixels anyway.
             (Ok(_), Retired::Superseded) => {}
-            (Ok(bitmap), Retired::Live) => publish(&shared, &job, bitmap),
+            (Ok(bitmap), Retired::Live) => publish(&events, &job, bitmap),
         }
     }
 }
 
 /// Blocks until there is work, or returns `None` once the pool is shutting down.
-fn next_job(shared: &Shared) -> Option<Job> {
+fn next_job(shared: &Shared) -> Option<(Job, Sender<EngineEvent>)> {
     let mut queue = shared.queue.lock().unwrap();
     loop {
         if let Some(job) = queue.pop_front() {
@@ -535,8 +552,8 @@ fn next_job(shared: &Shared) -> Option<Job> {
     }
 }
 
-/// Publishes finished pixels on the event channel.
-fn publish(shared: &Shared, job: &Job, bitmap: Bitmap) {
+/// Publishes finished pixels on the event channel of the engine that queued the job.
+fn publish(events: &Sender<EngineEvent>, job: &Job, bitmap: Bitmap) {
     let event = match job {
         Job::Tile {
             prepared,
@@ -569,5 +586,5 @@ fn publish(shared: &Shared, job: &Job, bitmap: Bitmap) {
             bitmap,
         },
     };
-    let _ = shared.events.send(event);
+    let _ = events.send(event);
 }
