@@ -8,8 +8,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 ## Status
 
 **Phase 3 (the three modes, and the floating islands) implemented and at its gate - awaiting
-approval.** Row AT: no mode change rendered a tile; 13 of 16 runs had no frame over 16.7 ms, the
-3 others missed by up to 3.1 ms (§5, Phase 3 results).
+approval.** The maintainer approved it for the most part on 2026-10-25 and asked for five fixes,
+done (§5, Phase 3 results, "Second review"). Row AT: no mode change rendered a tile; the first
+entry into Tools is at the 16.7 ms budget (12.6-16.9 ms).
 
 - Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
 - Phase 1 (`.slint` files, `slint-build`, the `Theme` global): passed its gate on 2026-10-25.
@@ -172,7 +173,7 @@ and idle CPU are measured in Phase 1 before anything changes, with the commands 
 | 1 | `.slint` files and `slint-build`; the `Theme` global with both themes, applied to today's layout; baseline and after: size, startup, idle CPU (passed) | Every bench as before; rows AP, AQ, AR, AS |
 | 2 | Own frame and islands: no system frame, move, resize, window controls, windowed and maximized insets, brand, title, sidebar, status bar and search islands; the menu's new home (§9 q1) | Row AV; every command still reachable by mouse and keyboard |
 | 3 | The three modes: Edit's toolbar, colour palettes and dot grid; Tools' gallery with multi-select, drag to reorder, dividers that insert and split; the mode transitions | Row AT; Plan 0005's page operations still pass |
-| 4 | Tabs: several documents, one tile budget (ADR), squeezing tabs, close, drag pages to a tab or to + | Row AU |
+| 4 | Tabs: several documents, one tile budget (ADR), squeezing tabs, close, drag pages to a tab or to +; Split from the gallery: the pages from the chosen gap on open as a new tab, no dialog (maintainer, 2026-10-25) | Row AU |
 | 5 | Dialogs in the new style; the password dialog; about; reduce motion | Rows AW, AX; the maintainer's review of both themes |
 
 Each phase also runs the library crates' suite on the Android phone (`docs/backlog.md` item 9);
@@ -321,8 +322,8 @@ Android suite was not rerun.
   choose pages, the tick box adds or removes one, Ctrl+A chooses all, Esc clears. A page's hover
   bar rotates it either way, extracts, duplicates or deletes it; with more than one chosen, a bar
   does that to all of them. Dragging one page, or the chosen ones, into a gap moves them there;
-  the gap shows where. A gap's "+" opens a pill: Split here, a blank page here (the size of the
-  page before), pages from a file here. Arrows, Home, End and Shift move and extend the choice,
+  the gap shows where. A gap's "+" opens a pill: a blank page here (the size of the page
+  before), pages from a file here. Arrows, Home, End and Shift move and extend the choice,
   Delete deletes. Double click opens the page in Read. The status island keeps only the page
   navigation, centred under the gallery. Thumbnails are drawn at the gallery's size only for the
   cards near the view (2 cards either side, at most 24 held) and only after a motion ends.
@@ -346,8 +347,8 @@ Android suite was not rerun.
   it only scales: an opacity under 1 on the tiles' parent makes femtovg draw them into a layer on
   every frame of the motion; the gallery covers it instead. The zoom part of the status island
   folds away in Tools. The thumbnails button left Tools' island (the gallery replaces it). Split
-  from a gap opens the Split panel with the two ranges filled in, until Phase 4's tabs can open
-  the halves. Dragging pages to another tab waits for Phase 4.
+  is out of Tools until Phase 4 (second review, below). Dragging pages to another tab waits for
+  Phase 4.
 
 - **The islands float (after the maintainer's review of the first round):** the canvas ran
   beside the sidebar and under the title row, so the islands only looked floating. Now the
@@ -360,6 +361,33 @@ Android suite was not rerun.
   current page all use that room, and the scroll bar runs between the title row and the status
   island. When an island changes size (the drawer, maximizing) the pages are laid out again with
   the view kept still. A test covers the margins (`margins_move_the_column_and_grow_the_document`).
+
+**Second review (2026-10-25).** The maintainer approved the phase for the most part and asked
+for five fixes, all done:
+
+1. The drawer (thumbnails, outline) ran to the window's bottom and pushed the status message
+   right; it now ends above the status row, and the message starts beside the sidebar.
+2. The drawer is Read's only: Edit fades it out as Tools does. The pages keep its room, so a mode
+   change still moves nothing (row AT).
+3. Split opened its dialog over the Read canvas, where the pages cannot be chosen. Split left the
+   Tools island and the gap pill; in Phase 4 it opens the pages from the chosen gap on as a new
+   tab, with no dialog (§5 table). The Split panel's code stays for that.
+4. The gallery strip sits in the middle of the view while it fits, and starts at the left with
+   more room once it does not (`pad` 24 to 72 px, `lead` 72 to 120 px).
+5. The rulers are taller (12 px ticks), and a crown lies over each in the middle of the view: the
+   same ticks, stronger and taller in the middle and fading out to both sides, moving with the
+   strip. Dragging a crown (or the wheel over it) scrolls; the cursor turns to a sideways arrow
+   over it. It is one clipped, pre-faded image (`textures/crown.svg`) per crown; the ruler tiles
+   start at their left edge (`horizontal-alignment: left`) so the ticks line up.
+
+After these, release build, `--bench-modes 2`, 4 runs per file: 0 tiles in all 96 changes; the
+first entry into Tools 16.0-16.9 ms (`large_200p`) and 12.6-14.6 ms (`dense_vector`), one of the 8
+over 16.7 ms by 0.2 ms; every other change's median 6.7-8.7 ms, one single frame of 20.0 ms. The
+crowns cost the first Tools entry about 1-2 ms. `--bench-pages` 14 of 14 on 200 and 1000 pages,
+`--bench-nav` 20 of 20, `--bench-forms` 35 of 35, the A0 sweep PASS (`peak_ws` 176.9 MiB);
+`t_first_page` medians 706 ms (`large_200p`) and 828 ms (`dense_vector`). Idle frames could not
+be measured cleanly: the mouse moved during every run of the last batch (15-434 frames in 3 of
+8, 0 in the others). `app.exe` 19,723,264 bytes. `cargo test --workspace` 232 passed.
 
 Row AT, `--bench-modes 2` (each run: 12 changes round Read, Edit and Tools; definitions in
 `docs/benchmarks.md` §13.4), release build, 5 runs per file. First round (`1b44d0a`, canvas

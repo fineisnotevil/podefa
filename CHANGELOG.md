@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidebar with Read, Edit and Tools modes; the status island with pages and zoom; search under the
   title. There is no menu bar: every menu command moved to its island (ADR 0010). macOS keeps its
   native frame.
+- **The thumbnails and outline drawer is Read's only** and ends above the status row. Split is
+  out of Tools for now: it comes back with tabs, opening the pages from a chosen gap as a new tab.
+- **The gallery** sits in the middle while its pages fit, and its rulers carry a scroll crown:
+  drag it, or turn the wheel over it, to scroll.
 - **The islands float over the pages** (Plan 0007 Phase 3): the pages run under the whole
   window and pass under the title row, the sidebar and the status island, which are slightly
   see-through; the first page opens just under the title, and fit width, fit page, page steps and
@@ -36,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tick box adds one, Ctrl+A chooses all; drag one or the chosen pages into a gap to move them;
   each page's hover bar rotates, extracts, duplicates or deletes it, and a bar over several chosen
   pages does the same to them; the gap between two pages inserts a blank page or pages from a file
-  there, or opens Split at that page. Pages slide into place after a delete, insert or move
+  there. Pages slide into place after a delete, insert or move
   instead of being drawn again. Double click opens a page in Read; arrows, Home and End move
   through the pages, Delete deletes the chosen ones.
 - **Ctrl+W closes the window** (asking about unsaved changes), and the shortcuts Open, Save, Save
