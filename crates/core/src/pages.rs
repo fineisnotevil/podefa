@@ -267,6 +267,51 @@ pub fn follow(map: &[Option<u32>], old: u32) -> u32 {
     old.min(map.len().saturating_sub(1) as u32)
 }
 
+/// For every page after an edit, the row of a list of pages (one row per page, in order) that can
+/// stay and only move to it, or `None` where a row has to be inserted (Plan 0007 Phase 3): the
+/// gallery keeps those rows, so their pages slide to their new places instead of being drawn
+/// anew. A page whose pixels changed in place (`None` in `map` with the page count unchanged, such
+/// as a turned page) keeps its row too. The kept rows are the longest run in the old order; the
+/// old rows not named are the ones to remove. `old_count` is the page count before the edit.
+pub fn kept_rows(map: &[Option<u32>], old_count: u32) -> Vec<Option<u32>> {
+    let same_count = map.len() as u32 == old_count;
+    let named: std::collections::HashSet<u32> = map.iter().flatten().copied().collect();
+    let candidate: Vec<Option<u32>> = map
+        .iter()
+        .enumerate()
+        .map(|(new, old)| match old {
+            Some(old) if *old < old_count => Some(*old),
+            None if same_count && !named.contains(&(new as u32)) => Some(new as u32),
+            _ => None,
+        })
+        .collect();
+    // The longest strictly increasing run of candidates, by patience sorting: `tails[k]` is the
+    // new index ending the best run of length k + 1, `before[j]` the index before j in its run.
+    let mut tails: Vec<usize> = Vec::new();
+    let mut before: Vec<Option<usize>> = vec![None; candidate.len()];
+    for (j, old) in candidate.iter().enumerate() {
+        let Some(old) = old else { continue };
+        let k = tails.partition_point(|&t| candidate[t].is_some_and(|o| o < *old));
+        // A repeat (a duplicate) leaves the row with its first page, the original.
+        if tails.get(k).is_some_and(|&t| candidate[t] == Some(*old)) {
+            continue;
+        }
+        before[j] = k.checked_sub(1).map(|k| tails[k]);
+        if k == tails.len() {
+            tails.push(j);
+        } else {
+            tails[k] = j;
+        }
+    }
+    let mut kept = vec![None; candidate.len()];
+    let mut at = tails.last().copied();
+    while let Some(j) = at {
+        kept[j] = candidate[j];
+        at = before[j];
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +482,42 @@ mod tests {
                 assert_eq!(order, [0, 1, 2, 3, 4, 5], "{pages:?} before {before}");
             }
         }
+    }
+
+    #[test]
+    fn kept_rows_slide_instead_of_being_drawn_again() {
+        fn kept(map: &[Option<u32>], old: u32) -> Vec<i64> {
+            kept_rows(map, old)
+                .iter()
+                .map(|o| o.map_or(-1, i64::from))
+                .collect()
+        }
+        // A deletion keeps every other row; an insertion adds one.
+        let op = PageOp::Delete { pages: vec![1] };
+        assert_eq!(kept(&plan(&op, 4).unwrap(), 4), [0, 2, 3]);
+        let op = PageOp::InsertBlank {
+            at: 1,
+            width: 10.0,
+            height: 10.0,
+        };
+        assert_eq!(kept(&plan(&op, 3).unwrap(), 3), [0, -1, 1, 2]);
+        // A duplicate is a new row after its original.
+        let op = PageOp::Duplicate { pages: vec![0] };
+        assert_eq!(kept(&plan(&op, 2).unwrap(), 2), [0, -1, 1]);
+        // A turned page keeps its row.
+        let op = PageOp::Rotate {
+            pages: vec![1],
+            quarter_turns: 1,
+        };
+        assert_eq!(kept(&plan(&op, 3).unwrap(), 3), [0, 1, 2]);
+        // A moved page leaves its row and comes back as a new one; the rest stay.
+        let op = PageOp::Move {
+            pages: vec![0],
+            before: 3,
+        };
+        assert_eq!(kept(&plan(&op, 4).unwrap(), 4), [1, 2, -1, 3]);
+        // Kept rows are always in their old order.
+        let map = [Some(3), Some(0), Some(1), Some(2)];
+        assert_eq!(kept(&map, 4), [-1, 0, 1, 2]);
     }
 }
