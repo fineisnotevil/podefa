@@ -27,3 +27,4 @@ Each ADR follows a standardized format:
 - [0007: Editing Annotations and Saving](0007-editing-and-saving.md)
 - [0008: Undo and Redo Through MuPDF's Journal](0008-undo-journal.md)
 - [0009: Structural Edits and Page Maps](0009-structural-edits-and-page-maps.md)
+- [0010: The Window Draws Its Own Frame; Commands Live in Islands](0010-own-frame-and-islands.md)

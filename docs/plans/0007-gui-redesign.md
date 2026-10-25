@@ -7,12 +7,14 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 1 (`.slint` files, `slint-build`, the `Theme` global) implemented and at its gate -
-awaiting approval.**
+**Phase 2 (own frame and islands) implemented and at its gate - awaiting approval.** Row AV
+needs the maintainer's hands (§5, Phase 2 results).
 
 - Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
-- Phase 1: **implemented, at its gate** (2026-10-25); results in §5 and `docs/benchmarks.md` §13.
-- Phases 2 to 5: not started.
+- Phase 1 (`.slint` files, `slint-build`, the `Theme` global): passed its gate on 2026-10-25.
+- Phase 2: **implemented, at its gate** (2026-10-25); results in §5 and `docs/benchmarks.md`
+  §13.3; ADR 0010.
+- Phases 3 to 5: not started.
 
 Started 2026-10-25 on the maintainer's decision to put the GUI before the remaining roadmap
 ("Gelecek planları erteliyoruz. Sırada GUI güncellemesi var"; v0.5 Secure and later wait). Plan
@@ -40,6 +42,8 @@ in the concept (its `DESIGN.md`, step 37). The answers to §9:
    native frame on macOS; no Snap Layouts flyout for now (`docs/backlog.md` item 19); the theme
    follows the system by default (already so: `pdf_core::settings::Theme::System` is the default).
    The maintainer can still change any of them before Phase 2.
+
+**Phase 1 passed its gate on 2026-10-25** ("Phase 1 onaylandı, Faz 2'ye başla").
 
 ## 1. Goal and scope
 
@@ -161,7 +165,7 @@ and idle CPU are measured in Phase 1 before anything changes, with the commands 
 | Phase | Content | Gate checks |
 | :--- | :--- | :--- |
 | 0 | This research and plan (passed, §0) | §9 answered |
-| 1 | `.slint` files and `slint-build`; the `Theme` global with both themes, applied to today's layout; baseline and after: size, startup, idle CPU | Every bench as before; rows AP, AQ, AR, AS |
+| 1 | `.slint` files and `slint-build`; the `Theme` global with both themes, applied to today's layout; baseline and after: size, startup, idle CPU (passed) | Every bench as before; rows AP, AQ, AR, AS |
 | 2 | Own frame and islands: no system frame, move, resize, window controls, windowed and maximized insets, brand, title, sidebar, status bar and search islands; the menu's new home (§9 q1) | Row AV; every command still reachable by mouse and keyboard |
 | 3 | The three modes: Edit's toolbar, colour palettes and dot grid; Tools' gallery with multi-select, drag to reorder, dividers that insert and split; the mode transitions | Row AT; Plan 0005's page operations still pass |
 | 4 | Tabs: several documents, one tile budget (ADR), squeezing tabs, close, drag pages to a tab or to + | Row AU |
@@ -202,6 +206,97 @@ A0 memory sweep (PASS), `--bench-nav` on the 1000-page file (20 of 20), `--bench
 `--bench-pages` (14 of 14). `cargo test --workspace` 229 passed; fmt, clippy, deny and reuse clean.
 The library crates did not change in this phase; the Android suite was not rerun (no phone was
 connected), and stays at 212 of 212 from `871706c`.
+
+### Phase 2 results (2026-10-25)
+
+The window lost its system frame and its menu bar; ADR 0010 records the decision.
+
+- **Files:** `crates/app/ui/widgets.slint` (the island surface, `IconButton`, menu rows),
+  `title.slint` (brand and title islands), `sidebar.slint` (the mode island, the mode's commands,
+  the tool flyouts and menus, the drawer), `statusbar.slint` (navigation and zoom, the status
+  message), `search.slint`; `main.slint` places them over the canvas. 58 Lucide icons as SVG files
+  in `crates/app/ui/icons/` (ISC and MIT: `LICENSES/ISC.txt`, `LICENSES/MIT.txt`, `REUSE.toml`).
+  Tooltips are Slint 1.18.1's own `Tooltip` element.
+- **Frame:** `no-frame` and `resize-border-width: 6px` while not maximized; `WindowMoveArea` under
+  the document's name, a double click there maximizes or restores; minimize, maximize/restore and
+  close (close asks about unsaved changes, as Quit did). macOS keeps its native frame
+  (`own-frame` false; built in CI, not run). The islands sit 12 px from the window's edge, 8 px
+  maximized; a 1 px line marks the edge of a window that is not maximized.
+- **Where the menu's 42 items went:**
+
+| Menu | Items | Now |
+| :--- | :--- | :--- |
+| File | Open, Open Recent | Title island: the folder button (Ctrl+O) and the arrow beside it |
+| File | Save, Save As, Save Repaired Copy | Title island: Save (Ctrl+S) and its arrow: Save, Save As (Ctrl+Shift+S), Save Repaired Copy when the file was repaired |
+| File | Quit (Ctrl+Q) | Removed (§0): the close button, Ctrl+W |
+| Edit | Undo, Redo | Title island (Ctrl+Z, Ctrl+Y) |
+| Edit | Copy | Ctrl+C on a selection, as before; no button (the concept has none) |
+| Edit | Find | Read mode's search button (Ctrl+F); the search island |
+| Edit | Delete Annotation | The bar over a selected annotation (with its colours), and Delete |
+| Pages | Rotate Left, Rotate Right | Edit and Tools islands |
+| Pages | Duplicate, Delete Pages, Move Earlier, Move Later, Insert Blank Page, Insert Pages from File | Tools island: the Pages menu (until Phase 3's gallery) |
+| Tools | Merge Files, Split | Tools island |
+| Tools | Extract Pages | Tools island: the Pages menu |
+| Tools | Watermark, Page Numbers | Tools island: the Stamp menu |
+| Tools | Compress, Export as Images, Images to PDF, Document Properties | Tools island (Export as Word beside Images when built with `docx`) |
+| Tools | Crop Pages | Edit island |
+| Form | Reset Field | A button beside the focused field; the Form menu |
+| Form | Reset Form, Import Data, Export Data, Flatten Form | Edit island, when the document has fields: Reset Form, and the Form menu |
+| View | Sidebar (F4), Highlight Form Fields | Read mode's thumbnail and outline buttons (F4, Ctrl+B); Edit island |
+| View | Theme | The brand island's menu: Light, Dark, System |
+
+  The old toolbar's commands are in the status island (previous and next page, the page field,
+  fit width, fit page, 100%, zoom out and in) and the Edit island (Select, the five markup tools,
+  Note, Ink; colours and line widths fly out beside the active tool, as in the concept).
+- **Keyboard:** a `FocusScope` around the window takes Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+W,
+  Ctrl+F, Ctrl+B, F4 and the zoom keys before the focused element, so they work from the page
+  field and the search field as the native menu's did (`KeyCommand::is_global`, with a test).
+  Tab reaches every island button, Enter or Space presses it; a menu opened from the keyboard
+  focuses its first row (Open Recent and the theme menu: Tab moves into the rows) and Esc closes
+  it. Checked by driving the release build: Tab to Open Recent, Enter, Tab into the list; Save's
+  menu by keyboard; F4 and Ctrl+W from the page field.
+- **Modes:** the mode island switches the sidebar's commands (Read, Edit, Tools); choosing a tool
+  by its key (H, U, K, N, I) moves to Edit, and leaving Edit goes back to Select. The canvas, the
+  gallery and the transitions are Phase 3.
+- **Deliberate differences from the concept, for now:** the canvas starts under the title row and
+  beside the sidebar instead of flowing under them (the islands are opaque, §3.2, and a page put
+  at the viewport's top would otherwise sit under the title); the drawer opens in every mode,
+  because Tools chooses pages in its thumbnails until the gallery comes; About waits for Phase 5's
+  dialogs; the mode is not remembered between runs; the thumbnails' hover actions come with the
+  gallery. The preferred window size stays 900 x 700: at 1000 x 760 the first view covers more
+  tiles and `t_first_page` rose to 733 ms (median, `large_200p`), which measures the window, not
+  the design. The minimum height is 660 px, where Edit's island with the form buttons fits.
+
+Row AV, checked by driving the release build on Windows 11 with `SendInput`-style mouse events
+(the window's rectangle read back after each step):
+
+| Check | Result |
+| :--- | :--- |
+| Move by dragging the document's name | moved by the drag (90, 90 px) |
+| Resize: right edge, top edge, left edge, bottom-right corner, top-left corner | each changed the rectangle as dragged |
+| Maximize by double click and by the button; restore by the button | yes; on the monitor with a taskbar the maximized client area is 1920 x 1032 at (1920, 0), the work area, not over the taskbar |
+| Minimize | the window is iconic |
+| Ctrl+W, from the canvas and from the page field | the window closes (no unsaved changes) |
+
+Not checked, for the maintainer: the bottom edge and the two remaining corners by hand, snapping
+by dragging to a screen edge and Win+arrow, the frame on Linux (X11 and Wayland, GNOME and KDE)
+through the mini PC, and the look in both themes.
+
+| Row | Phase 1 | Phase 2 | Pass |
+| :--- | :--- | :--- | :--- |
+| AP `peak_ws`, default configuration | 162.4 MiB | 162.6, 159.6, 158.6, 165.0 MiB (4 runs; the Phase 1 binary in the same session: 153.9, 166.0) | yes (<= 250) |
+| AQ `app.exe` | 19,054,080 bytes | 19,568,128 bytes, +502 KiB (+633 KiB over the §3.5 figure) | yes (<= +1.5 MiB) |
+| AR `t_first_page`, median of 5 | `large_200p` 638 ms, `dense_vector` 822 ms | 678 ms (+6.3% over the 638 ms baseline), 848 ms (+5.5% over 804 ms) | yes (<= +10%) |
+| AS idle frames in 5 s | 0 (10 of 10 runs) | 0 (10 of 10 runs) | yes |
+
+The window's working set at the start of the A0 run is about 7 MiB higher than Phase 1's (104.5
+against 87.0 to 97.6 MiB); its peak is not. Every earlier bench: the A0 memory sweep (PASS),
+`--bench-nav` on the 1000-page file (20 of 20), `--bench-forms` (35 of 35), `--bench-pages` (14 of
+14; `peak_ws` 290.2 MiB, the Phase 1 binary 309.2 and 393.6 MiB in the same session). The
+`dense_vector` zoom burst passed 3 of 4 runs (worst `t_blank` 25, 26, 28 ms); one run's second
+repeat took 127 ms, above the 50 ms ceiling, the only time in this session. `cargo test
+--workspace` 230 passed; fmt, clippy, deny and reuse clean. The library crates did not change; the
+Android suite was not rerun.
 
 ## 6. Acceptance and benchmarks
 

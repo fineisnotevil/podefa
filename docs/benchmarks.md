@@ -1568,3 +1568,19 @@ the Phase 1 commit.
 The 124 KiB of growth is the theme's tokens and `slint-build`'s generated code for the same
 window. The A0 run's `peak_ws` is lower than §7.6's 192.7 MiB of 2026-10-20 on both sides of the
 change; the window is the same one, so the difference is not this phase's.
+
+### 13.3 Phase 2: own frame and islands (rows AP-AS)
+
+Release build, the §1 machine, 2026-10-25, the commands of §13.1 and §7.6 run A.
+
+| | Phase 1 | Phase 2 |
+| :--- | :--- | :--- |
+| `app.exe` | 19,054,080 bytes | 19,568,128 bytes |
+| `t_first_page` `large_200p` (5 runs) | median 638 | 659, 678, 679, 682, 675 ms; median 678 |
+| `t_first_page` `dense_vector` (5 runs) | median 822 | 778, 848, 881, 801, 864 ms; median 848 |
+| idle `frames` over 5 s | 0 in every run | 0 in every run |
+| `peak_ws`, §7.6 run A | 162.4 MiB | 162.6, 159.6, 158.6, 165.0 MiB |
+
+With the preferred window size at 1000 x 760 instead of 900 x 700, `t_first_page` was 732, 738,
+729, 752, 733 ms (`large_200p`) and 873, 902, 856, 843, 860 ms (`dense_vector`): a larger first
+view, more tiles. The window keeps 900 x 700.

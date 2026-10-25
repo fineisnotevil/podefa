@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The window's colours come from one set of design tokens** (Plan 0007 Phase 1): the canvas,
   panels, lines and text follow the new design's light and dark themes, and "System" follows the
   operating system. The window's markup moved from `main.rs` into `crates/app/ui/*.slint`.
+- **A new window** (Plan 0007 Phase 2): the window draws its own frame (move by the document's
+  name, resize from every edge, double click to maximize) and floats its controls in islands over
+  the canvas: the title row with Open, Save, Undo and Redo; the brand menu with the theme; a
+  sidebar with Read, Edit and Tools modes; the status island with pages and zoom; search under the
+  title. There is no menu bar: every menu command moved to its island (ADR 0010). macOS keeps its
+  native frame.
+
+### Added
+- **Ctrl+W closes the window** (asking about unsaved changes), and the shortcuts Open, Save, Save
+  As, Find, the sidebar and zoom work from any text field.
+
+### Removed
+- **Quit and Ctrl+Q:** the close button and Ctrl+W do the same.
 
 ### Fixed
 - **A list box shows its chosen options:** MuPDF 1.27.2 draws a list box without marking its value.
