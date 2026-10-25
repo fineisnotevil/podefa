@@ -32,7 +32,7 @@ pub mod tiling;
 pub mod tools;
 
 pub use layout::{
-    CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, PAGE_GAP_LOGICAL_PX, PageSlot,
+    CANVAS_HALF_LOGICAL_PX, CanvasWindow, DocLayout, Margins, PAGE_GAP_LOGICAL_PX, PageSlot,
     REANCHOR_MARGIN_LOGICAL_PX,
 };
 pub use scheduler::{TileAction, TileScheduler};

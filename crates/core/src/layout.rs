@@ -33,6 +33,17 @@ pub const CANVAS_HALF_LOGICAL_PX: f64 = 1_048_576.0;
 /// ~786 k logical px of travel - far beyond what one fling covers (Plan 0002, §3.2).
 pub const REANCHOR_MARGIN_LOGICAL_PX: f64 = 262_144.0;
 
+/// Room around the column for what floats over the viewport's edges (the window's islands, Plan
+/// 0007), in device pixels: the document starts `top` below its origin and ends `bottom` past its
+/// last page, and the column sits `left` from the left edge with `right` to spare after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Margins {
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+    pub left: u32,
+}
+
 /// One page placed in the document.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageSlot {
@@ -66,6 +77,7 @@ impl PageSlot {
 pub struct DocLayout {
     scale_milli: u32,
     gap_px: u32,
+    margins: Margins,
     slots: Vec<PageSlot>,
     width: u64,
     height: u64,
@@ -75,6 +87,16 @@ impl DocLayout {
     /// Lays out `pages` (their displayed bounds, rotation already applied by the engine) at a
     /// permille scale, with `gap_px` device pixels between pages and around the column.
     pub fn new(pages: &[PageSize], scale_milli: u32, gap_px: u32) -> Self {
+        Self::with_margins(pages, scale_milli, gap_px, Margins::default())
+    }
+
+    /// [`DocLayout::new`] with `margins` outside the gap around the column.
+    pub fn with_margins(
+        pages: &[PageSize],
+        scale_milli: u32,
+        gap_px: u32,
+        margins: Margins,
+    ) -> Self {
         let geometries: Vec<PageGeometry> = pages
             .iter()
             .enumerate()
@@ -85,11 +107,12 @@ impl DocLayout {
         let gap = gap_px as u64;
 
         let mut slots = Vec::with_capacity(geometries.len());
-        let mut y = gap;
+        let left = margins.left as u64 + gap;
+        let mut y = margins.top as u64 + gap;
         for (geometry, (w, h)) in geometries.into_iter().zip(sizes) {
             slots.push(PageSlot {
                 geometry,
-                x: gap + (column - w as u64) / 2,
+                x: left + (column - w as u64) / 2,
                 y,
                 w,
                 h,
@@ -99,9 +122,14 @@ impl DocLayout {
         Self {
             scale_milli,
             gap_px,
+            margins,
             slots,
-            width: column + 2 * gap,
-            height: if pages.is_empty() { 0 } else { y },
+            width: margins.left as u64 + column + 2 * gap + margins.right as u64,
+            height: if pages.is_empty() {
+                0
+            } else {
+                y + margins.bottom as u64
+            },
         }
     }
 
@@ -115,12 +143,17 @@ impl DocLayout {
         self.gap_px
     }
 
-    /// Document width: the widest page plus the margin on both sides.
+    /// The room kept around the column.
+    pub fn margins(&self) -> Margins {
+        self.margins
+    }
+
+    /// Document width: the widest page plus the gap and the margin on both sides.
     pub fn width(&self) -> u64 {
         self.width
     }
 
-    /// Document height: every page, every gap and the margin above and below.
+    /// Document height: every page, every gap and the margins above and below.
     pub fn height(&self) -> u64 {
         self.height
     }
@@ -324,6 +357,25 @@ mod tests {
         assert_eq!(layout.slot(2).map(|s| s.y), Some(8 + 2 * (792 + 8)));
         assert_eq!(layout.height(), 8 + 3 * (792 + 8));
         assert_eq!(layout.width(), 612 + 16);
+    }
+
+    #[test]
+    fn margins_move_the_column_and_grow_the_document() {
+        let margins = Margins {
+            top: 60,
+            right: 12,
+            bottom: 50,
+            left: 100,
+        };
+        let layout = DocLayout::with_margins(&[letter(), letter()], 1_000, 8, margins);
+        assert_eq!(layout.slot(0).map(|s| (s.x, s.y)), Some((100 + 8, 60 + 8)));
+        assert_eq!(layout.slot(1).map(|s| s.y), Some(60 + 8 + 792 + 8));
+        assert_eq!(layout.height(), 60 + 8 + 2 * (792 + 8) + 50);
+        assert_eq!(layout.width(), 100 + 612 + 16 + 12);
+        // A point in the top margin belongs to the first page, and its top scrolls to 0.
+        assert_eq!(layout.page_near(10.0), Some(0));
+        assert_eq!(crate::nav::page_top(&layout, 0), Some(0.0));
+        assert_eq!(crate::nav::page_top(&layout, 1), Some((792 + 8) as f64));
     }
 
     #[test]

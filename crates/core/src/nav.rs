@@ -60,10 +60,11 @@ pub fn scroll_target(action: NavAction, pos_y: f64, view_h: f64, doc_h: f64, lin
     target.clamp(0.0, (doc_h - view_h).max(0.0))
 }
 
-/// The scroll position that puts a page's top edge, with the gap above it, at the viewport top.
+/// The scroll position that puts a page's top edge, with the gap above it, at the viewport top,
+/// below the layout's top margin: the first page's is 0.
 pub fn page_top(layout: &DocLayout, page: usize) -> Option<f64> {
     let slot = layout.slot(page)?;
-    Some(slot.y as f64 - layout.gap_px() as f64)
+    Some(slot.y as f64 - layout.gap_px() as f64 - layout.margins().top as f64)
 }
 
 /// Largest permille scale at which a page's raster plus the gap on both sides fits in `avail`
