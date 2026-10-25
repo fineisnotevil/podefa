@@ -5168,6 +5168,7 @@ fn viewport_center(ui: &MainWindow) -> (f32, f32) {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    bench::mark_process_start();
     let main_window = MainWindow::new()?;
 
     // `--bench-*` flags script a run; `FA_PDF_TRACE=1` records one by hand. Both are inert
@@ -5175,6 +5176,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let args: Vec<String> = env::args().collect();
     let (path, cfg) = bench::parse_args(&args);
     let trace_on = bench::trace_enabled() || !cfg.is_empty();
+    if trace_on {
+        bench::count_frames(&main_window);
+    }
     // The two memory knobs describe the scheduler the app builds, not the run: `--cache-mib 8`
     // alone is a valid experiment (trace it by hand with `FA_PDF_TRACE=1`), and neither flag
     // starts one. `--cache-rows` is read where the model is sized, so it covers the rebuild

@@ -40,6 +40,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Minimum gap between two `frame` lines whose hole count did not change, in milliseconds.
@@ -160,6 +161,11 @@ pub struct Cfg {
     /// from its options) through the window, check each value, then undo all four; `t_edit` of
     /// each fill is its `t_fill` (Plan 0006 Phase 1, rows AI, AJ, AK).
     pub forms: bool,
+    /// `--bench-idle S`: once the opening view is covered and has settled for a second, count the
+    /// frames the window draws in the next S seconds with nothing moving, and report
+    /// `t_first_page` (Plan 0007, rows AR and AS; benchmarks §13.1). Runs alone: the other
+    /// scenarios are left out.
+    pub idle_s: f64,
 }
 
 impl Default for Cfg {
@@ -198,6 +204,7 @@ impl Default for Cfg {
             stamps: false,
             convert: false,
             forms: false,
+            idle_s: 0.0,
         }
     }
 }
@@ -223,6 +230,7 @@ impl Cfg {
             && !self.stamps
             && !self.convert
             && !self.forms
+            && self.idle_s <= 0.0
     }
 }
 
@@ -366,6 +374,10 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
                 cfg.jump_page = number.map(|page| page.max(1.0) as usize);
                 consumed = 2;
             }
+            "--bench-idle" => {
+                cfg.idle_s = number.unwrap_or(5.0).max(0.0);
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
             "--cache-mib" => {
                 cfg.cache_bytes = number.map(|mib| (mib.max(0.0) * 1024.0 * 1024.0) as usize);
                 consumed = 2;
@@ -379,6 +391,35 @@ pub fn parse_args(args: &[String]) -> (Option<String>, Cfg) {
         i += consumed;
     }
     (path, cfg)
+}
+
+/// The instant `main` began, the zero of every `t=` in the trace and of `t_first_page`.
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+/// Frames the window has drawn, counted by the rendering notifier [`count_frames`] installs.
+static FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Marks the start of the process; call it first in `main`, before the window is built, so the
+/// window's own construction is part of `t_first_page`.
+pub fn mark_process_start() {
+    PROCESS_START.get_or_init(Instant::now);
+}
+
+fn process_start() -> Instant {
+    *PROCESS_START.get_or_init(Instant::now)
+}
+
+/// Counts the frames the window draws (`frames`, benchmarks §13.1). Only installed when tracing:
+/// the notifier is one atomic add per frame, but an untraced run needs none.
+pub fn count_frames(ui: &MainWindow) {
+    let installed = ui.window().set_rendering_notifier(|state, _| {
+        if matches!(state, slint::RenderingState::AfterRendering) {
+            FRAMES.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    if let Err(err) = installed {
+        println!("[bench] no frame counter: {err}");
+    }
 }
 
 /// Whether `FA_PDF_TRACE` asks for trace output (`FA_PDF_TRACE=0` switches it off again).
@@ -695,6 +736,9 @@ pub struct Trace {
     /// the app committed, simplified (row V).
     ink_rebuild_us: Vec<(usize, u128)>,
     last_ink: Option<Vec<(f32, f32)>>,
+    /// When the opening view was first fully covered, in ms from the process start
+    /// (`t_first_page`, benchmarks §13.1).
+    first_full_ms: Option<u128>,
     /// `t_restructure` (Plan 0005, benchmarks §11.2): when the last structural edit was sent, its
     /// samples, and how long the app took to rebuild its layout on each answer.
     restructure_started: Option<Instant>,
@@ -709,7 +753,7 @@ impl Trace {
     pub fn new(on: bool) -> Self {
         Self {
             on,
-            started: Instant::now(),
+            started: process_start(),
             wait: None,
             last_report: Instant::now(),
             last_holes: 0,
@@ -743,6 +787,7 @@ impl Trace {
             rebuild_us: Vec::new(),
             restructure_timed: true,
             tools_done: 0,
+            first_full_ms: None,
         }
     }
 
@@ -942,6 +987,11 @@ impl Trace {
         }
     }
 
+    /// When the opening view was first fully covered, in ms from the process start.
+    pub fn first_full_ms(&self) -> Option<u128> {
+        self.first_full_ms
+    }
+
     /// Milliseconds since the process started: the timestamp on every line.
     fn t_ms(&self) -> u128 {
         self.started.elapsed().as_millis()
@@ -992,6 +1042,7 @@ impl Trace {
             self.stats.full_ms.push(elapsed);
             self.wait = None;
             let t = self.t_ms();
+            self.first_full_ms.get_or_insert(t);
             self.print(format_args!("full t={t}ms {elapsed} scale={target}"));
         }
     }
@@ -3783,6 +3834,10 @@ pub fn start_sampler() {
 /// out of the document's own first tile. The process exits from the last settle tick, which is
 /// what makes the run scriptable.
 pub fn start(ui: &MainWindow, cfg: Cfg) {
+    if cfg.idle_s > 0.0 {
+        start_idle(cfg.idle_s);
+        return;
+    }
     if cfg.is_empty() {
         println!(
             "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll, --bench-jump or --bench-nav"
@@ -3898,6 +3953,62 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
             std::process::exit(if pass { 0 } else { 1 });
         },
     );
+    TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
+}
+
+/// How long the opening view may take to be covered before `--bench-idle` gives up.
+const IDLE_COVER_TIMEOUT: Duration = Duration::from_secs(60);
+/// Quiet time between the covered opening view and the counted window.
+const IDLE_SETTLE: Duration = Duration::from_secs(1);
+
+/// `--bench-idle S` (rows AR and AS): waits for the opening view to be covered, settles, then
+/// counts frames for `secs` seconds with no input. Exits 0 when no frame was drawn.
+fn start_idle(secs: f64) {
+    println!(
+        "[bench] idle run: settle {}ms, count {secs}s",
+        IDLE_SETTLE.as_millis()
+    );
+    let counted = Duration::from_secs_f64(secs);
+    // (when the view was covered, frames at the start of the count, when the count started)
+    let mut covered: Option<Instant> = None;
+    let mut count_from: Option<(u64, Instant)> = None;
+    let opened = Instant::now();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+        let first = crate::APP.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|state| state.bench.first_full_ms())
+        });
+        let Some(first) = first else {
+            if opened.elapsed() > IDLE_COVER_TIMEOUT {
+                println!("[bench] idle FAIL: the opening view was never covered");
+                std::process::exit(1);
+            }
+            return;
+        };
+        let now = Instant::now();
+        let since = *covered.get_or_insert(now);
+        if count_from.is_none() && since.elapsed() >= IDLE_SETTLE {
+            count_from = Some((FRAMES.load(Ordering::Relaxed), now));
+        }
+        let Some((frames_from, from)) = count_from else {
+            return;
+        };
+        if from.elapsed() < counted {
+            return;
+        }
+        let frames = FRAMES.load(Ordering::Relaxed) - frames_from;
+        let ms = from.elapsed().as_millis();
+        println!("[bench] t_first_page={first}ms (process start to the opening view covered)");
+        println!(
+            "[bench] idle frames={frames} over {ms}ms, {} before the count",
+            frames_from
+        );
+        let pass = frames == 0;
+        println!("[bench] idle {}", if pass { "PASS" } else { "FAIL" });
+        std::process::exit(if pass { 0 } else { 1 });
+    });
     TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
 }
 
