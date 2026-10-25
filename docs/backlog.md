@@ -411,7 +411,8 @@ crates (below); the app crate has not been built for either:
 
 ### Proposed Solution
 
-A plan of its own when the maintainer starts mobile work:
+Taken up by Plan 0008 (`docs/plans/0008-mobile-gui-android.md`, started 2026-10-26). The
+original proposal:
 
 - **Phase 0:**
   1. Script the device run above (build at the device path, push, run) or move the tests to

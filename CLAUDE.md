@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 Guidance for AI coding agents working in this repository. Read this first, then `README.md`, `docs/adr/`, `docs/plans/`, `docs/benchmarks.md` and `docs/backlog.md` before changing anything.
 
-> Status snapshot: 2026-10-25. Sections marked **(verify)** were reported by earlier agent sessions and should be checked against the repo before relying on them.
+> Status snapshot: 2026-10-26. Sections marked **(verify)** were reported by earlier agent sessions and should be checked against the repo before relying on them.
 
 ## 1. What this project is
 
@@ -141,6 +141,8 @@ Key questions for Phase 0:
 - Layout in `core` (prefix sums, binary search, mixed sizes, rotation, MediaBox origin, fit-width/fit-page, focal-point zoom across pages); virtualization (only visible ± margin pages hold tiles/display lists); tile model capacity when many small pages are visible; epochs across pages.
 - Navigation in scope: current-page indicator, go-to-page, PgUp/PgDn/Home/End, arrows/space, zoom shortcuts, ctrl+wheel. Out of scope but not designed out: thumbnails, outline, search, text selection, spreads.
 - Benchmarks: fling scroll 30 s on 200p and 1000p+, jump-then-zoom, mixed/rotated docs; RSS must not grow with page count.
+
+**Plan 0008 - Mobile GUI, Android first** (`docs/plans/0008-mobile-gui-android.md`): started 2026-10-26 when the maintainer added a mobile interface to the concept (`podefa-ui-concept/src/components/mobile/`, its `DESIGN.md` step 38: header island, bottom thumb dock, edit strip, one-column gallery, bottom-sheet drawer). Phase 0 (research, the plan) is **in progress, waiting for the §9 answers**: Slint 1.18.1 has the Android backend (`backend-android-activity-06`, `android_main` in a `cdylib`), recognizes pinch from two fingers itself, and exposes safe-area and on-screen keyboard insets; which renderer Android draws with is unknown until a trial build, which needs downloads on the mini PC (SDK, JDK, APK tool) that wait for the maintainer's OK. Design: one app, two shells (`crates/app/ui/mobile/`), `content://` files through a cache copy and a write-back (ADR in Phase 1), rows MA-MK on the phone.
 
 ### Roadmap after that
 
