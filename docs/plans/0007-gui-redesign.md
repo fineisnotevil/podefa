@@ -7,14 +7,16 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 2 (own frame and islands) implemented and at its gate - awaiting approval.** Row AV
-needs the maintainer's hands (§5, Phase 2 results).
+**Phase 3 (the three modes) implemented and at its gate - awaiting approval.** Row AT fails on
+its strict reading: no change rendered a tile, but some frames took longer than 16.7 ms (§5,
+Phase 3 results); the maintainer decides.
 
 - Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
 - Phase 1 (`.slint` files, `slint-build`, the `Theme` global): passed its gate on 2026-10-25.
-- Phase 2: **implemented, at its gate** (2026-10-25); results in §5 and `docs/benchmarks.md`
-  §13.3; ADR 0010.
-- Phases 3 to 5: not started.
+- Phase 2 (own frame and islands, ADR 0010): passed its gate on 2026-10-25.
+- Phase 3: **implemented, at its gate** (2026-10-25); results in §5 and `docs/benchmarks.md`
+  §13.4.
+- Phases 4 and 5: not started.
 
 Started 2026-10-25 on the maintainer's decision to put the GUI before the remaining roadmap
 ("Gelecek planları erteliyoruz. Sırada GUI güncellemesi var"; v0.5 Secure and later wait). Plan
@@ -44,6 +46,8 @@ in the concept (its `DESIGN.md`, step 37). The answers to §9:
    The maintainer can still change any of them before Phase 2.
 
 **Phase 1 passed its gate on 2026-10-25** ("Phase 1 onaylandı, Faz 2'ye başla").
+
+**Phase 2 passed its gate on 2026-10-25** ("Faz 2 onaylandı, Faz 3'e başla").
 
 ## 1. Goal and scope
 
@@ -297,6 +301,101 @@ against 87.0 to 97.6 MiB); its peak is not. Every earlier bench: the A0 memory s
 repeat took 127 ms, above the 50 ms ceiling, the only time in this session. `cargo test
 --workspace` 230 passed; fmt, clippy, deny and reuse clean. The library crates did not change; the
 Android suite was not rerun.
+
+### Phase 3 results (2026-10-25)
+
+- **Files:** `crates/app/ui/gallery.slint` (new: the desk, the stone strip with its rulers, page
+  cards, the gaps between them, the drop marker, the scroll bar, the bar over chosen pages);
+  `main.slint` (the mode motion, Edit's dot grid, the gallery's place); `sidebar.slint` (palettes
+  pour out, tinted tools); `theme.slint` (new tokens: Edit's canvas, the dot grid, the desk, the
+  cards, the tool tints, `motion` 250 ms, `pour` 220 ms and 40 ms apart);
+  `crates/app/ui/textures/` (three small SVG tiles); four Lucide icons. In Rust:
+  `pdf_core::pages::kept_rows` (which gallery rows survive a page edit, with a test), the
+  gallery's state and keys in `crates/app/src/main.rs`, `--bench-modes` in `bench.rs`.
+- **Edit:** the canvas turns a shade darker and a dot grid lies under the pages. Highlight,
+  Strike-out and Ink are tinted with their own colour when chosen; their swatches and line widths
+  pour out one after another (opacity and scale, `ease-out-expo`).
+- **Tools:** the canvas falls back (scales to 92%) and the gallery comes in over it (from 88%,
+  fading in), the concept's camera pull-back. The gallery shows the pages on a desk texture, in
+  a row on a stone strip with rulers, a page number on each. Click, Ctrl+click and Shift+click
+  choose pages, the tick box adds or removes one, Ctrl+A chooses all, Esc clears. A page's hover
+  bar rotates it either way, extracts, duplicates or deletes it; with more than one chosen, a bar
+  does that to all of them. Dragging one page, or the chosen ones, into a gap moves them there;
+  the gap shows where. A gap's "+" opens a pill: Split here, a blank page here (the size of the
+  page before), pages from a file here. Arrows, Home, End and Shift move and extend the choice,
+  Delete deletes. Double click opens the page in Read. The status island keeps only the page
+  navigation, centred under the gallery. Thumbnails are drawn at the gallery's size only for the
+  cards near the view (2 cards either side, at most 24 held) and only after a motion ends.
+- **Pages slide instead of being drawn again:** after a delete, an insert, a duplicate or a move,
+  the model keeps the rows whose pages survived (`kept_rows`, the longest increasing run of old
+  indices) and removes or inserts the others, so Slint keeps their card instances
+  (`i-slint-core-1.18.1/model/repeater.rs:549-605`) and their pictures, and `animate x` slides
+  them into place.
+- **The motion renders nothing:** a mode change only changes opacity and scale; the canvas keeps
+  its size and place, so no tile is requested. Rust holds every thumbnail request until the
+  motion has ended (`MODE_MOTION_MS` 250 + 30 ms).
+- **First visits:** the first change into Edit and into Tools cost 19-20 ms and 34-39 ms in their
+  first frame, because femtovg tints each `Image` item's icon the first time it is drawn
+  (`i-slint-renderer-femtovg-1.18.1/itemrenderer.rs:1221-1290`) and the gallery was drawn for the
+  first time. So once a document's first view is covered, one frame (40 ms) draws the dot grid,
+  the gallery and every mode's commands at opacity 0, which femtovg still renders into a layer
+  (`itemrenderer.rs:520-533`, `i-slint-core-1.18.1/items.rs:955-971`); and the sidebar keeps all
+  three modes' command sets built (shown by `visible`) instead of building them on each change.
+  This brought the first change into Edit to 7-12 ms and the first into Tools to 12-21 ms.
+- **Deliberate differences from the concept, for now:** the canvas does not fade going to Tools,
+  it only scales: an opacity under 1 on the tiles' parent makes femtovg draw them into a layer on
+  every frame of the motion; the gallery covers it instead. The zoom part of the status island
+  folds away in Tools. The thumbnails button left Tools' island (the gallery replaces it). Split
+  from a gap opens the Split panel with the two ranges filled in, until Phase 4's tabs can open
+  the halves. Dragging pages to another tab waits for Phase 4.
+
+Row AT, `--bench-modes 2` (each run: 12 changes round Read, Edit and Tools; definitions in
+`docs/benchmarks.md` §13.4), release build, 5 runs per file:
+
+| | `large_200p` | `dense_vector` |
+| :--- | :--- | :--- |
+| Tiles requested or rendered during a change | 0 in every change (60 of 60) | 0 in every change (60 of 60) |
+| First change into Tools, `frame_max` | 18.6, 19.1, 14.6, 21.2, 19.8 ms | 15.2, 13.6, 13.1, 12.0, 17.1 ms |
+| Every other change, median `frame_max` per run | 9.1-10.4 ms | 8.9-9.5 ms |
+| Other changes over 16.7 ms | 5 of 55 (19.2-60.9 ms) | 2 of 55 (19.8, 80.0 ms) |
+
+So row AT holds for tiles and fails for frames: the first entry into Tools of a document is over
+budget in 5 of 10 runs, and a few other changes, at random places in the round, took one long
+frame. Those random long frames came in a session where the machine was busy (another process
+used much CPU): the Phase 2 binary's `dense_vector` zoom burst, run alternately with this one in
+the same session, also had `t_blank` of 166-429 ms in some repeats against 25-28 ms in the
+others, and so did this build's. A run of the experiment build earlier in the day passed all 12
+changes (worst 13.8 ms). The zoom burst is the Plan 0001 path: its windows' `frame_max` was
+2.9-8.8 ms in a quiet run and up to 33.5 ms in a busy one, and its tiles render only after the
+burst, as before.
+
+| Row | Phase 2 | Phase 3 | Pass |
+| :--- | :--- | :--- | :--- |
+| AP `peak_ws`, default configuration | 162.6, 159.6, 158.6, 165.0 MiB | 165.4, 168.5, 167.3 MiB (3 runs) | yes (<= 250) |
+| AQ `app.exe` | 19,568,128 bytes | 19,715,584 bytes, +144 KiB (+777 KiB over the §3.5 figure) | yes (<= +1.5 MiB) |
+| AR `t_first_page`, median of 5 | 678 ms, 848 ms | run alternately with the Phase 2 binary in a busy session: `large_200p` 743 ms (Phase 2: 720), `dense_vector` 921 ms (Phase 2: 935) | yes against the same session's Phase 2 (+3.2%, -1.5%); both builds were 13-16% over the 638 ms baseline that session |
+| AS idle frames in 5 s | 0 | 0 in 40 of 43 runs; 3 runs drew 50, 137 and 201 frames while the maintainer was using the machine (the cursor was not logged for them); 0 in all 18 later runs that logged it | yes, the 3 runs unexplained |
+| AT motion | - | 0 tiles; frames over 16.7 ms as above | **no** (frames) |
+
+Every earlier bench: `--bench-pages` on 200 and 1000 pages (14 of 14 each; `peak_ws` 294.2 and
+329.1 MiB), `--bench-nav` on the 1000-page file (20 of 20), `--bench-forms` (35 of 35), the A0
+memory sweep (PASS, 3 of 3). `cargo test --workspace` 231 passed; fmt, clippy, deny and reuse
+clean. `pdf-core` changed (`kept_rows`), but the phone was not connected to the mini PC, so the
+Android suite was not run.
+
+Checked by driving the release build, with screenshots in both themes: Edit's grid and tints, the
+palettes pouring out, the gallery's desk, strip, cards, hover bar, tick box and gap pill;
+choosing by click; panning by drag; a delete that slides the 199 remaining pages; a drag into gap
+0 that moves the page.
+
+Options for row AT's frames, for the maintainer:
+
+1. Accept it as documented: no change renders a tile, the median change frame is about 9-10 ms,
+   and the first entry into Tools of a document is 12-21 ms.
+2. Rerun the bench on a quiet machine (other programs closed) before deciding: the random long
+   frames may go away; the first Tools entry most likely stays.
+3. Look for the rest of the first Tools entry's cost with a profiler. A longer warm-up (300 ms
+   instead of 40 ms) changed nothing, and neither did hiding the page pictures.
 
 ## 6. Acceptance and benchmarks
 

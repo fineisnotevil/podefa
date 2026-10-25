@@ -1584,3 +1584,35 @@ Release build, the §1 machine, 2026-10-25, the commands of §13.1 and §7.6 run
 With the preferred window size at 1000 x 760 instead of 900 x 700, `t_first_page` was 732, 738,
 729, 752, 733 ms (`large_200p`) and 873, 902, 856, 843, 860 ms (`dense_vector`): a larger first
 view, more tiles. The window keeps 900 x 700.
+
+### 13.4 Phase 3: mode changes (row AT)
+
+Metrics, measured by the rendering notifier `count_frames` installs when tracing:
+
+- **`frame_ms`:** from Slint's `RenderingState::BeforeRendering` to its `AfterRendering`: the
+  drawing and the hand-over to the GPU, without the wait for the display
+  (`i-slint-renderer-femtovg-1.18.1/lib.rs:260, 333`). `frame_max` is the longest in a window,
+  `frame_first` the first one.
+- **`gap_max`:** the longest time between the ends of two frames in a window, the first frame's
+  end measured from the window's start.
+- **A change's window:** from setting `mode` to the end of the motion plus its settle margin
+  (`MODE_MOTION_MS` 250 + `MODE_SETTLE_MS` 30 = 280 ms). `tiles_requested` and `tiles_rendered`
+  are the window counters' growth over it.
+- **`--bench-modes N`:** waits for `t_first_page`, settles for 1 s, then changes the mode `N`
+  rounds of Read > Edit > Tools > Read > Tools > Edit > Read, 800 ms apart. Passes when no change
+  requested or rendered a tile and no `frame_ms` was over 16.7 ms; exit code 0.
+
+The harness's other windows (`--bench-zoom`, `--bench-pan`) now print `frames`, `frame_max`,
+`frame_first` and `gap_max` too.
+
+```
+target\release\app.exe crates\engine-mupdf\tests\fixtures\large_200p.pdf --bench-modes 2
+target\release\app.exe crates\engine-mupdf\tests\fixtures\dense_vector.pdf --bench-modes 2
+```
+
+Release build, the §1 machine, 2026-10-25, 5 runs each: 0 tiles in all 120 changes. The first
+change into Tools took 12.0-21.2 ms in its first frame (over 16.7 ms in 5 of 10 runs); every
+other change's median `frame_max` was 8.9-10.4 ms per run, with 7 of 110 over 16.7 ms
+(19.2-80.0 ms) at random places, in a session where the machine was busy. Before the warm-up
+frame (plan §5, Phase 3 results), the first change into Edit took 19.5-20 ms and the first into
+Tools 34-39 ms. The full table and the other rows are in the plan's §5.

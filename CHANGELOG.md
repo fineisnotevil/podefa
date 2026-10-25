@@ -22,8 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidebar with Read, Edit and Tools modes; the status island with pages and zoom; search under the
   title. There is no menu bar: every menu command moved to its island (ADR 0010). macOS keeps its
   native frame.
+- **Read, Edit and Tools look and move apart** (Plan 0007 Phase 3): Edit lays a dot grid under the
+  pages and tints the active markup tool; its colours and line widths pour out beside it. Tools
+  pulls back to a gallery of the pages on a desk, in place of the drawer's thumbnails and the
+  Pages menu. The canvas only fades and scales during a change, so no page is drawn again.
 
 ### Added
+- **The Tools gallery** (Plan 0007 Phase 3): click, Ctrl+click and Shift+click choose pages, the
+  tick box adds one, Ctrl+A chooses all; drag one or the chosen pages into a gap to move them;
+  each page's hover bar rotates, extracts, duplicates or deletes it, and a bar over several chosen
+  pages does the same to them; the gap between two pages inserts a blank page or pages from a file
+  there, or opens Split at that page. Pages slide into place after a delete, insert or move
+  instead of being drawn again. Double click opens a page in Read; arrows, Home and End move
+  through the pages, Delete deletes the chosen ones.
 - **Ctrl+W closes the window** (asking about unsaved changes), and the shortcuts Open, Save, Save
   As, Find, the sidebar and zoom work from any text field.
 
