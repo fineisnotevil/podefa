@@ -1618,3 +1618,32 @@ every other change's median `frame_max` 7.8-9.9 ms per run; 13 of 16 runs passed
 worst frames 18.5, 19.3 and 19.8 ms. Before the warm-up frame (plan §5, Phase 3 results), the
 first change into Edit took 19.5-20 ms and the first into Tools 34-39 ms. The other rows are in
 the plan's §5.
+
+### 13.5 Phase 4: tabs (row AU)
+
+Metrics, printed by `--bench-tabs N` (run alone, exit code 0 on a pass):
+
+- **Steps:** once the opening view is covered (no holes among the visible tiles) the harness
+  waits 1.5 s and reads the working set; then it opens the same document in a new tab and does
+  the same, until there are `N` tabs; then it shows tabs 1 to `N - 1` again, one by one, the
+  same way.
+- **`ws_1`, `ws_N`:** the working set with one tab, and with `N` tabs, after their view settled.
+  **`ws_after_round`:** after the last tab shown again.
+- **`doc_mem`:** `ws_2 - ws_1`, what a second tab of the document added: one document's own
+  memory (its MuPDF document, the search thread's copy, page sizes, its three threads).
+- **`ceiling`:** `ws_1 + N x doc_mem`. Row AU passes when `ws_N` and `ws_after_round` are at most
+  the ceiling, and, for `N <= 4`, `peak_ws` is at most 250 MiB.
+- **`t_open`:** for each tab, the time from asking for it (the open, or the first view for tab
+  1) to its view covered. **`t_switch`:** the same for a tab shown again: its first view drawn
+  from nothing, as a parked tab holds no pixels (ADR 0011).
+
+```
+target\release\app.exe crates\engine-mupdf\tests\fixtures\large_200p.pdf --bench-tabs 4
+target\release\app.exe crates\engine-mupdf\tests\fixtures\large_200p.pdf --bench-tabs 10
+```
+
+Release build, the §1 machine, 2026-10-25, 3 runs each: with 4 tabs `peak_ws` 152.7-155.5 MiB and
+`ws_4` 146.2-148.9 MiB under ceilings of 156.1-168.2 MiB; with 10 tabs `ws_10` 157.8-158.2 MiB
+under ceilings of 175.4-216.1 MiB, 2.0-2.1 MiB per extra tab on average. `t_open` 64-82 ms for
+tabs 2 to N, `t_switch` 19-21 ms. Row AU passes in 6 of 6 runs; the table and the other rows are
+in the plan's §5, Phase 4 results.

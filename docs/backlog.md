@@ -697,3 +697,50 @@ during the burst.
 
 Find where the UI thread waits (a profiler over a failing repeat; the Windows timer resolution
 and GPU power state are candidates), on the §1 machine and on another one.
+
+## 21. Tabs: a long name scrolls in its tab
+
+**Labels:** `ui`, `enhancement`
+
+### Problem Statement
+
+A squeezed tab cuts its document's name with an ellipsis (Plan 0007 Phase 4); the full name is in
+the tab's tooltip only. The concept scrolls the name inside the tab while the pointer is over it.
+
+### Proposed Solution
+
+On hover, move the title text left by its overflow with an `animate x`, and back when the
+pointer leaves. It must stop when nothing hovers it, so row AS (no idle frames) keeps holding.
+
+## 22. Tabs: drop a tab onto a gallery gap to insert its document
+
+**Labels:** `ui`, `enhancement`
+
+### Problem Statement
+
+The concept merges two documents by dragging a tab onto a gap in Tools' gallery. Plan 0007
+Phase 4 moves pages the other way (gallery cards onto a tab or onto +) and Merge stays in the
+Tools island.
+
+### Proposed Solution
+
+Make the tab a `DragArea` carrying its id, accept it in the gallery's gaps, and run the existing
+Extract (all pages of that tab) plus Insert from File at the gap: the same path as dragging pages
+onto a tab, one undo step. Tab reordering by drag would share the drag.
+
+## 23. Tabs: trim MuPDF's resource store per tab
+
+**Labels:** `performance`, `memory`
+
+### Problem Statement
+
+A tab out of view drops its tiles, thumbnails and display lists (ADR 0011), but MuPDF's resource
+store (decoded fonts and images) is shared by every context in the process and keeps a parked
+tab's entries until it evicts them for room. With documents heavy in images, a parked tab can
+keep tens of MiB that nothing on screen uses.
+
+### Proposed Solution
+
+Measure first: row AU with an image-heavy document. If it matters, scavenge the store on park
+(`fz_shrink_store` or `fz_empty_store` through a `fz_try` wrapper in `patches/mupdf/journal/`),
+or give each engine its own store and drop it on park.

@@ -10,6 +10,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 Accepted; amended 2026-10-20 (see "Amendment" below - the rest of this record is the original
 decision, kept as written).
 
+Amended again by ADR 0011 (2026-10-25): a window has one engine actor per tab, and they share one
+render pool instead of each starting its own.
+
 ## Amendment: tiles, a worker pool and epochs (Plan 0001, Phases 1-2)
 
 The decision below still holds in its core - **one actor thread owns the `Document`, and the UI only

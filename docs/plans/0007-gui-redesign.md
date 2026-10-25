@@ -7,17 +7,18 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 3 (the three modes, and the floating islands) implemented and at its gate - awaiting
-approval.** The maintainer approved it for the most part on 2026-10-25 and asked for five fixes,
-done (§5, Phase 3 results, "Second review"). Row AT: no mode change rendered a tile; the first
-entry into Tools is at the 16.7 ms budget (12.6-16.9 ms).
+**Phase 4 (tabs) implemented and at its gate - awaiting approval.** Row AU passes: 10 tabs of
+`large_200p.pdf` hold 157.4-158.2 MiB against ceilings of 175.4-216.1 MiB, 4 tabs peak at
+152.7-155.5 MiB (§5, Phase 4 results).
 
 - Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
 - Phase 1 (`.slint` files, `slint-build`, the `Theme` global): passed its gate on 2026-10-25.
 - Phase 2 (own frame and islands, ADR 0010): passed its gate on 2026-10-25.
-- Phase 3: **implemented, at its gate** (2026-10-25); results in §5 and `docs/benchmarks.md`
-  §13.4.
-- Phases 4 and 5: not started.
+- Phase 3 (the three modes, the floating islands): passed its gate on 2026-10-25 after five
+  review fixes (§5, Phase 3 results, "Second review").
+- Phase 4 (tabs, ADR 0011): **implemented, at its gate** (2026-10-25); results in §5 and
+  `docs/benchmarks.md` §13.5.
+- Phase 5: not started.
 
 Started 2026-10-25 on the maintainer's decision to put the GUI before the remaining roadmap
 ("Gelecek planları erteliyoruz. Sırada GUI güncellemesi var"; v0.5 Secure and later wait). Plan
@@ -429,6 +430,88 @@ palettes pouring out, the gallery's desk, strip, cards, hover bar, tick box and 
 choosing by click; panning by drag; a delete that slides the 199 remaining pages; a drag into gap
 0 that moves the page; the first page under the title row, pages passing under the title, the
 sidebar and the status island when zoomed, and the column moving beside the opened drawer.
+
+### Phase 4 results (2026-10-25)
+
+- **Files:** `crates/app/src/tabs.rs` (new: the tab list, switching, parking, closing, pages
+  between tabs); the tab strip in `crates/app/ui/title.slint` (`Tab`, `TabStrip`); `TabItem` in
+  `types.slint`; the scissors back in the gallery's gap pill (`gallery.slint`); `RasterPool`,
+  `EngineHandle::spawn_with` and `EngineCmd::Trim` in the engine; `--bench-tabs` in `bench.rs`;
+  ADR 0011; `crates/engine-mupdf/tests/shared_pool_test.rs`.
+- **One engine per tab, one pool, one budget (ADR 0011):** each tab's engine actor owns its
+  document, search and tool threads; every engine rasterizes on one shared pool, and a queued
+  job carries the channel of the engine that asked. Only the shown tab draws: switching parks
+  the shown tab (its tiles, base layers, thumbnails, text boxes and overlays go, and its engine
+  drops its display lists and raster buffer) and gives the window's tile cache, models and
+  settings to the incoming one, which draws its view again where it was. A parked tab's engine
+  events wait in its queue (pixels excepted) and are applied before its first view when it is
+  shown.
+- **The strip:** tabs sit in the title row after the file commands, up to 180 px wide, squeezing
+  down to 76 px as more open, then scrolling with the wheel (the shown tab is kept in view). A
+  long name ends in an ellipsis and the full name is the tab's tooltip; an unsaved tab has a dot.
+  Hovering a tab shows its close button over a fade; middle click closes too. The + opens a file
+  in a new tab. Ctrl+T opens a file, Ctrl+W closes the shown tab (the last one closes the
+  window), Ctrl+Tab and Ctrl+Shift+Tab (and Ctrl+PageDown, Ctrl+PageUp) go round the tabs.
+  Opening a file no longer replaces the shown document: it opens in a tab of its own, in the
+  shown tab when that is empty, or switches to the tab that has it. Closing a tab or the window
+  asks about each tab's unsaved changes in turn, the tab shown for the question.
+- **Pages between tabs:** gallery pages (the dragged one, or the chosen ones) dropped on another
+  tab are copied to the end of its document, one undo step there (status: "Copied N pages to the
+  end of ..."); dropped on + they open as a new document in a new tab. The gap pill's scissors
+  split: the pages from that gap on leave the document (one undo step) and open in a new tab
+  named after the range (`name_2-200`), with no dialog. Each writes the pages with the existing
+  Extract on the source's tool thread (unsaved edits included) to `%TEMP%\PODEFA`, then runs
+  Insert from File on the target or opens the file. A document made this way is unsaved and has
+  no file of its own: Save goes to Save As, in the source document's folder. The app deletes the
+  files when their tab closes or the app ends.
+- **Found on the way:** a document opened while Tools was shown asked for no thumbnails (the
+  gallery's first cards were in view without a scroll that would ask); `set_document` now asks.
+  A tab shown again after a split drew its view with the old page count before its queued
+  `Restructured` (an "out of bounds" error): queued events now come before the first view.
+  Leaving the process from a bench run with tabs open crashed in the teardown of the tab list
+  (`0xC0000409`); every exit now shuts the tabs' engines down first (`exit_process`). The status
+  island said "1 pages".
+
+Row AU, `--bench-tabs N` on `large_200p.pdf` (definitions in `docs/benchmarks.md` §13.5),
+release build, the §1 machine, 3 runs each:
+
+| | 4 tabs | 10 tabs |
+| :--- | :--- | :--- |
+| `ws_1` | 135.0, 139.3, 136.0 MiB | 139.8, 139.6, 139.0 MiB |
+| `doc_mem` (the second tab) | 7.9, 4.2, 8.1 MiB | 7.6, 3.6, 5.2 MiB |
+| `ws_N` | 146.2, 148.1, 148.9 MiB | 158.2, 157.8, 158.1 MiB |
+| `ws_after_round` | 146.0, 148.4, 151.6 MiB | 157.9, 157.4, 155.3 MiB |
+| `ceiling` | 166.6, 156.1, 168.2 MiB | 216.1, 175.4, 190.6 MiB |
+| `peak_ws` | 152.7, 153.0, 155.5 MiB (<= 250) | 164.6, 162.4, 162.3 MiB |
+| `t_open` (tabs 2 to N) | 67-71 ms | 64-82 ms |
+| `t_switch` | 19-20 ms | 19-21 ms |
+| Pass | 3 of 3 | 3 of 3 |
+
+Ten tabs cost 18.2-19.1 MiB over one, 2.0-2.1 MiB per extra tab on average; the round of
+switches leaves the working set where it was.
+
+The other rows and every earlier bench, release build, run alternately with the Phase 3 binary
+(`8176f48`) in the same session:
+
+| Row | Phase 3 binary | Phase 4 | Pass |
+| :--- | :--- | :--- | :--- |
+| AP `peak_ws`, §7.6 run A | 175.6, 181.3, 180.1 MiB | 175.9, 174.5, 175.2 MiB | yes (<= 250) |
+| AQ `app.exe` | 19,723,264 bytes | 19,789,824 bytes, +65 KiB (+852 KiB over the §3.5 figure) | yes (<= +1.5 MiB) |
+| AR `t_first_page`, median of 5 | 669 ms, 814 ms | 666 ms, 827 ms (+4.4% and +2.9% over the Phase 1 baselines) | yes |
+| AS idle frames in 5 s | 0 in 10 of 10 | 0 in 10 of 10 in this batch; 2 of 18 earlier runs drew 163 and 11 frames (the machine was in use; cursor not logged) | yes |
+| AT `--bench-modes 2`, 0 tiles | 0 in 96 changes | 0 in 96 changes | yes |
+| AT first entry into Tools | `large_200p` 15.7-23.8 ms, `dense_vector` 14.1-15.2 ms | 16.3-18.6 ms, 13.8-15.7 ms | as Phase 3: at the budget |
+
+`--bench-pages` 14 of 14 on 200 and 1000 pages, `--bench-nav` 20 of 20, `--bench-forms` 35 of
+35, the A0 sweep PASS in 3 of 3. `cargo test --workspace` 234 passed (the new shared-pool test and
+`tab_shortcuts` included); fmt, clippy, deny and reuse clean. The engine changed (`RasterPool`,
+`Trim`), but the phone was not connected to the mini PC, so the Android suite was not run.
+
+Checked by driving the release build: tabs squeezing and their close button and tooltip; a
+gallery page dropped on another tab (copied to its end, that tab marked unsaved, its undo
+enabled); a page dropped on + (a new tab with that page); Split at the gap after page 1 of
+`large_200p.pdf` (a new tab `large_200p_2-200` with 199 pages and their thumbnails; the source
+left with page 1, both unsaved, no error on switching back); Ctrl+Tab; Ctrl+W on an unchanged tab.
 
 ## 6. Acceptance and benchmarks
 

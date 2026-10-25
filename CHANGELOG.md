@@ -12,7 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Tabs** (Plan 0007 Phase 4, ADR 0011): open several documents in one window. Open, Open
+  Recent, a dropped file and the "+" button (Ctrl+T) open a document in a new tab (or in the
+  shown tab when it is empty, or switch to the tab that has it); tabs share the title row down to
+  a narrow width, then scroll with the wheel. Close a tab with its close button, a middle click or
+  Ctrl+W (the last tab closes the window); Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+Page Down and Ctrl+Page
+  Up step through them. Closing the window asks about each tab with unsaved changes in turn.
+- **Pages between tabs:** drag pages from the gallery or the thumbnails onto a tab to copy them
+  to the end of its document (one undo step there), or onto "+" to open them as a new document.
+- **Split in the gallery again:** the scissors in a gap's pill move the pages after it into a new
+  tab, with no dialog; the new document is saved with Save As.
+
 ### Changed
+- **Opening a document keeps the one you have open**: it opens in a tab of its own, so opening no
+  longer asks to save the shown document first.
+- **The window shares one tile budget and one set of raster workers across its tabs:** only the
+  shown tab holds tiles, base layers, thumbnails and display lists.
 - **The window's colours come from one set of design tokens** (Plan 0007 Phase 1): the canvas,
   panels, lines and text follow the new design's light and dark themes, and "System" follows the
   operating system. The window's markup moved from `main.rs` into `crates/app/ui/*.slint`.
@@ -22,8 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidebar with Read, Edit and Tools modes; the status island with pages and zoom; search under the
   title. There is no menu bar: every menu command moved to its island (ADR 0010). macOS keeps its
   native frame.
-- **The thumbnails and outline drawer is Read's only** and ends above the status row. Split is
-  out of Tools for now: it comes back with tabs, opening the pages from a chosen gap as a new tab.
+- **The thumbnails and outline drawer is Read's only** and ends above the status row.
 - **The gallery** sits in the middle while its pages fit, and its rulers carry a scroll crown:
   drag it, or turn the wheel over it, to scroll.
 - **The islands float over the pages** (Plan 0007 Phase 3): the pages run under the whole
