@@ -7,11 +7,12 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 0 (research, measurements, this document) at its gate - awaiting approval.** The
-questions in §9 need answers before Phase 1.
+**Phase 1 (`.slint` files, `slint-build`, the `Theme` global) implemented and at its gate -
+awaiting approval.**
 
-- Phase 0 (research, the design's cost, this plan): **done, at its gate** (2026-10-25).
-- Phases 1 to 5: not started.
+- Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
+- Phase 1: **implemented, at its gate** (2026-10-25); results in §5 and `docs/benchmarks.md` §13.
+- Phases 2 to 5: not started.
 
 Started 2026-10-25 on the maintainer's decision to put the GUI before the remaining roadmap
 ("Gelecek planları erteliyoruz. Sırada GUI güncellemesi var"; v0.5 Secure and later wait). Plan
@@ -23,7 +24,22 @@ this plan ports its decisions to Slint, not its code.
 
 ## 0. Gate record
 
-Not yet passed. §9 lists the questions.
+**Phase 0 passed its gate on 2026-10-25** ("Tamam, gerçek GUI oluşturmaya başla"), after the
+maintainer had the concept checked against the app's 42 menu commands and placed the missing ones
+in the concept (its `DESIGN.md`, step 37). The answers to §9:
+
+1. **Menus:** no menu bar and no menu button with the old menus. Every command lives in the
+   island or context it belongs to, as the concept places it: Save As behind an arrow on Save
+   (Ctrl+Shift+S); Rotate Left beside every Rotate Right; Reset Field on the field itself (on
+   hover); a selected highlight, underline, strike-out or ink stroke shows its colours and Delete;
+   Images to PDF in the Tools mode's sidebar; the theme (Light, Dark, System) and About in the
+   brand island's menu; Ctrl+W closes the tab. Left out on purpose: Quit (the window's close
+   button) and Merge Files without opening them (dragging an open tab into the gallery merges).
+2. to 6. The go came with no other answers, so the recommended ones stand: English, every string
+   ready for `@tr()`; tabs in this plan (Phase 4); Windows-style controls on Windows and Linux, the
+   native frame on macOS; no Snap Layouts flyout for now (`docs/backlog.md` item 19); the theme
+   follows the system by default (already so: `pdf_core::settings::Theme::System` is the default).
+   The maintainer can still change any of them before Phase 2.
 
 ## 1. Goal and scope
 
@@ -144,7 +160,7 @@ and idle CPU are measured in Phase 1 before anything changes, with the commands 
 
 | Phase | Content | Gate checks |
 | :--- | :--- | :--- |
-| 0 | This research and plan | §9 answered |
+| 0 | This research and plan (passed, §0) | §9 answered |
 | 1 | `.slint` files and `slint-build`; the `Theme` global with both themes, applied to today's layout; baseline and after: size, startup, idle CPU | Every bench as before; rows AP, AQ, AR, AS |
 | 2 | Own frame and islands: no system frame, move, resize, window controls, windowed and maximized insets, brand, title, sidebar, status bar and search islands; the menu's new home (§9 q1) | Row AV; every command still reachable by mouse and keyboard |
 | 3 | The three modes: Edit's toolbar, colour palettes and dot grid; Tools' gallery with multi-select, drag to reorder, dividers that insert and split; the mode transitions | Row AT; Plan 0005's page operations still pass |
@@ -153,6 +169,39 @@ and idle CPU are measured in Phase 1 before anything changes, with the commands 
 
 Each phase also runs the library crates' suite on the Android phone (`docs/backlog.md` item 9);
 the UI itself is not ported to Android in this plan.
+
+### Phase 1 results (2026-10-25)
+
+- The markup left `main.rs`: `crates/app/ui/main.slint` (the window), `types.slint` (the model
+  rows), `theme.slint` (the `Theme` global), compiled by `crates/app/build.rs` through
+  `slint-build` 1.18.1 and included with `slint::include_modules!()`. Today's window is one
+  component; it is split into one file per island in Phase 2, where the islands replace it, rather
+  than cut up here and rewritten there.
+- `Theme` holds both token sets (§4): shell, canvas, surface, hover, active, lines, text, accent,
+  danger, shadow, scroll bar. Every colour the window draws itself comes from it (the 81 uses of
+  `Palette` and the fixed chrome colours); colours on the paper (search hits, note and field
+  editors) stay as they were, since the page is white in both themes. The std-widgets keep
+  following `Palette`.
+- "System" leaves `Palette.color-scheme` at `unknown`, and Slint 1.18.1 keeps the effective scheme
+  private (`SlintInternal.color-scheme`, `i-slint-compiler-1.18.1/lookup.rs:1096-1101`), so
+  `Theme.dark` reads the Fluent style's background, #1C1C1C in its dark scheme
+  (`widgets/fluent/styling.slint:18-22, 36`). Checked by screenshots with the setting at light,
+  dark and system (Windows in dark mode): canvas #eceff3, #1c1c1f and #1c1c1f.
+- The bench gained `--bench-idle S`, the frame counter and `t_first_page` (`docs/benchmarks.md`
+  §13.1), measured before the move as the baseline and after it.
+
+| Row | Before (`5e7c805` + the bench change) | After | Pass |
+| :--- | :--- | :--- | :--- |
+| AP `peak_ws`, default configuration | 162.7 MiB | 162.4 MiB | yes (<= 250) |
+| AQ `app.exe` | 18,927,104 bytes | 19,054,080 bytes, +124 KiB (+131 KiB over the §3.5 figure) | yes (<= +1.5 MiB) |
+| AR `t_first_page`, median of 5 | `large_200p` 638 ms, `dense_vector` 804 ms | 638 ms, 822 ms (+2.2%) | yes (<= +10%) |
+| AS idle frames in 5 s | 0 (10 of 10 runs) | 0 (10 of 10 runs) | yes |
+
+Every earlier bench run since: the `dense_vector` zoom burst (`t_blank` 23/25/29 ms, PASS), the
+A0 memory sweep (PASS), `--bench-nav` on the 1000-page file (20 of 20), `--bench-forms` (35 of 35),
+`--bench-pages` (14 of 14). `cargo test --workspace` 229 passed; fmt, clippy, deny and reuse clean.
+The library crates did not change in this phase; the Android suite was not rerun (no phone was
+connected), and stays at 212 of 212 from `871706c`.
 
 ## 6. Acceptance and benchmarks
 

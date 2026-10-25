@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The window's colours come from one set of design tokens** (Plan 0007 Phase 1): the canvas,
+  panels, lines and text follow the new design's light and dark themes, and "System" follows the
+  operating system. The window's markup moved from `main.rs` into `crates/app/ui/*.slint`.
+
 ### Fixed
 - **A list box shows its chosen options:** MuPDF 1.27.2 draws a list box without marking its value.
 - **Field text with Turkish letters fills in about 2 ms instead of 2.4-3.5 s**, and sits inside a single-line field instead of being clipped (MuPDF asked for a `serif` font through the system font search; MuPDF 1.27.2 placed single-line rich text below the field). Radio groups show the chosen button.

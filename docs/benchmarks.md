@@ -1531,3 +1531,40 @@ runs:
 - Export Data (JSON) and the file holding the typed value;
 - Reset Form, then Import Data: the text, the check box and the multi-select list come back;
 - Flatten Form: no field left and none shaded; one undo brings the form back.
+
+## 13. Plan 0007: GUI redesign
+
+### 13.1 Metrics: `t_first_page` and idle frames (rows AR, AS)
+
+- **`t_first_page`:** milliseconds from the start of `main` (before the window is built) to the
+  first full coverage of the opening view: every visible tile of the first level is in the
+  scheduler, the trace's first `full` line. Measured by `--bench-idle`, which prints it.
+- **`frames`:** frames the window drew, counted by a rendering notifier
+  (`RenderingState::AfterRendering`) installed when tracing.
+- **Idle frames:** `--bench-idle S` waits for `t_first_page`, lets the window settle for 1 s, then
+  counts `frames` over S seconds with no input. Passes with 0, exit code 0.
+
+```
+target\release\app.exe crates\engine-mupdf\tests\fixtures\large_200p.pdf --bench-idle 5
+target\release\app.exe crates\engine-mupdf\tests\fixtures\dense_vector.pdf --bench-idle 5
+```
+
+Each run five times in a row; the figure is the median. A run draws 6 frames before the count
+(the window appearing and the first tiles), which the count leaves out.
+
+### 13.2 Phase 1: the markup in `.slint` files, the `Theme` global (rows AP-AS)
+
+Release build, the §1 machine, 2026-10-25. Before: `5e7c805` with the bench change only; after:
+the Phase 1 commit.
+
+| | Before | After |
+| :--- | :--- | :--- |
+| `app.exe` | 18,927,104 bytes | 19,054,080 bytes |
+| `t_first_page` `large_200p` (5 runs) | 732, 962, 638, 635, 623 ms; median 638 | 646, 831, 633, 638, 638 ms; median 638 |
+| `t_first_page` `dense_vector` (5 runs) | 796, 811, 809, 799, 804 ms; median 804 | 837, 815, 812, 822, 903 ms; median 822 |
+| idle `frames` over 5 s | 0 in every run | 0 in every run |
+| `peak_ws`, §7.6 run A | 162.7 MiB | 162.4 MiB |
+
+The 124 KiB of growth is the theme's tokens and `slint-build`'s generated code for the same
+window. The A0 run's `peak_ws` is lower than §7.6's 192.7 MiB of 2026-10-20 on both sides of the
+change; the window is the same one, so the difference is not this phase's.

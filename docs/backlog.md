@@ -660,3 +660,22 @@ is saved, but the list does not show it.
 
 Draw the bands for the rich layout too, from `write_rich_content`'s box, or report the missing
 highlight to MuPDF and drop the workaround when a release draws it.
+
+---
+
+## 19. The Snap Layouts flyout over the maximize button (Windows 11)
+
+**Labels:** `platform`, `upstream`
+
+### Problem Statement
+
+The window draws its own frame from Plan 0007 Phase 2 on. Windows 11 shows the Snap Layouts flyout
+only when the window procedure answers `WM_NCHITTEST` with `HTMAXBUTTON` over the maximize button,
+and winit does not let the application answer it (Plan 0007 §3.1). Snapping by dragging to an edge
+and Win+arrow keep working.
+
+### Proposed Solution
+
+A small Windows-only subclass of the window procedure that answers `HTMAXBUTTON` over the button's
+rectangle, or a winit API for it upstream. Decided on 2026-10-25 to go without it for now (Plan
+0007 §0).
