@@ -44,8 +44,10 @@ build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
 android_jar=$(ls "$ANDROID_HOME"/platforms/android-*/android.jar | sort -V | tail -n 1)
 export FA_PDF_LLVM_BIN="$llvm_bin"
 # mupdf-sys runs bindgen for the target: the NDK's own libclang, sysroot and compiler headers.
+# Always the NDK's libclang, even when the host sets LIBCLANG_PATH (CI runners do): another
+# libclang with the NDK's headers fails on the sysroot's basic types.
 toolchain=$(dirname "$llvm_bin")
-export LIBCLANG_PATH="${LIBCLANG_PATH:-$toolchain/lib}"
+export LIBCLANG_PATH="$toolchain/lib"
 clang_include=$(ls -d "$toolchain"/lib/clang/*/include | sort -V | tail -n 1)
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$toolchain/sysroot -isystem $clang_include"
 
