@@ -70,6 +70,10 @@ const THUMB_CACHE: usize = 64;
 const THUMB_INFLIGHT: usize = 4;
 /// Rows above and below the visible ones that are requested ahead.
 const THUMB_MARGIN_ROWS: usize = 2;
+/// The mobile sheet's pages (Plan 0008 Phase 2): three to a row, each row this tall; must match
+/// the row in `ui/mobile/shell.slint`.
+const MOBILE_THUMB_ROW_PX: f32 = 196.0;
+const MOBILE_THUMB_COLUMNS: usize = 3;
 
 /// The gallery's strip (Plan 0007 Phase 3); must match `GalleryMetrics` in `ui/gallery.slint`:
 /// one page's card and the gap after it, where the first card starts, and the box a page's
@@ -2445,10 +2449,11 @@ impl AppState {
         if !ui.get_sidebar_visible() || ui.get_sidebar_tab() != 0 {
             return 0..0;
         }
-        let top = (-ui.get_thumb_scroll_y()).max(0.0) / THUMB_ROW_LOGICAL_PX;
-        let shown = (ui.get_view_h() / THUMB_ROW_LOGICAL_PX).ceil() as usize + 1;
-        let first = (top.floor() as usize).saturating_sub(THUMB_MARGIN_ROWS);
-        let last = (top.floor() as usize + shown + THUMB_MARGIN_ROWS).min(rows);
+        let (row_px, columns) = thumb_grid(ui);
+        let top = (-ui.get_thumb_scroll_y()).max(0.0) / row_px;
+        let shown = (ui.get_view_h() / row_px).ceil() as usize + 1;
+        let first = (top.floor() as usize).saturating_sub(THUMB_MARGIN_ROWS) * columns;
+        let last = ((top.floor() as usize + shown + THUMB_MARGIN_ROWS) * columns).min(rows);
         first.min(last)..last
     }
 
@@ -2562,11 +2567,12 @@ impl AppState {
         if !ui.get_sidebar_visible() || ui.get_sidebar_tab() != 0 {
             return;
         }
-        let top = page as f32 * THUMB_ROW_LOGICAL_PX;
+        let (row_px, columns) = thumb_grid(ui);
+        let top = (page / columns) as f32 * row_px;
         let view = ui.get_view_h();
         let scrolled = -ui.get_thumb_scroll_y();
-        if top < scrolled || top + THUMB_ROW_LOGICAL_PX > scrolled + view {
-            ui.set_thumb_scroll_y(-(top - (view - THUMB_ROW_LOGICAL_PX) / 2.0).max(0.0));
+        if top < scrolled || top + row_px > scrolled + view {
+            ui.set_thumb_scroll_y(-(top - (view - row_px) / 2.0).max(0.0));
             self.pump_thumbs(ui);
         }
     }
@@ -2649,9 +2655,14 @@ impl AppState {
 
     /// Shows or hides the sidebar, and remembers the choice.
     fn toggle_sidebar(&mut self, ui: &MainWindow) {
-        self.settings.sidebar = !self.settings.sidebar;
-        ui.set_sidebar_visible(self.settings.sidebar);
-        self.save_settings();
+        // The mobile sheet opens and closes on its own; the desktop's choice is kept.
+        if ui.get_mobile() {
+            ui.set_sidebar_visible(!ui.get_sidebar_visible());
+        } else {
+            self.settings.sidebar = !self.settings.sidebar;
+            ui.set_sidebar_visible(self.settings.sidebar);
+            self.save_settings();
+        }
         self.current_thumb = None;
         self.refresh(ui);
         self.pump_thumbs(ui);
@@ -3951,6 +3962,16 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
     Some(KeyCommand::Scroll(action))
 }
 
+/// One thumbnail row's height and the thumbnails in it: the desktop's list, or the mobile sheet's
+/// grid.
+fn thumb_grid(ui: &MainWindow) -> (f32, usize) {
+    if ui.get_mobile() {
+        (MOBILE_THUMB_ROW_PX, MOBILE_THUMB_COLUMNS)
+    } else {
+        (THUMB_ROW_LOGICAL_PX, 1)
+    }
+}
+
 /// Where a zoom should keep the page still: the middle of the viewport.
 fn viewport_center(ui: &MainWindow) -> (f32, f32) {
     (ui.get_view_w() / 2.0, ui.get_view_h() / 2.0)
@@ -3962,7 +3983,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // `--bench-*` flags script a run; `FA_PDF_TRACE=1` records one by hand. Both are inert
     // otherwise, and neither belongs in CI: every number here is machine-specific.
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
+    // The mobile shell (Plan 0008): always on a phone, on the desktop with `--mobile`.
+    let mobile = cfg!(target_os = "android") || args.iter().any(|arg| arg == "--mobile");
+    args.retain(|arg| arg != "--mobile");
+    main_window.set_mobile(mobile);
     let (paths, cfg) = bench::parse_args(&args);
     let trace_on = bench::trace_enabled() || !cfg.is_empty();
     if trace_on {
@@ -3971,7 +3996,8 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.set_diagnostics(trace_on);
     // macOS keeps its native frame and traffic lights (Plan 0007 §0, question 4); elsewhere the
     // window draws its own.
-    main_window.set_own_frame(!cfg!(target_os = "macos"));
+    // The mobile shell has no window buttons: on the desktop it keeps the system's frame.
+    main_window.set_own_frame(!cfg!(target_os = "macos") && !mobile);
     // The two memory knobs describe the scheduler the app builds, not the run: `--cache-mib 8`
     // alone is a valid experiment (trace it by hand with `FA_PDF_TRACE=1`), and neither flag
     // starts one. `--cache-rows` is read where the model is sized, so it covers the rebuild
@@ -4007,7 +4033,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .map(load_settings)
         .unwrap_or_default();
     main_window.set_theme(theme_index(settings.theme));
-    main_window.set_sidebar_visible(settings.sidebar);
+    main_window.set_sidebar_visible(settings.sidebar && !mobile);
     main_window.set_field_highlight(!settings.plain_fields);
     let thumbs_model = Rc::new(VecModel::<ThumbRow>::default());
     main_window.set_thumbs(ModelRc::from(thumbs_model.clone()));

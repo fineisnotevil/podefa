@@ -18,6 +18,7 @@ import { SidebarColumn, Drawer } from "sidebar.slint";
 import { StatusIsland, MessageIsland } from "statusbar.slint";
 import { SearchIsland } from "search.slint";
 import { Gallery } from "gallery.slint";
+import { MobileShell } from "mobile/shell.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
 export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem }
@@ -37,16 +38,20 @@ export component MainWindow inherits Window {
     resize-border-width: root.own-frame && !root.maximized ? 6px : 0px;
     background: root.mode == 1 ? Theme.canvas-edit : Theme.canvas;
     animate background { duration: Theme.motion; }
-    min-width: 640px;
-    min-height: 660px;
-    preferred-width: 900px;
-    preferred-height: 700px;
+    // The mobile shell (Plan 0008) instead of the desktop's islands: on a phone, and on the
+    // desktop with `--mobile`, in a phone-sized window.
+    in property <bool> mobile: false;
+    min-width: root.mobile ? 320px : 640px;
+    min-height: root.mobile ? 480px : 660px;
+    preferred-width: root.mobile ? 384px : 900px;
+    preferred-height: root.mobile ? 832px : 700px;
 
     // The islands' distance from the window's edge: smaller when maximized.
     property <length> inset: root.maximized || !root.own-frame ? 8px : 12px;
     property <length> island-gap: 8px;
-    property <length> canvas-top: root.inset + 40px + root.island-gap;
-    property <bool> drawer-shown: root.sidebar-visible && root.total_pages > 0;
+    property <length> canvas-top: root.mobile ? mshell.header-bottom + root.island-gap
+        : root.inset + 40px + root.island-gap;
+    property <bool> drawer-shown: !root.mobile && root.sidebar-visible && root.total_pages > 0;
     property <length> drawer-width: 212px;
     property <length> canvas-left: root.inset + sidebar.width + root.island-gap
         + (root.drawer-shown ? root.drawer-width + root.island-gap : 0px);
@@ -55,9 +60,10 @@ export component MainWindow inherits Window {
     // is centred beside the sidebar, and its last page ends over the status island (Rust's
     // `Margins`). A change lays the pages out again.
     out property <length> doc-inset-top: root.canvas-top;
-    out property <length> doc-inset-left: root.canvas-left;
-    out property <length> doc-inset-right: root.inset;
-    out property <length> doc-inset-bottom: root.inset + status.height + root.island-gap;
+    out property <length> doc-inset-left: root.mobile ? 6px : root.canvas-left;
+    out property <length> doc-inset-right: root.mobile ? 6px : root.inset;
+    out property <length> doc-inset-bottom: root.mobile ? root.height - mshell.dock-top + root.island-gap
+        : root.inset + status.height + root.island-gap;
     changed doc-inset-top => { root.insets_changed(); }
     changed doc-inset-left => { root.insets_changed(); }
     changed doc-inset-right => { root.insets_changed(); }
@@ -293,7 +299,8 @@ export component MainWindow inherits Window {
     // The go-to-page field's text; Rust follows the current page while the field is not
     // being edited.
     in-out property <string> page-input: "";
-    out property <bool> page-field-focused: status.page-field-focused;
+    out property <bool> page-field-focused: root.mobile ? mshell.page-field-focused
+        : status.page-field-focused;
 
     callback prev_page();
     callback next_page();
@@ -597,7 +604,7 @@ export component MainWindow inherits Window {
                         y: root.doc-inset-top;
                         width: 12px;
                         height: root.sb-track-h;
-                        visible: root.sb-visible;
+                        visible: root.sb-visible && !root.mobile;
                         background: Theme.scroll-track;
                         Rectangle {
                             y: root.sb-thumb-y;
@@ -1522,9 +1529,9 @@ export component MainWindow inherits Window {
             visible: (root.tools-t > 0 || root.warm) && root.total_pages > 0;
             opacity: root.tools-t;
             transform-scale: 0.88 + 0.12 * root.tools-t;
-            inset-left: root.inset + sidebar.width + root.island-gap;
+            inset-left: root.mobile ? root.island-gap : root.inset + sidebar.width + root.island-gap;
             inset-top: root.canvas-top;
-            inset-bottom: root.inset + status.height + root.island-gap;
+            inset-bottom: root.doc-inset-bottom;
             thumbs: root.thumbs;
             total-pages: root.total_pages;
             pages-chosen: root.pages-chosen;
@@ -1545,6 +1552,7 @@ export component MainWindow inherits Window {
         }
 
         title-row := TitleRow {
+            visible: !root.mobile;
             x: root.inset;
             y: root.inset;
             width: root.width - 2 * root.inset;
@@ -1576,6 +1584,7 @@ export component MainWindow inherits Window {
         }
 
         sidebar := SidebarColumn {
+            visible: !root.mobile;
             x: root.inset;
             y: root.canvas-top;
             height: root.height - root.canvas-top - root.inset;
@@ -1659,7 +1668,7 @@ export component MainWindow inherits Window {
         }
 
         // The search island, under the title row.
-        if root.find-visible && root.mode != 2 : SearchIsland {
+        if root.find-visible && root.mode != 2 && !root.mobile : SearchIsland {
             width: self.preferred-width;
             height: self.preferred-height;
             x: root.canvas-left + (root.width - root.canvas-left - self.width) / 2;
@@ -1673,7 +1682,7 @@ export component MainWindow inherits Window {
         }
 
         // An error, under the title row (and the search island).
-        if root.has_error : Rectangle {
+        if root.has_error && !root.mobile : Rectangle {
             x: root.canvas-left + (root.width - root.canvas-left - self.width) / 2;
             y: root.canvas-top + root.island-gap + (root.find-visible ? 48px : 0px);
             width: min(560px, root.width - root.canvas-left - 32px);
@@ -1695,6 +1704,7 @@ export component MainWindow inherits Window {
         }
 
         status := StatusIsland {
+            visible: !root.mobile;
             width: self.preferred-width;
             height: self.preferred-height;
             // Clear of the scroll bar at the window's right edge; in Tools, page navigation only,
@@ -1722,7 +1732,7 @@ export component MainWindow inherits Window {
             fit-page => { root.fit_page(); }
         }
 
-        if root.status_text != "" || root.tool-running : MessageIsland {
+        if (root.status_text != "" || root.tool-running) && !root.mobile : MessageIsland {
             x: root.inset + sidebar.width + root.island-gap;
             y: root.height - self.height - root.inset;
             height: 32px;
@@ -1733,6 +1743,76 @@ export component MainWindow inherits Window {
             tiles-rendered: root.tiles_rendered;
             tiles-requested: root.tiles_requested;
             cancel-tool => { root.cancel_tool(); }
+        }
+
+        // The mobile shell, over everything but the dialogs' own panels (Plan 0008 Phase 2).
+        mshell := MobileShell {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            visible: root.mobile;
+            doc-title: root.doc-title;
+            dirty: root.dirty;
+            editable: root.editable;
+            can-undo: root.can-undo;
+            can-redo: root.can-redo;
+            current-page: root.current_page;
+            total-pages: root.total_pages;
+            zoom-percent: root.zoom_percent;
+            theme: root.theme;
+            tabs: root.tabs;
+            active-tab: root.active-tab;
+            thumbs: root.thumbs;
+            outline-rows: root.outline-rows;
+            has-error: root.has_error;
+            error-text: root.error_text;
+            mode <=> root.mode;
+            find-visible: root.find-visible;
+            find-text <=> root.find-text;
+            find-counter: root.find-counter;
+            page-input <=> root.page-input;
+            thumb-scroll-y <=> root.thumb-scroll-y;
+            safe-top: root.safe-area-insets.top;
+            safe-bottom: root.safe-area-insets.bottom;
+            keyboard-top: root.virtual-keyboard-size.height > 0 ? root.virtual-keyboard-position.y : root.height;
+            sheet-changed(open, tab) => {
+                if (tab <= 1 && root.sidebar-tab != tab) {
+                    root.sidebar-tab = tab;
+                    root.sidebar_tab_changed();
+                }
+                if ((open && tab <= 1) != root.sidebar-visible) {
+                    root.toggle_sidebar();
+                }
+            }
+            save => { root.save(); }
+            save-as => { root.save_as(); }
+            undo => { root.undo(); }
+            redo => { root.redo(); }
+            open-file => { root.open_file(); }
+            images-to-pdf => { root.images_to_pdf(); }
+            choose-theme(index) => { root.choose_theme(index); }
+            props-open => { root.props_open(); }
+            stamp-open(mode) => { root.stamp_open(mode); }
+            convert-open(mode) => { root.convert_open(mode); }
+            find-open => { root.find_open(); }
+            find-changed(text) => { root.find_changed(text); }
+            find-next => { root.find_next(); }
+            find-previous => { root.find_previous(); }
+            find-close => { root.find_close(); }
+            prev-page => { root.prev_page(); }
+            next-page => { root.next_page(); }
+            go-to-page(text) => { root.go_to_page(text); }
+            zoom-in => { root.zoom_in(); }
+            zoom-out => { root.zoom_out(); }
+            fit-width => { root.fit_width(); }
+            fit-page => { root.fit_page(); }
+            select-tab(index) => { root.select-tab(index); }
+            close-tab(index) => { root.close-tab(index); }
+            thumb-clicked(index) => { root.thumb_clicked(index, false, false); }
+            thumbs-moved => { root.thumbs_moved(); }
+            outline-clicked(index) => { root.outline_clicked(index); }
+            outline-toggled(index) => { root.outline_toggled(index); }
         }
 
         // The window's edge while it is not maximized: a frameless window has no system border.

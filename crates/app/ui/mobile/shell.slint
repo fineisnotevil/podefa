@@ -1,0 +1,1002 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The mobile shell (Plan 0008 Phase 2, from the concept's `src/components/mobile/`, DESIGN.md
+// step 38): a header island at the top, a thumb dock at the bottom, cards that open over the
+// dock, the search bar under the header, and a bottom sheet for pages, contents and documents.
+// It only lays out: every command calls the same Rust handler the desktop islands call.
+//
+// Every control is at least 44 logical px in both directions (plan row MH); the islands keep
+// clear of the system bars (`safe-top`, `safe-bottom`) and the cards of the on-screen keyboard.
+
+import { LineEdit, ListView } from "std-widgets.slint";
+import { ThumbRow, OutlineRow, TabItem } from "../types.slint";
+import { Theme } from "../theme.slint";
+import { Island } from "../widgets.slint";
+
+// A 44 px touch target with an icon; checked, it is filled with the text colour (the concept's
+// dark pill on light, light on dark).
+component TouchButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <length> icon-size: 20px;
+    in property <color> tint: Theme.text-muted;
+    callback clicked();
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    background: root.checked ? Theme.text : touch.pressed && root.enabled ? Theme.active : transparent;
+    animate background { duration: 120ms; }
+    Image {
+        source: root.icon;
+        width: root.icon-size;
+        height: root.icon-size;
+        colorize: root.checked ? Theme.surface : root.tint;
+        opacity: root.enabled ? 1.0 : 0.3;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A row in the header's menus and the sheet: an icon and a label, 44 px tall.
+component SheetRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> detail;
+    in property <bool> current: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 44px;
+    border-radius: 12px;
+    background: root.current ? Theme.text : touch.pressed && root.enabled ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        if root.icon.width > 0 : Image {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            width: 18px;
+            height: 18px;
+            colorize: root.current ? Theme.surface : Theme.text-muted;
+        }
+        Text {
+            text: root.label;
+            color: root.current ? Theme.surface : Theme.text;
+            opacity: root.enabled ? 1.0 : 0.4;
+            font-size: 14px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.detail != "" : Text {
+            text: root.detail;
+            color: root.current ? Theme.surface : Theme.text-faint;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A labelled choice in a segmented row (the theme, the sheet's tabs).
+component Segment inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> checked;
+    callback clicked();
+    height: 40px;
+    border-radius: 10px;
+    background: root.checked ? Theme.surface : transparent;
+    drop-shadow-blur: root.checked ? 4px : 0px;
+    drop-shadow-color: Theme.island-shadow;
+    HorizontalLayout {
+        alignment: center;
+        spacing: 6px;
+        Image {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            width: 16px;
+            height: 16px;
+            colorize: root.checked ? Theme.text : Theme.text-muted;
+        }
+        Text {
+            text: root.label;
+            font-size: 13px;
+            font-weight: root.checked ? 600 : 400;
+            color: root.checked ? Theme.text : Theme.text-muted;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+// A dimmed layer over everything under a menu or the sheet; a tap on it closes them.
+component Scrim inherits Rectangle {
+    callback dismissed();
+    background: #00000059;
+    TouchArea { clicked => { root.dismissed(); } }
+}
+
+export component MobileShell inherits Rectangle {
+    // The open document and its state.
+    in property <string> doc-title;
+    in property <bool> dirty;
+    in property <bool> editable;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    // Zero-based, like the desktop status island's.
+    in property <int> current-page;
+    in property <int> total-pages;
+    in property <float> zoom-percent;
+    in property <int> theme;
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
+    in property <[ThumbRow]> thumbs;
+    in property <[OutlineRow]> outline-rows;
+    in property <bool> has-error;
+    in property <string> error-text;
+    in-out property <int> mode;
+    // Search: the bar shows while `find-visible`; Rust opens and closes it.
+    in property <bool> find-visible;
+    in-out property <string> find-text;
+    in property <string> find-counter;
+    in-out property <string> page-input;
+    in-out property <length> thumb-scroll-y;
+    // The system bars and the on-screen keyboard's top edge (the window's height without one).
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    in property <length> keyboard-top;
+
+    // Where the header ends and the dock begins, for the document's insets.
+    out property <length> header-bottom: header.y + header.height;
+    out property <length> dock-top: dock.y;
+    // While the go-to-page card is open, Rust leaves its text alone.
+    out property <bool> page-field-focused: root.card == 1;
+
+    // The sheet: open, and its tab (0 pages, 1 contents, 2 documents).
+    callback sheet-changed(bool, int);
+    callback save();
+    callback save-as();
+    callback undo();
+    callback redo();
+    callback open-file();
+    callback images-to-pdf();
+    callback choose-theme(int);
+    callback props-open();
+    callback stamp-open(int);
+    callback convert-open(int);
+    callback find-open();
+    callback find-changed(string);
+    callback find-next();
+    callback find-previous();
+    callback find-close();
+    callback prev-page();
+    callback next-page();
+    callback go-to-page(string);
+    callback zoom-in();
+    callback zoom-out();
+    callback fit-width();
+    callback fit-page();
+    callback select-tab(int);
+    callback close-tab(int);
+    callback thumb-clicked(int);
+    callback thumbs-moved();
+    callback outline-clicked(int);
+    callback outline-toggled(int);
+
+    property <length> edge: 8px;
+    property <bool> docs-menu: false;
+    property <bool> more-menu: false;
+    // The card over the dock: 0 none, 1 go to page, 2 zoom.
+    property <int> card: 0;
+    property <bool> sheet-open: false;
+    property <int> sheet-tab: 0;
+    property <bool> has-doc: root.total-pages > 0;
+
+    function open-sheet(tab: int) {
+        root.docs-menu = false;
+        root.more-menu = false;
+        root.card = 0;
+        root.sheet-tab = tab;
+        root.sheet-open = true;
+        root.sheet-changed(true, tab);
+    }
+    function close-sheet() {
+        root.sheet-open = false;
+        root.sheet-changed(false, root.sheet-tab);
+    }
+
+    // The header island: the document (a tap lists the open ones), search, save, pages and more.
+    header := Island {
+        x: root.edge;
+        y: root.safe-top + root.edge;
+        width: root.width - 2 * root.edge;
+        height: 56px;
+        border-radius: 16px;
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 4px;
+            spacing: 2px;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 32px;
+                height: 32px;
+                border-radius: 9px;
+                background: Theme.text;
+                Text {
+                    text: "P";
+                    color: Theme.surface;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+            }
+            doc-button := Rectangle {
+                horizontal-stretch: 1;
+                border-radius: 10px;
+                background: doc-touch.pressed ? Theme.hover : transparent;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 4px;
+                    spacing: 4px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            if root.dirty : Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: #f59e0b;
+                            }
+                            Text {
+                                text: root.doc-title == "" ? "PODEFA" : root.doc-title;
+                                color: Theme.text;
+                                font-size: 14px;
+                                font-weight: 600;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        Text {
+                            text: root.has-doc ? "Page " + (root.current-page + 1) + " / " + root.total-pages
+                                : "No document";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                        }
+                    }
+                    Image {
+                        y: (parent.height - self.height) / 2;
+                        source: @image-url("../icons/chevron-down.svg");
+                        width: 16px;
+                        height: 16px;
+                        colorize: Theme.text-faint;
+                        transform-rotation: root.docs-menu ? 180deg : 0deg;
+                    }
+                }
+                doc-touch := TouchArea {
+                    clicked => {
+                        root.more-menu = false;
+                        root.docs-menu = !root.docs-menu;
+                    }
+                }
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/search.svg");
+                checked: root.find-visible;
+                enabled: root.has-doc;
+                clicked => {
+                    if (root.find-visible) {
+                        root.find-close();
+                    } else {
+                        root.find-open();
+                    }
+                }
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/save.svg");
+                enabled: root.editable && root.dirty;
+                tint: root.dirty ? #d97706 : Theme.text-muted;
+                clicked => { root.save(); }
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/layers.svg");
+                enabled: root.has-doc;
+                clicked => { root.open-sheet(0); }
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/ellipsis-vertical.svg");
+                checked: root.more-menu;
+                clicked => {
+                    root.docs-menu = false;
+                    root.more-menu = !root.more-menu;
+                }
+            }
+        }
+    }
+
+    // The search bar, under the header.
+    if root.find-visible : Island {
+        x: root.edge;
+        y: header.y + header.height + root.edge;
+        width: root.width - 2 * root.edge;
+        height: 52px;
+        border-radius: 16px;
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 4px;
+            spacing: 2px;
+            Image {
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../icons/search.svg");
+                width: 18px;
+                height: 18px;
+                colorize: Theme.text-faint;
+            }
+            LineEdit {
+                y: (parent.height - self.height) / 2;
+                horizontal-stretch: 1;
+                placeholder-text: "Search the document";
+                text <=> root.find-text;
+                edited(text) => { root.find-changed(text); }
+                accepted => { root.find-next(); }
+                init => { self.focus(); }
+            }
+            if root.find-counter != "" : Text {
+                text: root.find-counter;
+                color: Theme.text-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/chevron-up.svg");
+                clicked => { root.find-previous(); }
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/chevron-down.svg");
+                clicked => { root.find-next(); }
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/x.svg");
+                clicked => { root.find-close(); }
+            }
+        }
+    }
+
+    // An error, under the header (and the search bar).
+    if root.has-error : Rectangle {
+        x: root.edge;
+        y: header.y + header.height + root.edge + (root.find-visible ? 60px : 0px);
+        width: root.width - 2 * root.edge;
+        height: 44px;
+        background: Theme.danger-surface;
+        border-color: Theme.danger-line;
+        border-width: 1px;
+        border-radius: 12px;
+        Text {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.error-text;
+            color: Theme.danger-text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+
+    // The thumb dock: pages on the left, the three modes in the middle, the zoom on the right.
+    dock := Rectangle {
+        x: root.edge;
+        y: root.height - root.safe-bottom - root.edge - self.height;
+        width: root.width - 2 * root.edge;
+        height: 56px;
+        // The pager and the zoom are small capsules, as in the concept (the pager at most 92 px);
+        // their touch areas run the dock's full height, so a thumb still finds them.
+        pager-island := Island {
+            x: 0px;
+            y: (parent.height - self.height) / 2;
+            width: 92px;
+            height: 36px;
+            border-radius: 12px;
+            opacity: root.has-doc ? 1.0 : 0.0;
+            Image {
+                x: 4px;
+                width: 18px;
+                height: 18px;
+                source: @image-url("../icons/chevron-left.svg");
+                colorize: Theme.text-muted;
+                opacity: root.current-page > 0 ? (prev-touch.pressed ? 0.5 : 1.0) : 0.25;
+            }
+            Rectangle {
+                x: 24px;
+                y: 4px;
+                width: 44px;
+                height: parent.height - 8px;
+                border-radius: 8px;
+                background: root.card == 1 ? Theme.text : page-touch.pressed ? Theme.active : transparent;
+                Text {
+                    width: parent.width - 2px;
+                    text: (root.current-page + 1) + " / " + root.total-pages;
+                    color: root.card == 1 ? Theme.surface : Theme.text;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+            }
+            Image {
+                x: parent.width - self.width - 4px;
+                width: 18px;
+                height: 18px;
+                source: @image-url("../icons/chevron-right.svg");
+                colorize: Theme.text-muted;
+                opacity: root.current-page + 1 < root.total-pages ? (next-touch.pressed ? 0.5 : 1.0) : 0.25;
+            }
+        }
+        prev-touch := TouchArea {
+            x: 0px;
+            width: 24px;
+            enabled: root.has-doc && root.current-page > 0;
+            clicked => { root.prev-page(); }
+        }
+        page-touch := TouchArea {
+            x: 24px;
+            width: 44px;
+            enabled: root.has-doc;
+            clicked => { root.card = root.card == 1 ? 0 : 1; }
+        }
+        next-touch := TouchArea {
+            x: 68px;
+            width: 24px;
+            enabled: root.has-doc && root.current-page + 1 < root.total-pages;
+            clicked => { root.next-page(); }
+        }
+        // In the middle of the room the pager and the zoom leave, so the three never overlap on a
+        // narrow phone.
+        Island {
+            width: modes.preferred-width;
+            x: pager-island.width
+                + (parent.width - pager-island.width - zoom-island.width - self.width) / 2;
+            border-radius: 16px;
+            modes := HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/book-open.svg");
+                    checked: root.mode == 0;
+                    clicked => { root.mode = 0; }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/pen-tool.svg");
+                    checked: root.mode == 1;
+                    enabled: root.has-doc;
+                    clicked => { root.mode = 1; }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/layout-grid.svg");
+                    checked: root.mode == 2;
+                    enabled: root.has-doc;
+                    clicked => { root.mode = 2; }
+                }
+            }
+        }
+        zoom-island := Island {
+            width: zoom-text.preferred-width + 20px;
+            height: 36px;
+            x: parent.width - self.width;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: root.card == 2 ? Theme.text : zoom-touch.pressed ? Theme.active : Theme.surface-float;
+            opacity: root.has-doc && root.mode != 2 ? 1.0 : 0.0;
+            zoom-text := Text {
+                text: Math.round(root.zoom-percent) + "%";
+                color: root.card == 2 ? Theme.surface : Theme.text;
+                font-size: 11px;
+                font-weight: 600;
+            }
+        }
+        zoom-touch := TouchArea {
+            x: zoom-island.x;
+            width: zoom-island.width;
+            enabled: root.has-doc && root.mode != 2;
+            clicked => { root.card = root.card == 2 ? 0 : 2; }
+        }
+    }
+
+    // Go to a page: over the dock, and over the on-screen keyboard while it shows.
+    if root.card == 1 : Island {
+        x: root.edge;
+        width: root.width - 2 * root.edge;
+        height: 60px;
+        y: min(dock.y - root.edge, root.keyboard-top - root.edge) - self.height;
+        border-radius: 16px;
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 6px;
+            spacing: 8px;
+            Text {
+                text: "Go to page";
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                y: (parent.height - self.height) / 2;
+                horizontal-stretch: 1;
+                input-type: InputType.number;
+                placeholder-text: "1 - " + root.total-pages;
+                text <=> root.page-input;
+                accepted(text) => {
+                    root.go-to-page(text);
+                    root.card = 0;
+                }
+                init => { self.focus(); }
+            }
+            TouchButton {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/arrow-up-right.svg");
+                checked: true;
+                clicked => {
+                    root.go-to-page(root.page-input);
+                    root.card = 0;
+                }
+            }
+        }
+    }
+
+    // The zoom: smaller and larger, the percentage, and the fits.
+    if root.card == 2 : Island {
+        x: root.edge;
+        width: root.width - 2 * root.edge;
+        height: 112px;
+        y: dock.y - root.edge - self.height;
+        border-radius: 16px;
+        VerticalLayout {
+            padding: 6px;
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 4px;
+                TouchButton {
+                    icon: @image-url("../icons/zoom-out.svg");
+                    clicked => { root.zoom-out(); }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: Math.round(root.zoom-percent) + "%";
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchButton {
+                    icon: @image-url("../icons/zoom-in.svg");
+                    clicked => { root.zoom-in(); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                SheetRow {
+                    horizontal-stretch: 1;
+                    icon: @image-url("../icons/move-horizontal.svg");
+                    label: "Fit width";
+                    clicked => {
+                        root.fit-width();
+                        root.card = 0;
+                    }
+                }
+                SheetRow {
+                    horizontal-stretch: 1;
+                    icon: @image-url("../icons/maximize-2.svg");
+                    label: "Fit page";
+                    clicked => {
+                        root.fit-page();
+                        root.card = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // The open documents, under the header.
+    if root.docs-menu : Scrim {
+        dismissed => { root.docs-menu = false; }
+    }
+    if root.docs-menu : Island {
+        x: root.edge;
+        y: header.y + header.height + root.edge;
+        width: root.width - 2 * root.edge;
+        height: docs-list.preferred-height;
+        border-radius: 16px;
+        docs-list := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            HorizontalLayout {
+                padding-left: 10px;
+                Text {
+                    text: "Open documents (" + root.tabs.length + ")";
+                    color: Theme.text-faint;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                SheetRow {
+                    width: 96px;
+                    label: "Manage";
+                    clicked => { root.open-sheet(2); }
+                }
+            }
+            for tab[index] in root.tabs : SheetRow {
+                label: (tab.dirty ? "* " : "") + tab.title;
+                current: index == root.active-tab;
+                clicked => {
+                    root.docs-menu = false;
+                    root.select-tab(index);
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/folder-open.svg");
+                label: "Open a file...";
+                clicked => {
+                    root.docs-menu = false;
+                    root.open-file();
+                }
+            }
+        }
+    }
+
+    // More: the theme, then what the desktop's title row and Tools island hold.
+    if root.more-menu : Scrim {
+        dismissed => { root.more-menu = false; }
+    }
+    if root.more-menu : Island {
+        width: min(root.width - 2 * root.edge, 300px);
+        x: root.width - root.edge - self.width;
+        y: header.y + header.height + root.edge;
+        height: more-list.preferred-height;
+        border-radius: 16px;
+        more-list := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            Rectangle {
+                height: 48px;
+                border-radius: 12px;
+                background: Theme.hover;
+                HorizontalLayout {
+                    padding: 4px;
+                    spacing: 4px;
+                    Segment {
+                        horizontal-stretch: 1;
+                        label: "Light";
+                        icon: @image-url("../icons/sun.svg");
+                        checked: root.theme == 1;
+                        clicked => { root.choose-theme(1); }
+                    }
+                    Segment {
+                        horizontal-stretch: 1;
+                        label: "Dark";
+                        icon: @image-url("../icons/moon.svg");
+                        checked: root.theme == 2;
+                        clicked => { root.choose-theme(2); }
+                    }
+                    Segment {
+                        horizontal-stretch: 1;
+                        label: "System";
+                        icon: @image-url("../icons/monitor.svg");
+                        checked: root.theme == 0;
+                        clicked => { root.choose-theme(0); }
+                    }
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/undo-2.svg");
+                label: "Undo";
+                enabled: root.can-undo;
+                clicked => { root.undo(); }
+            }
+            SheetRow {
+                icon: @image-url("../icons/redo-2.svg");
+                label: "Redo";
+                enabled: root.can-redo;
+                clicked => { root.redo(); }
+            }
+            SheetRow {
+                icon: @image-url("../icons/file-output.svg");
+                label: "Save as...";
+                enabled: root.has-doc;
+                clicked => {
+                    root.more-menu = false;
+                    root.save-as();
+                }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+            SheetRow {
+                icon: @image-url("../icons/info.svg");
+                label: "Document properties";
+                enabled: root.has-doc;
+                clicked => {
+                    root.more-menu = false;
+                    root.props-open();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/stamp.svg");
+                label: "Watermark";
+                enabled: root.has-doc && root.editable;
+                clicked => {
+                    root.more-menu = false;
+                    root.stamp-open(0);
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/list-ordered.svg");
+                label: "Page numbers";
+                enabled: root.has-doc && root.editable;
+                clicked => {
+                    root.more-menu = false;
+                    root.stamp-open(1);
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/file-archive.svg");
+                label: "Compress a copy";
+                enabled: root.has-doc;
+                clicked => {
+                    root.more-menu = false;
+                    root.convert-open(0);
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/image.svg");
+                label: "Export as images";
+                enabled: root.has-doc;
+                clicked => {
+                    root.more-menu = false;
+                    root.convert-open(1);
+                }
+            }
+        }
+    }
+
+    // The bottom sheet: pages, contents and the open documents.
+    if root.sheet-open : Scrim {
+        dismissed => { root.close-sheet(); }
+    }
+    if root.sheet-open : Rectangle {
+        x: 0px;
+        width: root.width;
+        height: root.height * 0.72;
+        y: root.height - self.height;
+        background: Theme.surface;
+        border-top-left-radius: 24px;
+        border-top-right-radius: 24px;
+        border-width: 1px;
+        border-color: Theme.island-line;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: Theme.shadow;
+        // Taps between the rows stay in the sheet.
+        TouchArea { }
+        VerticalLayout {
+            padding-top: 8px;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-bottom: root.safe-bottom + 8px;
+            spacing: 8px;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 40px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.line-strong;
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 48px;
+                    border-radius: 12px;
+                    background: Theme.hover;
+                    HorizontalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Pages";
+                            icon: @image-url("../icons/layers.svg");
+                            checked: root.sheet-tab == 0;
+                            clicked => { root.open-sheet(0); }
+                        }
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Contents";
+                            icon: @image-url("../icons/bookmark.svg");
+                            checked: root.sheet-tab == 1;
+                            clicked => { root.open-sheet(1); }
+                        }
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Docs (" + root.tabs.length + ")";
+                            icon: @image-url("../icons/file-text.svg");
+                            checked: root.sheet-tab == 2;
+                            clicked => { root.open-sheet(2); }
+                        }
+                    }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/x.svg");
+                    clicked => { root.close-sheet(); }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+
+            // Three pages to a row. Fixed height: Rust derives the rows in view from the scroll
+            // position alone (MOBILE_THUMB_ROW_PX).
+            if root.sheet-tab == 0 : ListView {
+                vertical-stretch: 1;
+                content-y <=> root.thumb-scroll-y;
+                changed content-y => { root.thumbs-moved(); }
+                for r in Math.ceil(root.thumbs.length / 3) : HorizontalLayout {
+                    height: 196px;
+                    spacing: 8px;
+                    for k in 3 : cell := Rectangle {
+                        property <int> i: r * 3 + k;
+                        property <ThumbRow> thumb: root.thumbs[self.i];
+                        horizontal-stretch: 1;
+                        border-radius: 12px;
+                        background: self.i >= root.thumbs.length ? transparent
+                            : self.thumb.current ? Theme.active
+                            : cell-touch.pressed ? Theme.hover : transparent;
+                        if cell.i < root.thumbs.length : VerticalLayout {
+                            padding: 6px;
+                            spacing: 6px;
+                            Rectangle {
+                                height: 150px;
+                                border-width: cell.thumb.has-image ? 0px : 1px;
+                                border-color: Theme.line-strong;
+                                Image {
+                                    source: cell.thumb.image;
+                                    image-fit: contain;
+                                    width: parent.width;
+                                    height: parent.height;
+                                }
+                            }
+                            Text {
+                                text: cell.thumb.label;
+                                horizontal-alignment: center;
+                                font-size: 12px;
+                                color: cell.thumb.current ? Theme.text : Theme.text-muted;
+                            }
+                        }
+                        cell-touch := TouchArea {
+                            enabled: cell.i < root.thumbs.length;
+                            clicked => {
+                                root.thumb-clicked(cell.i);
+                                root.close-sheet();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.sheet-tab == 1 && root.outline-rows.length > 0 : ListView {
+                vertical-stretch: 1;
+                for row[index] in root.outline-rows : Rectangle {
+                    height: 44px;
+                    border-radius: 12px;
+                    background: outline-touch.pressed ? Theme.hover : transparent;
+                    outline-touch := TouchArea {
+                        clicked => {
+                            root.outline-clicked(index);
+                            root.close-sheet();
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 4px + row.depth * 16px;
+                        spacing: 4px;
+                        Rectangle {
+                            width: 36px;
+                            if row.expandable : Image {
+                                source: @image-url("../icons/chevron-right.svg");
+                                width: 16px;
+                                height: 16px;
+                                colorize: Theme.text-muted;
+                                transform-rotation: row.expanded ? 90deg : 0deg;
+                            }
+                            TouchArea {
+                                enabled: row.expandable;
+                                clicked => { root.outline-toggled(index); }
+                            }
+                        }
+                        Text {
+                            text: row.title;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            font-size: 14px;
+                            color: Theme.text;
+                            opacity: row.enabled ? 1.0 : 0.5;
+                        }
+                    }
+                }
+            }
+            if root.sheet-tab == 1 && root.outline-rows.length == 0 : Text {
+                vertical-stretch: 1;
+                text: "This document has no outline";
+                color: Theme.text-faint;
+                font-size: 13px;
+                horizontal-alignment: center;
+            }
+
+            if root.sheet-tab == 2 : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 6px;
+                ListView {
+                    vertical-stretch: 1;
+                    for tab[index] in root.tabs : HorizontalLayout {
+                        height: 52px;
+                        padding-bottom: 4px;
+                        SheetRow {
+                            horizontal-stretch: 1;
+                            label: (tab.dirty ? "* " : "") + tab.title;
+                            current: index == root.active-tab;
+                            clicked => {
+                                root.select-tab(index);
+                                root.close-sheet();
+                            }
+                        }
+                        TouchButton {
+                            icon: @image-url("../icons/x.svg");
+                            clicked => { root.close-tab(index); }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.line; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    SheetRow {
+                        horizontal-stretch: 1;
+                        icon: @image-url("../icons/folder-open.svg");
+                        label: "Open a file...";
+                        clicked => {
+                            root.close-sheet();
+                            root.open-file();
+                        }
+                    }
+                    SheetRow {
+                        horizontal-stretch: 1;
+                        icon: @image-url("../icons/image-plus.svg");
+                        label: "Images to PDF";
+                        clicked => {
+                            root.close-sheet();
+                            root.images-to-pdf();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
