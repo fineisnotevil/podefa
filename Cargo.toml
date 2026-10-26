@@ -7,6 +7,7 @@ members = [
     "crates/core",
     "crates/engine-mupdf",
     "crates/app",
+    "crates/android",
 ]
 
 [workspace.package]

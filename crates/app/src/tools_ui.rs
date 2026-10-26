@@ -8,6 +8,7 @@
 //! lets them be cancelled, and offers to open what a merge or an extraction wrote. Platform dialogs
 //! run outside the state's borrow, like Save As.
 
+use crate::platform::{Answer, Buttons, FileDialog, Level, MessageDialog};
 use crate::{AppState, MainWindow, with_state, with_state_ret};
 use pdf_core::EngineCmd;
 use pdf_core::annot::EditOp;
@@ -15,7 +16,7 @@ use pdf_core::pages::PageOp;
 use pdf_core::tools::{
     DocumentInfo, MergeInput, Metadata, ToolJob, ToolSizes, parse_ranges, part_name, split_every,
 };
-use slint::SharedString;
+use slint::{ComponentHandle as _, SharedString};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -28,6 +29,8 @@ pub(crate) struct RunningTool {
     pub(crate) offer_open: bool,
     /// What a tab does with the output (Plan 0007 Phase 4), instead of offering to open it.
     pub(crate) tab: Option<crate::tabs::TabAction>,
+    /// The files the job writes, for the platform to pass on (Plan 0008).
+    pub(crate) outputs: Vec<PathBuf>,
 }
 
 impl AppState {
@@ -63,6 +66,7 @@ impl AppState {
             started: Instant::now(),
             offer_open,
             tab: None,
+            outputs: job.outputs(),
         });
         ui.set_tool_running(true);
         ui.set_status_text(SharedString::from(format!("{title}...")));
@@ -310,28 +314,42 @@ pub(crate) fn merge_add(ui: &MainWindow) {
         return;
     }
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = FileDialog::new()
         .set_title("Add PDF files")
         .add_filter("PDF documents", &["pdf", "PDF"]);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(files) = dialog.pick_files() {
-        with_state(|state| state.merge_add_files(ui, files));
-    }
+    let weak = ui.as_weak();
+    dialog.pick_files(move |files| {
+        if let (Some(ui), Some(files)) = (weak.upgrade(), files) {
+            with_state(|state| state.merge_add_files(&ui, files));
+        }
+    });
 }
 
-/// A save dialog for one new PDF, next to the open document.
-pub(crate) fn save_dialog(title: &str, name: &str) -> Option<PathBuf> {
+/// A save dialog for one new PDF, next to the open document; `then` runs with the window and the
+/// path unless it was cancelled.
+pub(crate) fn save_dialog(
+    ui: &MainWindow,
+    title: &str,
+    name: &str,
+    then: impl FnOnce(&MainWindow, PathBuf) + 'static,
+) {
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = FileDialog::new()
         .set_title(title)
         .add_filter("PDF document", &["pdf"])
         .set_file_name(name);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    dialog.save_file()
+    let weak = ui.as_weak();
+    dialog.save_file(move |path| {
+        if let (Some(ui), Some(path)) = (weak.upgrade(), path) {
+            then(&ui, path);
+        }
+    });
 }
 
 /// Merge... in the merge panel: where to write, then the job (Make PDF... for images).
@@ -340,15 +358,19 @@ pub(crate) fn merge_run(ui: &MainWindow) {
         crate::convert_ui::images_run(ui);
         return;
     }
-    let Some(output) = save_dialog("Save the merged document", "merged.pdf") else {
-        return;
-    };
-    with_state(|state| {
-        let inputs = state.merge_inputs.clone();
-        if state.start_tool(ui, ToolJob::Merge { inputs, output }, true) {
-            state.merge_close(ui);
-        }
-    });
+    save_dialog(
+        ui,
+        "Save the merged document",
+        "merged.pdf",
+        |ui, output| {
+            with_state(|state| {
+                let inputs = state.merge_inputs.clone();
+                if state.start_tool(ui, ToolJob::Merge { inputs, output }, true) {
+                    state.merge_close(ui);
+                }
+            });
+        },
+    );
 }
 
 /// Split... in the split panel: the groups, a folder, a check for files it would replace.
@@ -363,42 +385,52 @@ pub(crate) fn split_run(ui: &MainWindow) {
     };
     ui.set_split_error(SharedString::new());
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
-    let mut dialog = rfd::FileDialog::new().set_title("Folder for the parts");
+    let mut dialog = FileDialog::new().set_title("Folder for the parts");
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    let Some(folder) = dialog.pick_folder() else {
-        return;
-    };
-    let Some(job) = with_state_ret(|state| state.split_job(groups, &folder)) else {
-        return;
-    };
-    if !confirm_replace(&job) {
-        return;
-    }
-    with_state(|state| {
-        if state.start_tool(ui, job, false) {
-            ui.set_split_visible(false);
-        }
+    let weak = ui.as_weak();
+    dialog.pick_folder(move |folder| {
+        let (Some(ui), Some(folder)) = (weak.upgrade(), folder) else {
+            return;
+        };
+        let Some(job) = with_state_ret(|state| state.split_job(groups, &folder)) else {
+            return;
+        };
+        confirm_replace(&ui, job, |ui, job| {
+            with_state(|state| {
+                if state.start_tool(ui, job, false) {
+                    ui.set_split_visible(false);
+                }
+            });
+        });
     });
 }
 
-/// Asks before a job writes over files that exist; true to go on.
-pub(crate) fn confirm_replace(job: &ToolJob) -> bool {
+/// Asks before a job writes over files that exist; `then` runs the job when there are none or the
+/// answer is Yes.
+pub(crate) fn confirm_replace(
+    ui: &MainWindow,
+    job: ToolJob,
+    then: impl FnOnce(&MainWindow, ToolJob) + 'static,
+) {
     let existing = job.outputs().iter().filter(|p| p.exists()).count();
     if existing == 0 {
-        return true;
+        then(ui, job);
+        return;
     }
-    let answer = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Warning)
-        .set_title("PODEFA")
-        .set_description(format!(
-            "{existing} of the {} files already exist in that folder. Replace them?",
-            job.outputs().len()
-        ))
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show();
-    answer == rfd::MessageDialogResult::Yes
+    let weak = ui.as_weak();
+    MessageDialog::new(format!(
+        "{existing} of the {} files already exist in that folder. Replace them?",
+        job.outputs().len()
+    ))
+    .level(Level::Warning)
+    .buttons(Buttons::YesNo)
+    .show(move |answer| {
+        if let (Some(ui), Answer::Yes) = (weak.upgrade(), answer) {
+            then(&ui, job);
+        }
+    });
 }
 
 /// Tools > Extract Pages...: the chosen pages (or the current one) into one new file.
@@ -410,17 +442,16 @@ pub(crate) fn extract_pages(ui: &MainWindow) {
     }) else {
         return;
     };
-    let Some(output) = save_dialog("Save the extracted pages", &name) else {
-        return;
-    };
-    with_state(|state| {
-        state.start_tool(
-            ui,
-            ToolJob::Extract {
-                parts: vec![(pages, output)],
-            },
-            true,
-        );
+    save_dialog(ui, "Save the extracted pages", &name, move |ui, output| {
+        with_state(|state| {
+            state.start_tool(
+                ui,
+                ToolJob::Extract {
+                    parts: vec![(pages, output)],
+                },
+                true,
+            );
+        });
     });
 }
 
@@ -432,15 +463,18 @@ pub(crate) fn insert_from_file(ui: &MainWindow) {
 /// Insert Pages from File... before page `at` (a gap in the gallery), or after the chosen pages.
 pub(crate) fn insert_from_file_at(ui: &MainWindow, at: Option<u32>) {
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = FileDialog::new()
         .set_title("Insert pages from")
         .add_filter("PDF documents", &["pdf", "PDF"]);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(path) = dialog.pick_file() {
-        with_state(|state| state.insert_from(ui, path, at));
-    }
+    let weak = ui.as_weak();
+    dialog.pick_file(move |path| {
+        if let (Some(ui), Some(path)) = (weak.upgrade(), path) {
+            with_state(|state| state.insert_from(&ui, path, at));
+        }
+    });
 }
 
 /// A job ended: offer to open what it wrote, or say why it failed.
@@ -451,23 +485,16 @@ pub(crate) fn tool_finished(ui: &MainWindow, outcome: Option<Result<PathBuf, Str
                 || path.display().to_string(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            let answer = rfd::MessageDialog::new()
-                .set_title("PODEFA")
-                .set_description(format!("Open \"{name}\" now?"))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
-            if answer == rfd::MessageDialogResult::Yes {
-                crate::tabs::open(ui, path);
-            }
+            let weak = ui.as_weak();
+            MessageDialog::new(format!("Open \"{name}\" now?"))
+                .buttons(Buttons::YesNo)
+                .show(move |answer| {
+                    if let (Some(ui), Answer::Yes) = (weak.upgrade(), answer) {
+                        crate::tabs::open(&ui, path);
+                    }
+                });
         }
-        Some(Err(err)) => {
-            rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Error)
-                .set_title("PODEFA")
-                .set_description(err)
-                .set_buttons(rfd::MessageButtons::Ok)
-                .show();
-        }
+        Some(Err(err)) => MessageDialog::error(err),
         None => {}
     }
 }

@@ -331,9 +331,12 @@ pub(crate) fn count() -> usize {
 
 /// The file dialog, then [`open`].
 pub(crate) fn pick(ui: &MainWindow) {
-    if let Some(path) = pick_document() {
-        open(ui, path);
-    }
+    let weak = ui.as_weak();
+    pick_document(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            open(&ui, path);
+        }
+    });
 }
 
 /// The tab whose document is `path`, if one is.
@@ -466,7 +469,7 @@ pub(crate) fn quit(ui: &MainWindow) {
 
 /// A file of the app's for pages on their way to another tab, in the system's temporary folder.
 fn temp_file() -> Option<PathBuf> {
-    let dir = std::env::temp_dir().join("PODEFA");
+    let dir = crate::platform::temp_dir().join("PODEFA");
     std::fs::create_dir_all(&dir).ok()?;
     let n = with_tabs(|tabs| {
         tabs.next_temp += 1;

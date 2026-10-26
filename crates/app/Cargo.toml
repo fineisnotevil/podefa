@@ -25,6 +25,9 @@ slint-build = { workspace = true }
 pdf-core = { workspace = true }
 engine-mupdf = { workspace = true }
 slint = { workspace = true }
+
+# The desktop's file dialogs and message boxes (`platform::desktop`).
+[target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = { workspace = true }
 
 # The clipboard (Plan 0003, §3.3; ADR 0006): the same arboard Slint's winit backend already links,
@@ -32,5 +35,11 @@ rfd = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
 arboard = { version = "3.6", default-features = false }
+
+# Android (Plan 0008 Phase 1, ADR 0012): Slint's backend for the activity, and JNI for the
+# activity's pickers, message boxes and clipboard (`platform::android`).
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { workspace = true, features = ["backend-android-activity-06"] }
+jni = { version = "0.21", default-features = false }

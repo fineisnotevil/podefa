@@ -1,0 +1,54 @@
+--- a/make.rs
++++ b/make.rs
+@@ -257,6 +257,9 @@
+             println!("cargo:rustc-link-lib=stdc++");
+         }
+ 
++        if target.os == "android" {
++            rename_third_party(build_dir)?;
++        }
+         println!("cargo:rustc-link-search=native={build_dir}");
+         println!("cargo:rustc-link-lib=static=mupdf");
+         println!("cargo:rustc-link-lib=static=mupdf-third");
+@@ -264,3 +267,41 @@
+         Ok(())
+     }
+ }
++
++/// PODEFA on Android (Plan 0008, §3.3): Slint's Skia brings its own FreeType and libjpeg-turbo,
++/// whose symbols clash with MuPDF's bundled copies. Every global symbol libmupdf-third.a defines
++/// (MuPDF's own `fz_`/`pdf_` excepted) gets a prefix, in both MuPDF archives, so each side keeps
++/// its own copy. `FA_PDF_LLVM_BIN` names the NDK's LLVM tools.
++fn rename_third_party(build_dir: &str) -> Result<()> {
++    let bin = std::env::var("FA_PDF_LLVM_BIN").map_err(|_| "FA_PDF_LLVM_BIN not set")?;
++    let third = format!("{build_dir}/libmupdf-third.a");
++    let out = Command::new(format!("{bin}/llvm-nm"))
++        .args(["--defined-only", "-g", "-j", &third])
++        .output()
++        .map_err(|e| format!("llvm-nm: {e}"))?;
++    let mut map = String::new();
++    let mut seen = std::collections::BTreeSet::new();
++    for sym in String::from_utf8_lossy(&out.stdout).lines() {
++        let sym = sym.trim();
++        if sym.is_empty() || sym.ends_with(':') || sym.starts_with("fz_") || sym.starts_with("pdf_") {
++            continue;
++        }
++        if seen.insert(sym.to_owned()) {
++            map.push_str(&format!("{sym} fzthird_{sym}
++"));
++        }
++    }
++    let map_path = format!("{build_dir}/third-renames.txt");
++    std::fs::write(&map_path, map).map_err(|e| format!("write map: {e}"))?;
++    for lib in ["libmupdf-third.a", "libmupdf.a"] {
++        let status = Command::new(format!("{bin}/llvm-objcopy"))
++            .arg(format!("--redefine-syms={map_path}"))
++            .arg(format!("{build_dir}/{lib}"))
++            .status()
++            .map_err(|e| format!("llvm-objcopy: {e}"))?;
++        if !status.success() {
++            Err(format!("llvm-objcopy failed on {lib}"))?;
++        }
++    }
++    Ok(())
++}

@@ -14,6 +14,7 @@
 //! is outlined and Space or Enter sets it; Esc leaves the field. Form > Reset Field and Reset Form
 //! put values back to their defaults.
 
+use crate::platform::{FileDialog, MessageDialog};
 use crate::{AppState, FieldView, MainWindow, Tool, with_state, with_state_ret};
 use pdf_core::EngineCmd;
 use pdf_core::annot::EditOp;
@@ -21,7 +22,7 @@ use pdf_core::form::{FieldInfo, FieldKind, clip_to_max_len, editor_font_size, hi
 use pdf_core::form_data::{self, DataFormat};
 use pdf_core::pages::PageMap;
 use pdf_core::select::PagePoint;
-use slint::{Model as _, SharedString, VecModel};
+use slint::{ComponentHandle as _, Model as _, SharedString, VecModel};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -446,9 +447,12 @@ impl AppState {
         }
         let name = file_name(path);
         match result {
-            Ok(count) => ui.set_status_text(SharedString::from(format!(
-                "Exported {count} field values to \"{name}\""
-            ))),
+            Ok(count) => {
+                crate::platform::written(path);
+                ui.set_status_text(SharedString::from(format!(
+                    "Exported {count} field values to \"{name}\""
+                )));
+            }
             Err(message) => error_box(&format!("Could not export to \"{name}\": {message}")),
         }
     }
@@ -683,12 +687,7 @@ fn file_name(path: &Path) -> String {
 }
 
 fn error_box(message: &str) {
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Error)
-        .set_title("PODEFA")
-        .set_description(message)
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
+    MessageDialog::error(message);
 }
 
 /// Form > Export Data...: asks where, then writes the values (Plan 0006 Phase 3).
@@ -698,7 +697,7 @@ pub(crate) fn export_form_data() {
     else {
         return;
     };
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = FileDialog::new()
         .set_title("Export Form Data")
         .add_filter("XFDF form data", &["xfdf"])
         .add_filter("JSON", &["json"])
@@ -706,29 +705,34 @@ pub(crate) fn export_form_data() {
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(path) = dialog.save_file() {
-        with_state(|state| state.export_form_to(path));
-    }
+    dialog.save_file(|path| {
+        if let Some(path) = path {
+            with_state(|state| state.export_form_to(path));
+        }
+    });
 }
 
 /// Form > Import Data...: asks for a file, then sets the fields from it.
 pub(crate) fn import_form_data(ui: &MainWindow) {
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = FileDialog::new()
         .set_title("Import Form Data")
         .add_filter("Form data", &["xfdf", "json", "xml"]);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    let Some(path) = dialog.pick_file() else {
-        return;
-    };
-    if let Some(Err(message)) = with_state_ret(|state| state.import_form_from(ui, &path)) {
-        error_box(&format!(
-            "Could not read \"{}\": {message}",
-            file_name(&path)
-        ));
-    }
+    let weak = ui.as_weak();
+    dialog.pick_file(move |path| {
+        let (Some(ui), Some(path)) = (weak.upgrade(), path) else {
+            return;
+        };
+        if let Some(Err(message)) = with_state_ret(|state| state.import_form_from(&ui, &path)) {
+            error_box(&format!(
+                "Could not read \"{}\": {message}",
+                file_name(&path)
+            ));
+        }
+    });
 }
 
 fn set_comb_chars(ui: &MainWindow, text: &str) {

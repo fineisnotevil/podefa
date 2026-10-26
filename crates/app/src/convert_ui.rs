@@ -8,9 +8,10 @@
 //! or the export's format, resolution and pages; platform dialogs then pick where to write, outside
 //! the state's borrow.
 
+use crate::platform::FileDialog;
 use crate::{AppState, MainWindow, with_state, with_state_ret};
 use pdf_core::tools::{ImageFormat, MergeInput, Preset, ToolJob, ToolSizes, image_name};
-use slint::SharedString;
+use slint::{ComponentHandle as _, SharedString};
 use std::path::PathBuf;
 
 /// JPEG quality of exported pages.
@@ -101,18 +102,17 @@ fn compress_run(ui: &MainWindow) {
     let Some(name) = with_state_ret(|state| format!("{}_compressed.pdf", state.doc_stem())) else {
         return;
     };
-    let Some(output) = crate::tools_ui::save_dialog("Save the compressed copy", &name) else {
-        return;
-    };
-    with_state(|state| {
-        let job = ToolJob::Compress {
-            input: MergeInput::Current,
-            preset,
-            output,
-        };
-        if state.start_tool(ui, job, true) {
-            ui.set_convert_visible(false);
-        }
+    crate::tools_ui::save_dialog(ui, "Save the compressed copy", &name, move |ui, output| {
+        with_state(|state| {
+            let job = ToolJob::Compress {
+                input: MergeInput::Current,
+                preset,
+                output,
+            };
+            if state.start_tool(ui, job, true) {
+                ui.set_convert_visible(false);
+            }
+        });
     });
 }
 
@@ -124,23 +124,25 @@ fn export_run(ui: &MainWindow) {
     }
     ui.set_convert_error(SharedString::new());
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
-    let mut dialog = rfd::FileDialog::new().set_title("Folder for the images");
+    let mut dialog = FileDialog::new().set_title("Folder for the images");
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    let Some(folder) = dialog.pick_folder() else {
-        return;
-    };
-    let Some(Ok(job)) = with_state_ret(|state| state.export_job(ui, &folder)) else {
-        return;
-    };
-    if !crate::tools_ui::confirm_replace(&job) {
-        return;
-    }
-    with_state(|state| {
-        if state.start_tool(ui, job, false) {
-            ui.set_convert_visible(false);
-        }
+    let weak = ui.as_weak();
+    dialog.pick_folder(move |folder| {
+        let (Some(ui), Some(folder)) = (weak.upgrade(), folder) else {
+            return;
+        };
+        let Some(Ok(job)) = with_state_ret(|state| state.export_job(&ui, &folder)) else {
+            return;
+        };
+        crate::tools_ui::confirm_replace(&ui, job, |ui, job| {
+            with_state(|state| {
+                if state.start_tool(ui, job, false) {
+                    ui.set_convert_visible(false);
+                }
+            });
+        });
     });
 }
 
@@ -160,7 +162,7 @@ pub(crate) fn images_to_pdf(ui: &MainWindow) {
 /// dialogs return a selection in no promised order); Up and Down set the order.
 pub(crate) fn add_images(ui: &MainWindow) {
     let dir = with_state_ret(|state| state.doc_dir()).flatten();
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = FileDialog::new()
         .set_title("Images to make a PDF of")
         .add_filter(
             "Images",
@@ -171,11 +173,14 @@ pub(crate) fn add_images(ui: &MainWindow) {
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    let Some(mut images) = dialog.pick_files() else {
-        return;
-    };
-    images.sort();
-    with_state(|state| state.merge_add_files(ui, images));
+    let weak = ui.as_weak();
+    dialog.pick_files(move |images| {
+        let (Some(ui), Some(mut images)) = (weak.upgrade(), images) else {
+            return;
+        };
+        images.sort();
+        with_state(|state| state.merge_add_files(&ui, images));
+    });
 }
 
 /// Make PDF... in the panel: where to write, then the job, the images in the list's order.
@@ -196,14 +201,14 @@ pub(crate) fn images_run(ui: &MainWindow) {
         .first()
         .and_then(|p| p.file_stem())
         .map_or_else(|| "images".to_owned(), |s| s.to_string_lossy().into_owned());
-    let Some(output) = crate::tools_ui::save_dialog("Save the PDF", &format!("{name}.pdf")) else {
-        return;
-    };
-    with_state(|state| {
-        if state.start_tool(ui, ToolJob::ImagesToPdf { images, output }, true) {
-            state.merge_close(ui);
-            ui.set_merge_images(false);
-        }
+    let file_name = format!("{name}.pdf");
+    crate::tools_ui::save_dialog(ui, "Save the PDF", &file_name, move |ui, output| {
+        with_state(|state| {
+            if state.start_tool(ui, ToolJob::ImagesToPdf { images, output }, true) {
+                state.merge_close(ui);
+                ui.set_merge_images(false);
+            }
+        });
     });
 }
 
@@ -214,17 +219,19 @@ pub(crate) fn export_word(ui: &MainWindow) {
     else {
         return;
     };
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = FileDialog::new()
         .set_title("Export as Word")
         .add_filter("Word document", &["docx"])
         .set_file_name(name);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    let Some(output) = dialog.save_file() else {
-        return;
-    };
-    with_state(|state| {
-        state.start_tool(ui, ToolJob::ExportWord { output }, false);
+    let weak = ui.as_weak();
+    dialog.save_file(move |output| {
+        if let (Some(ui), Some(output)) = (weak.upgrade(), output) {
+            with_state(|state| {
+                state.start_tool(&ui, ToolJob::ExportWord { output }, false);
+            });
+        }
     });
 }

@@ -48,3 +48,10 @@ path = "crates/app/ui/icons/**"
 precedence = "override"
 SPDX-FileCopyrightText = ["2022 Lucide Contributors", "2013-2022 Cole Bemis"]
 SPDX-License-Identifier = "ISC AND MIT"
+
+# PODEFA's patch to mupdf-sys for Android (Plan 0008 Phase 1): a diff cannot carry a header.
+[[annotations]]
+path = "patches/mupdf-sys-android.patch"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 FINE Association <su@fa.org.tr>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
