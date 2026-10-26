@@ -8,18 +8,19 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 ## Status
 
 **Phase 0 passed its gate on 2026-10-26; the maintainer approved the mobile shell (the interface
-part of Phase 2) the same day; Phase 1 (platform) is implemented and at its gate** (2026-10-27;
-§5, "Phase 1: results"). By the maintainer's order the shell came before Phase 1's platform work
+part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27** (§5, "Phase 1:
+results"); the rest of Phase 2 is under way. By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
   page in 239 ms, 0 idle frames, 154-218 MiB PSS; Skia is the only renderer on Android and clashes
   with MuPDF at link time; zoom frames take 30-55 ms, the main risk for Phase 2.
 - Phase 2, interface part: approved on 2026-10-26 (§0).
-- Phase 1 (platform): implemented, at its gate (ADR 0012). Rows MA, MB, MC pass on the phone;
+- Phase 1 (platform): passed its gate on 2026-10-27 (ADR 0012). Rows MA, MB, MC pass on the phone;
   row MD passes for the system picker, saving in place and Save As, with Google Drive and another
   reader left to the maintainer; the desktop rows are unchanged.
-- The rest of Phase 2 (touch: pinch, fling, double tap), Phases 3 to 5: not started.
+- The rest of Phase 2 (touch: pinch, fling, double tap): started 2026-10-27. Phases 3 to 5: not
+  started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -62,6 +63,9 @@ open point of row MH (their touch areas run the dock's full height).
 activity's `onActivityResult`, so Phase 1 needs Java code, which §3.2 had not foreseen. Asked how,
 the maintainer chose the app's own activity class compiled into the APK ("APK'ya kendi dex
 (Önerilen)") over a dex loaded at run time; ADR 0012.
+
+**Phase 1 passed its gate on 2026-10-27** ("go"). Google Drive, another reader and "Open with"
+stay the maintainer's checks.
 
 ## 1. Goal and scope
 
