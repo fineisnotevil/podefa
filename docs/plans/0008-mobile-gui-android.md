@@ -7,16 +7,19 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 0 (research, the plan itself) in progress.** The research that could be done from the
-pinned sources is done (§3) and the maintainer answered §9 (§0). The trial build on the phone
-(§5, Phase 0, step 3) is in progress.
+**Phase 0 (research, the plan, the trial build) done - at its gate, awaiting approval.** The
+maintainer answered §9 (§0). The trial build ran today's window on the phone (§3.3): an 11.3 MiB
+APK, the first page in 239 ms, 0 idle frames, 154-218 MiB PSS. Skia is the only renderer on
+Android and clashes with MuPDF at link time (solved in the trial by renaming MuPDF's third-party
+symbols); zoom frames take 30-55 ms, the main risk for Phase 2. Rows MA-MC have proposed figures
+(§6) for the maintainer to confirm.
 
-- Phase 0: in progress (2026-10-26).
+- Phase 0: done, at its gate (2026-10-26).
 - Phases 1 to 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
-başlangıcı yap"). Plan 0007 Phase 4 (tabs) is at its own gate and Phase 5 of that plan is not
-started; §9 q1 asks how the two plans go together.
+başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
+two plans go together (answered in §0).
 
 The design source is the mobile part of the maintainer's TypeScript concept,
 `podefa-ui-concept` (`src/components/mobile/`, `DESIGN.md` step 38). As for Plan 0007, it lives
@@ -37,7 +40,7 @@ onaylıyorum, deneme derlemesine başla"): every recommended answer stands.
 6. One column of cards in Tools.
 7. Rows MA-MC's figures are starting points, fixed after the trial build.
 
-Phase 0 has not passed its gate: the trial build (§5, Phase 0, step 3) is in progress.
+Phase 0 has not passed its gate.
 
 ## 1. Goal and scope
 
@@ -91,16 +94,29 @@ looks at them); store releases.
   `slint::android::init(app)` before the window is built (`slint-1.18.1/android.rs:5-45`,
   `Cargo.toml` features at lines 65-69). The backend crate is
   `i-slint-backend-android-activity` 1.18.1 (`slint-1.18.1/Cargo.toml`, the
-  `cfg(target_os = "android")` dependency); it is not in the local registry yet, so what it does
-  inside (renderer, touch events, the Java helper) is checked in the trial build.
+  `cfg(target_os = "android")` dependency); the trial build fetched it (renderer below, touch in
+  §3.3).
 - **Build tools:** Slint's documentation asks for the Android SDK (`ANDROID_HOME`), the NDK
   (`ANDROID_NDK_ROOT`) and `javac` (`JAVA_HOME`), and suggests `cargo-apk` or `xbuild` to make the
   APK (`android.rs:52-80`). The mini PC has the NDK only.
-- **Renderer:** the femtovg renderer the desktop uses is a dependency on every platform except
-  Android (`slint-1.18.1/Cargo.toml`, `[target.'cfg(not(target_os = "android"))'.dependencies.i-slint-renderer-femtovg]`).
-  Which renderer the Android backend draws with (software or Skia) decides what the islands can
-  look like (the software renderer draws no shadows, Plan 0007 §3.2) and what a frame costs: the
-  trial build measures it.
+- **Renderer: Skia, and only Skia.** The femtovg renderer the desktop uses is a dependency on
+  every platform except Android (`slint-1.18.1/Cargo.toml`,
+  `[target.'cfg(not(target_os = "android"))'.dependencies.i-slint-renderer-femtovg]`), and the
+  Android backend depends on `i-slint-renderer-skia` alone
+  (`i-slint-backend-android-activity-1.18.1/Cargo.toml:93`, `lib.rs:33`). Skia draws shadows, so
+  the islands can look as on the desktop. Its Rust bindings (`skia-bindings` 0.153.3) download
+  prebuilt Skia binaries from rust-skia's GitHub releases while building (the trial's build log:
+  `skia-binaries-...-aarch64-linux-android-ganesh-gl-jpegd-jpege-pdf-vulkan.tar.gz`), so an
+  offline or CI build needs that file cached (`SKIA_BINARIES_URL`).
+- **Skia and MuPDF clash at link time.** The prebuilt Skia carries its own FreeType and
+  libjpeg-turbo, and MuPDF carries its own FreeType and libjpeg: 432 global symbols are defined in
+  both (`FT_*`, `ft_*`, `tt_*`, `t1_*`, `cff_*`, `ps_*`, `jpeg_*`, `jinit_*`, ...), and the first
+  link failed (`ld.lld: error: duplicate symbol: jpeg_finish_output`). The two copies are different
+  versions with different configurations, so one cannot simply serve both. The trial renamed every
+  global symbol MuPDF's third-party archive defines (except `fz_`/`pdf_`) with a prefix, in both
+  MuPDF archives, with `llvm-objcopy --redefine-syms` after MuPDF's `make` (a patched copy of
+  `mupdf-sys` 0.8.0's `make.rs`); the link then succeeded and the app ran. Phase 1 makes this
+  permanent (§4, "Linking").
 - **Pinch and rotation from touch:** Slint's core recognizes two-finger gestures itself and turns
   them into the same `PinchGesture` and `RotationGesture` events a trackpad sends; one finger is
   forwarded as mouse events (`i-slint-core-1.18.1/input.rs:2123-2160`, thresholds 8 px and 5
@@ -132,11 +148,54 @@ recorded as an ADR in Phase 1:
 - Settings live in the app's internal data folder (`AndroidApp::internal_data_path`,
   `android-activity-0.6.1/src/lib.rs:1272`); JNI reaches the activity through `vm_as_ptr` and
   `activity_as_ptr` (lines 810, 848).
-- The clipboard goes through Slint on Android instead of `arboard` (whether Slint's Android backend
-  provides a clipboard is checked in the trial build); `rfd` and `arboard` move behind a desktop
+- The clipboard goes through Slint on Android instead of `arboard` (the trial replaced `arboard` with a
+  stand-in and did not try copying; Phase 1 checks Slint's Android clipboard); `rfd` and `arboard` move behind a desktop
   `cfg`.
 
-### 3.3 The concept's mobile interface
+### 3.3 The trial build (2026-10-26)
+
+Today's desktop window, unchanged, behind a minimal `android_main` on the throwaway branch
+`trial/android-0` (not merged): `rfd` and `arboard` replaced by stand-ins that do nothing, the
+app built as a `cdylib` too, the arguments read from a file in the app's data folder and stdout
+written to one (Android sends stdout nowhere). Built on the mini PC with cargo-apk 0.10.0 (the last
+release, 2023-11-30; `xbuild` is marked unmaintained), the Android SDK's platform 35 and build
+tools 35.0.1, NDK r28c and JDK 21; signed with a throwaway debug key; installed with `adb` on the
+Samsung Galaxy A34 (Android 16, 1080 x 2340, 450 dpi). The build after the rename change took
+7.7 min on the mini PC. Figures, measured as `docs/benchmarks.md` §14 defines them:
+
+| | Measured |
+| :--- | :--- |
+| APK (arm64-v8a, release) | 11,825,507 bytes; `libapp.so` inside it 22,378,688 bytes uncompressed |
+| Cold launch (`am start -W`, `TotalTime`) | 436, 467 ms with a document (740 ms on the very first launch, without one) |
+| `t_first_page` (from `run()` to the first view covered, `large_200p.pdf`) | 239 ms |
+| Idle frames over 5 s | 0 (`--bench-idle 5`, PASS) |
+| Memory, `large_200p.pdf` open, idle | PSS 154 MiB (RSS 245 MiB) |
+| Memory after one swipe | PSS 175 MiB |
+| `dense_vector.pdf` zoom burst (`--bench-zoom 6 --bench-repeat 3`) | `t_blank` 48, 51, 46 ms (the 50 ms ceiling missed by 1 ms once); `t_full` 131, 98, 98 ms; `t_abort` 31-47 ms; peak PSS 201 MiB |
+| Frames during that zoom burst | `frame_max` 39-55 ms; the first window's 136 ms |
+| A0 sweep (§7.6 run A) | PASS, `t_blank` 49 ms; peak PSS 218 MiB (sampled once a second); zoom window `frame_max` 38.5 ms |
+
+What it showed:
+
+- **It works:** the window opens, the first page draws in 239 ms, a one-finger swipe scrolls the
+  canvas (to page 2), nothing draws while idle.
+- **Frames are the problem:** frames of a zoom burst took 30-55 ms on the phone: about 20-30
+  frames a second while zooming, at 1080 x 2340 with Skia's GL backend. Row ME (16.7 ms) is not
+  met by today's window; Phase 2 has to find where the time goes (the full-screen window at
+  device resolution, the number of tile images, Skia's image upload) before the mobile shell adds
+  layers.
+- **Memory:** PSS 154-218 MiB; RSS is higher because it counts shared system libraries in full.
+- **Pinch** reaches nothing yet: the canvas has no pinch handler (Plan 0001 Phase 3 deferred it),
+  so it was not tried; Phase 2 adds it. `adb` cannot inject two fingers, so the pinch rows need
+  the maintainer's hand.
+- **The desktop window on a phone:** the title row runs under the status bar and off the right
+  edge, the status island sits on the gesture bar: the safe area and the width are what the mobile
+  shell is for.
+- **Exit:** leaving a bench run logs `FORTIFY: pthread_mutex_lock called on a destroyed mutex`
+  and an EGL display not terminated: the process ends while threads still hold locks. Android
+  kills apps rather than letting them exit, but Phase 1 checks the shutdown path.
+
+### 3.4 The concept's mobile interface
 
 Read from `podefa-ui-concept/src/components/mobile/*.tsx` and `DESIGN.md` step 38:
 
@@ -181,6 +240,10 @@ Read from `podefa-ui-concept/src/components/mobile/*.tsx` and `DESIGN.md` step 3
   a long press selects text (ADR 0006) or picks up a page in Tools.
 - **Memory and power.** The 16 MiB tile budget; the same "only the shown tab draws" rule
   (ADR 0011); no animation runs while nothing changes (row AS's rule), which on a phone is battery.
+- **Linking.** MuPDF's third-party symbols are renamed after its `make` on Android (§3.1), in
+  a `[patch]`ed `mupdf-sys` like the `mupdf` one already under `patches/`, with an upstream
+  issue or pull request to mupdf-rs for a supported way (a symbol prefix for the bundled
+  libraries). The libc++ link moves into the build too (backlog item 9).
 - **Bench harness on the phone.** The desktop harness takes command-line flags; on Android they
   come from the launch intent (`adb shell am start ... --es args "..."`), read through JNI, and
   the results go to the log (`logcat`) instead of stdout.
@@ -203,22 +266,21 @@ desktop bench, so the desktop does not change by accident.
 
 1. Read the concept's mobile interface and Slint's Android support (§3): done.
 2. Write this plan: done.
-3. The trial build (after §9 q2): today's desktop window, unchanged, behind a minimal
-   `android_main` on a throwaway branch, built on the mini PC, installed on the phone. Measured:
-   APK size, the process's memory after opening `large_200p.pdf` and after a pinch zoom, the time
-   to the first page, whether one-finger pan and two-finger pinch reach the canvas, which renderer
-   draws. Nothing of it is merged; the figures go into §3 and `docs/benchmarks.md` §14.
+3. The trial build: done (§3.3, `docs/benchmarks.md` §14). Memory after a pinch was not
+   measured: the canvas has no pinch handler yet, and `adb` cannot inject two fingers; a swipe
+   and the zoom bench stood in for it.
 
 ## 6. Acceptance and benchmarks
 
 Rows on the maintainer's phone (Samsung Galaxy A34, Android 16), release build. The figures marked
-"proposed" are set from the trial build's measurements before Phase 1 starts.
+"proposed" come from the trial build (§3.3) and wait for the maintainer's word at the Phase 0
+gate.
 
 | Row | Scenario | Pass |
 | :--- | :--- | :--- |
-| MA | Size | The release APK (arm64-v8a) at most a proposed 25 MiB |
-| MB | Memory | Peak resident memory with `large_200p.pdf`, a pinch to 400% and a fling, at most a proposed 200 MiB; it follows the 16 MiB tile budget like the desktop's §7.6 |
-| MC | Startup | From launch to the first page covered, at most a proposed 1.5 s |
+| MA | Size | The release APK (arm64-v8a) at most a proposed 16 MiB (trial: 11.3 MiB) |
+| MB | Memory | Peak PSS with `large_200p.pdf`, a pinch to 400% and a fling at most a proposed 250 MiB, the desktop's `peak_ws` ceiling (trial: 154-218 MiB); it follows the tile budget like the desktop's §7.6 |
+| MC | Startup | Cold launch (`TotalTime`) plus `t_first_page` at most a proposed 1.0 s (trial: about 0.7 s) |
 | MD | Files | A PDF opened from the system picker (also from Google Drive's provider), annotated, saved, reopened in another reader with the annotation; Save As to a new file |
 | ME | Pinch | During a pinch 0 tiles rendered until it settles, and frames inside the display's budget (16.7 ms at 60 Hz) on the phone |
 | MF | Fling | A 30 s fling through 1000 pages: no holes after settle, memory flat (the Plan 0002 row on the phone) |
@@ -232,10 +294,14 @@ Metric definitions go into `docs/benchmarks.md` §14 before Phase 1 measures the
 
 ## 7. Risks
 
-- **The Android backend's renderer** may be the software one: no shadows, and every frame drawn by
-  the CPU, which a pinch over many tiles may not keep inside 16.7 ms. The trial build finds out;
-  if so, the options are Slint's Skia renderer on Android (size and build cost), or fewer layers
-  in the mobile shell.
+- **Frame time on the phone.** The trial's zoom frames took 30-55 ms with Skia (§3.3), over row
+  ME's 16.7 ms. Phase 2 measures where the time goes and tries fewer, larger tile images, no
+  layer over the canvas while it moves, and fewer pixels drawn during the motion. If that is not
+  enough, it stops and reports with options; row ME is not relaxed quietly.
+- **Two copies of FreeType and libjpeg** stay in the app (Skia's and MuPDF's), renamed apart, and
+  a patched `mupdf-sys` stays until upstream offers a prefix (§4, "Linking").
+- **Skia's prebuilt binaries** come from GitHub while building: a build without network needs
+  them cached.
 - **JNI for the file pickers** is new code in a language boundary the project has not had. Kept to
   one module, with the calls checked against Android's documentation, and tested on the phone
   (row MD).

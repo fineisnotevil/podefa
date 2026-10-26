@@ -1647,3 +1647,42 @@ Release build, the §1 machine, 2026-10-25, 3 runs each: with 4 tabs `peak_ws` 1
 under ceilings of 175.4-216.1 MiB, 2.0-2.1 MiB per extra tab on average. `t_open` 64-82 ms for
 tabs 2 to N, `t_switch` 19-21 ms. Row AU passes in 6 of 6 runs; the table and the other rows are
 in the plan's §5, Phase 4 results.
+
+## 14. Plan 0008: the phone
+
+The maintainer's phone: Samsung Galaxy A34 (SM-A346E), Android 16, 1080 x 2340 at 450 dpi,
+connected by USB to the §1 machine and driven with the SDK's `adb`. Release builds, arm64-v8a.
+
+### 14.1 Metrics on the phone
+
+- **APK size:** bytes of the signed release APK; `libapp.so` uncompressed as listed inside it.
+- **Cold launch:** `TotalTime` of `adb shell am start -W -n <package>/android.app.NativeActivity`
+  after `am force-stop`: Android's own figure, from the launch intent to the activity's first
+  frame.
+- **`t_first_page`:** as in §13 (`--bench-idle`), from the start of the app's `run()` to the first
+  view covered; on Android `run()` starts after the activity, so cold launch plus `t_first_page`
+  is the time from the tap to the page.
+- **Memory:** `TOTAL PSS` of `adb shell dumpsys meminfo <package>`, sampled once a second during a
+  run; the peak is the largest sample. PSS shares each shared library among the processes using
+  it, so it is the phone's figure closest to the desktop's working set; RSS is given beside it.
+- **Bench verdicts and `frame_max`:** the desktop harness unchanged (§7.5, §13): the arguments go
+  into `args.txt` in the app's data folder (`adb push`, then `run-as <package> cp`), the output
+  into `out.txt` there (`run-as <package> cat files/out.txt`), since Android sends stdout nowhere.
+
+### 14.2 Phase 0 trial build (2026-10-26)
+
+The desktop window unchanged on the phone (Plan 0008 §3.3; branch `trial/android-0`, not merged).
+One run of each unless counted:
+
+| | Result |
+| :--- | :--- |
+| APK | 11,825,507 bytes; `libapp.so` 22,378,688 bytes |
+| Cold launch | 740 ms first launch without a document; 436, 467 ms with `large_200p.pdf` |
+| `t_first_page`, `large_200p.pdf` | 239 ms |
+| `--bench-idle 5` | 0 frames in 5015 ms, PASS |
+| PSS, `large_200p.pdf` open | 154.0 MiB (RSS 245 MiB; native heap 66 MiB, graphics 32 MiB) |
+| PSS after one swipe (`input swipe`) | 174.6 MiB; the canvas scrolled to page 2 |
+| `dense_vector.pdf --bench-zoom 6 --bench-step-ms 16 --bench-settle-ms 3000 --bench-repeat 3` | `t_blank` 48/51/46 ms, `t_full` 131/98/98 ms, `t_abort` 31/47/42 ms; VERDICT FAIL (51 ms against the 50 ms ceiling); zoom windows' `frame_max` 135.6 (first), 54.9, 39.4 ms; peak PSS 200.9 MiB |
+| `large_format_a0.pdf --bench-zoom 19 --bench-step-ms 50 --bench-settle-ms 2000 --bench-pan 512 --bench-pan-steps 320` | VERDICT PASS, worst `t_blank` 49 ms; zoom window `frame_max` 38.5 ms, first frame 130.4 ms; peak PSS 218 MiB |
+
+Pinch was not measured: the canvas has no pinch handler yet and `adb` cannot inject two fingers.

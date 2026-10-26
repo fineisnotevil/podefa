@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 4 (tabs) implemented and at its gate - awaiting approval.** Row AU passes: 10 tabs of
+**Phase 4 (tabs) passed its gate on 2026-10-26; Phase 5 not started.** Row AU passed: 10 tabs of
 `large_200p.pdf` hold 157.4-158.2 MiB against ceilings of 175.4-216.1 MiB, 4 tabs peak at
 152.7-155.5 MiB (§5, Phase 4 results).
 
@@ -16,7 +16,7 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 - Phase 2 (own frame and islands, ADR 0010): passed its gate on 2026-10-25.
 - Phase 3 (the three modes, the floating islands): passed its gate on 2026-10-25 after five
   review fixes (§5, Phase 3 results, "Second review").
-- Phase 4 (tabs, ADR 0011): **implemented, at its gate** (2026-10-25); results in §5 and
+- Phase 4 (tabs, ADR 0011): passed its gate on 2026-10-26; results in §5 and
   `docs/benchmarks.md` §13.5.
 - Phase 5: not started.
 
@@ -50,6 +50,14 @@ in the concept (its `DESIGN.md`, step 37). The answers to §9:
 **Phase 1 passed its gate on 2026-10-25** ("Phase 1 onaylandı, Faz 2'ye başla").
 
 **Phase 2 passed its gate on 2026-10-25** ("Faz 2 onaylandı, Faz 3'e başla").
+
+**Phase 3 passed its gate on 2026-10-25** ("Düzeltmeler tamam, Faz 4'e başla").
+
+**Phase 4 passed its gate on 2026-10-26**, with the answers to Plan 0008's questions ("§9'daki
+önerilen cevaplar tamam"; Plan 0008 §0, answer 1). Phase 5 runs alongside Plan 0008's Phases 0
+and 1. The maintainer noted two misalignments for Phase 5: the new-tab button lay over the tab
+strip (its scroll area had no `x` and was centred in the strip) and the gap pill sat on a card's
+right edge (the cards had no `x` and were centred in their slots).
 
 ## 1. Goal and scope
 
