@@ -50,6 +50,7 @@ toolchain=$(dirname "$llvm_bin")
 export LIBCLANG_PATH="$toolchain/lib"
 clang_include=$(ls -d "$toolchain"/lib/clang/*/include | sort -V | tail -n 1)
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$toolchain/sysroot -isystem $clang_include"
+echo "bindgen: LIBCLANG_PATH=$LIBCLANG_PATH args=$BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android"
 
 mkdir -p "$work"
 

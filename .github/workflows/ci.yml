@@ -116,6 +116,12 @@ jobs:
       - name: Install cargo-apk
         run: cargo install cargo-apk --version 0.10.0 --locked
 
+      - name: Show the build environment
+        run: |
+          env | sort | grep -iE 'clang|ndk|bindgen|cpath|include|^cc|^cxx|cflags' || true
+          ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/lib" | grep -i clang
+          ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/lib/clang"
+
       - name: Build the APK
         run: scripts/android-build.sh
 
