@@ -44,12 +44,13 @@ build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
 android_jar=$(ls "$ANDROID_HOME"/platforms/android-*/android.jar | sort -V | tail -n 1)
 export FA_PDF_LLVM_BIN="$llvm_bin"
 # mupdf-sys runs bindgen for the target: the NDK's own libclang, sysroot and compiler headers.
-# Always the NDK's libclang, even when the host sets LIBCLANG_PATH (CI runners do): another
-# libclang with the NDK's headers fails on the sysroot's basic types.
+# The NDK's libclang does not find its own headers (lib/clang/<version>): without
+# -resource-dir it fails on stddef.h, or, where the host has a clang of its own (CI runners),
+# mixes the host's headers with the NDK's and fails on uint32_t.
 toolchain=$(dirname "$llvm_bin")
+resource_dir=$(ls -d "$toolchain"/lib/clang/* | sort -V | tail -n 1)
 export LIBCLANG_PATH="$toolchain/lib"
-clang_include=$(ls -d "$toolchain"/lib/clang/*/include | sort -V | tail -n 1)
-export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$toolchain/sysroot -isystem $clang_include"
+export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$toolchain/sysroot -resource-dir $resource_dir"
 echo "bindgen: LIBCLANG_PATH=$LIBCLANG_PATH args=$BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android"
 
 mkdir -p "$work"
