@@ -7,15 +7,17 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 0 (research, the plan, the trial build) done - at its gate, awaiting approval.** The
-maintainer answered §9 (§0). The trial build ran today's window on the phone (§3.3): an 11.3 MiB
-APK, the first page in 239 ms, 0 idle frames, 154-218 MiB PSS. Skia is the only renderer on
-Android and clashes with MuPDF at link time (solved in the trial by renaming MuPDF's third-party
-symbols); zoom frames take 30-55 ms, the main risk for Phase 2. Rows MA-MC have proposed figures
-(§6) for the maintainer to confirm.
+**Phase 0 passed its gate on 2026-10-26; the interface part of Phase 2 (the mobile shell) is
+implemented, shown on the desktop with `--mobile` and on the phone from a throwaway build, and
+waits for the maintainer's review** (§5, "Phase 2, interface part"). By the maintainer's order the
+shell came before Phase 1's platform work (§0).
 
-- Phase 0: done, at its gate (2026-10-26).
-- Phases 1 to 5: not started.
+- Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
+  page in 239 ms, 0 idle frames, 154-218 MiB PSS; Skia is the only renderer on Android and clashes
+  with MuPDF at link time; zoom frames take 30-55 ms, the main risk for Phase 2.
+- Phase 2, interface part: implemented (2026-10-26), at a review checkpoint.
+- Phase 1 (platform), the rest of Phase 2 (touch: pinch, fling, double tap), Phases 3 to 5: not
+  started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -40,7 +42,15 @@ onaylıyorum, deneme derlemesine başla"): every recommended answer stands.
 6. One column of cards in Tools.
 7. Rows MA-MC's figures are starting points, fixed after the trial build.
 
-Phase 0 has not passed its gate.
+**Phase 0 passed its gate on 2026-10-26** ("Faz 0 onaylandı. Önce mobil kabuğu (Faz 2'nin arayüz
+kısmı) --mobile ile masaüstünde ve telefonda göster, platform işleri (Faz 1) sonra gelsin"). The
+proposed figures of rows MA-MC stand. The order changes: the interface part of Phase 2 (the shell's
+islands, cards, menus and sheet, `--mobile`) comes first, shown on the phone from a throwaway build
+like the trial's; then Phase 1; then the rest of Phase 2 (pinch, fling, double tap, its rows).
+
+**While the shell was under way** the maintainer found the dock's side parts too large: the
+concept keeps the pager (at most 92 px) and the zoom smaller than the modes in the middle. They are
+now the concept's size, 36 px tall, with touch areas the dock's full 56 px height.
 
 ## 1. Goal and scope
 
@@ -261,6 +271,35 @@ Read from `podefa-ui-concept/src/components/mobile/*.tsx` and `DESIGN.md` step 3
 
 Each phase also runs the library crates' suite on the phone (`docs/backlog.md` item 9) and every
 desktop bench, so the desktop does not change by accident.
+
+### Phase 2, interface part: results (2026-10-26)
+
+`crates/app/ui/mobile/shell.slint` (`MobileShell`), placed over the canvas by `main.slint` when
+`mobile` is set; the desktop's islands are hidden then and the document's insets follow the
+shell's header and dock. On by default on Android; `--mobile` on the desktop opens a 384 x 832
+window (the A34's logical size) with the system frame.
+
+- **Header island:** the document's name, a dot for unsaved changes and the page; a tap lists the
+  open documents (switch, open a file). Search, Save, the pages sheet and More (theme; Undo, Redo,
+  Save As; properties, watermark, page numbers, compress, export as images) at the right.
+- **Thumb dock:** the pager (`<  n / N  >`, the number opens a go-to-page card), the three modes,
+  the zoom (opens a card with smaller, larger, Fit width, Fit page). The go-to-page card sits over
+  the on-screen keyboard (`virtual-keyboard-position`) and opens with the number keyboard.
+- **Search bar** under the header, with the count, previous, next and close.
+- **Bottom sheet:** Pages (three to a row; Rust asks for the rows in view of the grid,
+  `MOBILE_THUMB_ROW_PX`), Contents (the outline), Docs (switch, close, open a file, images to
+  PDF). Opening it does not change the desktop's saved sidebar setting.
+- **Safe area:** the header starts under the status bar (`safe-area-insets`), checked on the phone.
+- On the phone, from `trial/android-1` (the trial branch on top of this commit, not merged):
+  everything above draws and answers taps; with `large_200p.pdf` open PSS was 180.5 MiB once
+  (one sample, not a bench run). The go-to-page card's text entry could not be checked over `adb`:
+  the keyboard had been left on its emoji page, so the typed digits never reached the field.
+- **Not in this part:** pinch, fling, double tap (rest of Phase 2); the Edit strip (Phase 3); a
+  one-column gallery and the tools' dialogs as sheets (Phase 4: Tools shows the desktop gallery,
+  and a dialog opens as the desktop's panel, under the header).
+- **Row MH:** every header, card and sheet control is 44 px or more; the dock's side capsules are
+  smaller by the maintainer's word, and their touch areas run the dock's 56 px height but the
+  pager's arrows are 24 px wide: row MH needs the maintainer's call on them before Phase 2 closes.
 
 ### Phase 0 steps
 

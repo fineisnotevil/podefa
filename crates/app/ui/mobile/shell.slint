@@ -552,7 +552,11 @@ export component MobileShell inherits Rectangle {
                     root.go-to-page(text);
                     root.card = 0;
                 }
-                init => { self.focus(); }
+                // The current page is chosen, so typing replaces it.
+                init => {
+                    self.focus();
+                    self.select-all();
+                }
             }
             TouchButton {
                 y: (parent.height - self.height) / 2;

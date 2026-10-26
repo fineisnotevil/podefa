@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Mobile interface** (Plan 0008): on a phone, and on the desktop with `--mobile`, the window
+  shows the concept's mobile shell instead of the desktop islands: a header island with the
+  document, search, save, pages and a More menu; a thumb dock with the pager, the three modes and
+  the zoom, whose cards open over it; a bottom sheet with pages, contents and open documents.
 - **Tabs** (Plan 0007 Phase 4, ADR 0011): open several documents in one window. Open, Open
   Recent, a dropped file and the "+" button (Ctrl+T) open a document in a new tab (or in the
   shown tab when it is empty, or switch to the tab that has it); tabs share the title row down to
