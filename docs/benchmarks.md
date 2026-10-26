@@ -1656,18 +1656,22 @@ connected by USB to the §1 machine and driven with the SDK's `adb`. Release bui
 ### 14.1 Metrics on the phone
 
 - **APK size:** bytes of the signed release APK; `libapp.so` uncompressed as listed inside it.
-- **Cold launch:** `TotalTime` of `adb shell am start -W -n <package>/android.app.NativeActivity`
-  after `am force-stop`: Android's own figure, from the launch intent to the activity's first
-  frame.
+- **Cold launch:** `TotalTime` of `adb shell am start -W -n <package>/<activity>` after
+  `am force-stop`: Android's own figure, from the launch intent to the activity's first frame.
+  The activity was `android.app.NativeActivity` in the trial and is
+  `org.fineassociation.podefa.PodefaActivity` from Phase 1.
 - **`t_first_page`:** as in §13 (`--bench-idle`), from the start of the app's `run()` to the first
   view covered; on Android `run()` starts after the activity, so cold launch plus `t_first_page`
   is the time from the tap to the page.
 - **Memory:** `TOTAL PSS` of `adb shell dumpsys meminfo <package>`, sampled once a second during a
   run; the peak is the largest sample. PSS shares each shared library among the processes using
   it, so it is the phone's figure closest to the desktop's working set; RSS is given beside it.
-- **Bench verdicts and `frame_max`:** the desktop harness unchanged (§7.5, §13): the arguments go
-  into `args.txt` in the app's data folder (`adb push`, then `run-as <package> cp`), the output
-  into `out.txt` there (`run-as <package> cat files/out.txt`), since Android sends stdout nowhere.
+- **Bench verdicts and `frame_max`:** the desktop harness unchanged (§7.5, §13). In the trial the
+  arguments went into `args.txt` in the app's data folder and the output into `out.txt` there,
+  through `run-as`. From Phase 1 the release APK is not debuggable, so the arguments come from the
+  launch intent (`am start ... --es args "'{files}/large_200p.pdf --bench-idle 5'"`, `{files}`
+  standing for the app's folder in shared storage, `Android/data/<package>/files`) and the output
+  goes to `out.txt` in that folder, both reached with plain `adb push` and `adb shell cat`.
 
 ### 14.2 Phase 0 trial build (2026-10-26)
 
@@ -1686,3 +1690,19 @@ One run of each unless counted:
 | `large_format_a0.pdf --bench-zoom 19 --bench-step-ms 50 --bench-settle-ms 2000 --bench-pan 512 --bench-pan-steps 320` | VERDICT PASS, worst `t_blank` 49 ms; zoom window `frame_max` 38.5 ms, first frame 130.4 ms; peak PSS 218 MiB |
 
 Pinch was not measured: the canvas has no pinch handler yet and `adb` cannot inject two fingers.
+
+### 14.3 Phase 1: the platform build (2026-10-27)
+
+The APK from `scripts/android-build.sh` (`org.fineassociation.podefa`, the mobile shell, ADR 0012),
+same phone, documents pushed to `{files}`. PSS sampled once a second for 25 s per run.
+
+| Row | Run | Result |
+| :--- | :--- | :--- |
+| MA | APK | 12,038,559 bytes (11.5 MiB); `libpodefa.so` 22,804,456 bytes, `classes.dex` 15,068 bytes. PASS (16 MiB) |
+| MC | `large_200p.pdf --bench-idle 5`, 3 cold launches | `TotalTime` 234, 236, 205 ms; `t_first_page` 93, 206, 176 ms; sum 327, 442, 381 ms. PASS (1.0 s). Idle: 0 frames in 5 s each time. The first launch after installing, without a document: 1116 ms |
+| MB | `dense_vector.pdf --bench-zoom 6 --bench-step-ms 16 --bench-settle-ms 3000 --bench-repeat 3` | peak PSS 175.0 MiB; `t_blank` 40/49/43 ms, `t_full` 85/101/114 ms, `t_abort` 33/33/35 ms, VERDICT PASS (49 ms); zoom windows' `frame_max` 44.9, 51.8 ms |
+| MB | `large_format_a0.pdf --bench-zoom 6 --bench-pan 400 --bench-pan-steps 40 --bench-step-ms 16 --bench-settle-ms 3000` | peak PSS 173.4 MiB; VERDICT PASS (`t_blank` 24 ms); zoom window `frame_max` 33.8 ms |
+| MB | `large_200p.pdf --bench-zoom 4 --bench-pan 400 --bench-pan-steps 40 --bench-step-ms 16 --bench-settle-ms 3000` | peak PSS 161.4 MiB; VERDICT PASS (`t_blank` 19 ms) |
+
+Row MB's peak PSS (at most 175.0 MiB) passes its 250 MiB ceiling for these runs; its pinch and
+fling by hand come with Phase 2. Row MD is a manual check, recorded in the plan's §5.

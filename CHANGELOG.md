@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Android app** (Plan 0008 Phase 1, ADR 0012): `scripts/android-build.sh` builds an arm64 APK
+  (`org.fineassociation.podefa`) with the mobile interface. Documents come from the system's
+  picker or "Open with"; the app works on a copy and writes saves, Save As, tool outputs and
+  exported form data back to the document or folder that was picked. Copy uses Android's
+  clipboard, settings live in the app's own folder. CI builds the APK.
 - **Mobile interface** (Plan 0008): on a phone, and on the desktop with `--mobile`, the window
   shows the concept's mobile shell instead of the desktop islands: a header island with the
   document, search, save, pages and a More menu; a thumb dock with the pager, the three modes and

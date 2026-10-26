@@ -389,10 +389,16 @@ crates (below); the app crate has not been built for either:
     - The ignored measurement tests were not run. `abort_safety_test` took 18 s, `convert_test`
       15 s.
 
-  **To do in the mobile plan:**
-  - Make the libc++ link part of the build, not an environment variable: a `build.rs` line in
-    `engine-mupdf` for `target_os = "android"`, or upstream in mupdf-sys.
-  - Put the environment above in a script or a CI job.
+  **Done in Plan 0008 Phase 1 (2026-10-27):**
+  - The libc++ link is part of the build: `crates/engine-mupdf/build.rs` (its test binaries) and
+    `crates/android/build.rs` (the app's library) add `-lc++_static -lc++abi` at the end of the
+    link line. A `rustc-link-lib` line does not work: it lands before MuPDF's archives. With it
+    the 26 test executables of `pdf-core` and `engine-mupdf` link without `RUSTFLAGS`; they were
+    not run on the phone this time (it was off USB).
+  - The environment is in `scripts/android-build.sh` (the NDK's libclang and sysroot for bindgen,
+    the LLVM tools for the symbol rename) and in CI's `android` job.
+  - Still open: a supported way upstream in mupdf-sys (a symbol prefix for its bundled
+    libraries, and the C++ runtime on Android).
 
   **Already handled:** `patches/mupdf` leaves `font-kit` out on Android (`Cargo.toml:177`).
 

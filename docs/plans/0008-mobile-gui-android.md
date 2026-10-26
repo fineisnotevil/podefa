@@ -7,17 +7,19 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 0 passed its gate on 2026-10-26; the interface part of Phase 2 (the mobile shell) is
-implemented, shown on the desktop with `--mobile` and on the phone from a throwaway build, and
-waits for the maintainer's review** (§5, "Phase 2, interface part"). By the maintainer's order the
-shell came before Phase 1's platform work (§0).
+**Phase 0 passed its gate on 2026-10-26; the maintainer approved the mobile shell (the interface
+part of Phase 2) the same day; Phase 1 (platform) is implemented and at its gate** (2026-10-27;
+§5, "Phase 1: results"). By the maintainer's order the shell came before Phase 1's platform work
+(§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
   page in 239 ms, 0 idle frames, 154-218 MiB PSS; Skia is the only renderer on Android and clashes
   with MuPDF at link time; zoom frames take 30-55 ms, the main risk for Phase 2.
-- Phase 2, interface part: implemented (2026-10-26), at a review checkpoint.
-- Phase 1 (platform), the rest of Phase 2 (touch: pinch, fling, double tap), Phases 3 to 5: not
-  started.
+- Phase 2, interface part: approved on 2026-10-26 (§0).
+- Phase 1 (platform): implemented, at its gate (ADR 0012). Rows MA, MB, MC pass on the phone;
+  row MD passes for the system picker, saving in place and Save As, with Google Drive and another
+  reader left to the maintainer; the desktop rows are unchanged.
+- The rest of Phase 2 (touch: pinch, fling, double tap), Phases 3 to 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -51,6 +53,15 @@ like the trial's; then Phase 1; then the rest of Phase 2 (pinch, fling, double t
 **While the shell was under way** the maintainer found the dock's side parts too large: the
 concept keeps the pager (at most 92 px) and the zoom smaller than the modes in the middle. They are
 now the concept's size, 36 px tall, with touch areas the dock's full 56 px height.
+
+**The mobile shell was approved on 2026-10-26** ("Mobil kabuk onaylandı. Sayfa kapsülündeki 24 px
+oklar kalsın, Faz 1'e (platform) başla"): the pager's 24 px wide arrows stay, which settles the
+open point of row MH (their touch areas run the dock's full height).
+
+**Phase 1, the Java question, 2026-10-26.** The system's pickers answer only through the
+activity's `onActivityResult`, so Phase 1 needs Java code, which §3.2 had not foreseen. Asked how,
+the maintainer chose the app's own activity class compiled into the APK ("APK'ya kendi dex
+(Önerilen)") over a dex loaded at run time; ADR 0012.
 
 ## 1. Goal and scope
 
@@ -241,8 +252,9 @@ Read from `podefa-ui-concept/src/components/mobile/*.tsx` and `DESIGN.md` step 3
   development, can show the mobile one in a phone-sized window (`--mobile`, the concept's
   `MobileDeviceFrame` idea), so most mobile UI work is tried on the desktop first and checked on
   the phone after.
-- **Crate shape.** `crates/app` becomes a library (`app::run(platform)`) with the desktop `main`
-  as a thin binary and `android_main` in the same library built as a `cdylib`. `main.rs`'s 5,240
+- **Crate shape.** `crates/app` becomes a library (`app::run(args)`) with the desktop `main`
+  as a thin binary. `android_main` lives in its own crate, `crates/android` (`libpodefa.so`), so
+  the desktop build does not link the app twice (Phase 1, ADR 0012). `main.rs`'s 5,240
   lines move into modules on the way, without behaviour changes, in their own commits.
 - **Touch rules.** Hit targets at least 44 logical px (the concept's dock and buttons respect it;
   Material's figure is 48 dp); nothing only on hover (the desktop's hover bars become always-shown
@@ -255,8 +267,9 @@ Read from `podefa-ui-concept/src/components/mobile/*.tsx` and `DESIGN.md` step 3
   issue or pull request to mupdf-rs for a supported way (a symbol prefix for the bundled
   libraries). The libc++ link moves into the build too (backlog item 9).
 - **Bench harness on the phone.** The desktop harness takes command-line flags; on Android they
-  come from the launch intent (`adb shell am start ... --es args "..."`), read through JNI, and
-  the results go to the log (`logcat`) instead of stdout.
+  come from the launch intent (`adb shell am start ... --es args "..."`), read through JNI. The results
+  go to `out.txt` in the app's folder in shared storage, which `adb` reads without the app being
+  debuggable (Phase 1; `logcat` would need a writer thread for nothing more).
 
 ## 5. Phases
 
@@ -271,6 +284,52 @@ Read from `podefa-ui-concept/src/components/mobile/*.tsx` and `DESIGN.md` step 3
 
 Each phase also runs the library crates' suite on the phone (`docs/backlog.md` item 9) and every
 desktop bench, so the desktop does not change by accident.
+
+### Phase 1: results (2026-10-27)
+
+ADR 0012 records the design.
+
+- **Crates.** `crates/app` is a library (`app::run`) plus a thin desktop `main`;
+  `crates/android` (`podefa-android`, `libpodefa.so`) holds `android_main`, the activity
+  `org.fineassociation.podefa.PodefaActivity` (Java), the manifest (`launchMode="singleTask"`,
+  "Open with" for `application/pdf`) and the C++ runtime link. It is empty on other targets.
+- **`app::platform`.** File dialogs, message boxes, the clipboard, the settings and temporary
+  folders and the write-back hook (`written`) behind one API; every dialog answers through a
+  callback (15 call sites changed; on the desktop the callback runs before the call returns, so
+  the desktop behaves as before). `rfd` and `arboard` are not built for Android; `jni` 0.21 is.
+- **Files.** A picked document is copied into `cache/docs/<hash>/<name>` by the activity; saves,
+  Save As, tool outputs and exported form data are written back to their URIs; picked folders
+  (Split, Export as Images) map to tree URIs. The copy-to-URI map survives restarts
+  (`files/documents.txt`).
+- **Linking.** `patches/mupdf-sys-android.patch` (the symbol rename of §3.1) is applied to a copy
+  of the registry's mupdf-sys under `target/android` and patched in by a Cargo config there, so
+  neither the desktop build nor `Cargo.lock` changes. The C++ runtime comes from build scripts
+  (`crates/android/build.rs` for the app, `crates/engine-mupdf/build.rs` for its test binaries),
+  not from `RUSTFLAGS`; a `rustc-link-lib` line was tried first and failed, since it lands before
+  MuPDF's archives on the link line.
+- **Build.** `scripts/android-build.sh` (8 m 22 s from a warm `target` on the mini PC, 15 s when
+  only Java changed); CI job `android` builds the APK on Ubuntu with NDK r28c and uploads it.
+  `cargo clippy -D warnings` passes for `aarch64-linux-android` too.
+- **Rows on the phone** (`docs/benchmarks.md` §14.3):
+  - **MA PASS:** 12,038,559 bytes (11.5 MiB) against 16 MiB.
+  - **MB PASS:** peak PSS 175.0, 173.4, 161.4 MiB in the zoom bursts and pans of `dense_vector`,
+    `large_format_a0` and `large_200p` against 250 MiB. A pinch and a fling by hand wait for
+    Phase 2, which adds them; the zoom bench stands in, as in the trial.
+  - **MC PASS:** `TotalTime` plus `t_first_page` 327, 442, 381 ms against 1.0 s.
+  - **MD:** the system picker opened a PDF from Downloads (a copy of `large_200p.pdf`); cancelling
+    the picker left the app as it was; an ink stroke and Save fell back to Save As, as on the
+    desktop for this file (`NeedsSaveAs`); Save As created the new document through the picker and
+    wrote 22,838 bytes to it; a second stroke and Save updated it in place and wrote it back
+    (23,529 bytes, 2 ink annotations in the file pulled from the phone). Not checked here: Google
+    Drive's provider and another reader (the maintainer's hands), "Open with" from a file
+    manager.
+- **Desktop rows unchanged:** `dense_vector` zoom bench PASS (worst `t_blank` 32 ms, `peak_ws`
+  153.8 MiB), `t_first_page` 649, 637 ms (median before: 638 ms), 0 idle frames; the first run
+  after the build was slower (243 ms `t_blank` in its first repeat, 672 ms first page), the
+  cold-binary effect seen before.
+- **Not done:** the Edit strip is Phase 3, so the ink tool was chosen with the `I` key over
+  `adb`; the library suite on the phone (see §5's note) was built (26 test binaries link without
+  `RUSTFLAGS`) but not run: the phone left USB before it could be pushed.
 
 ### Phase 2, interface part: results (2026-10-26)
 
