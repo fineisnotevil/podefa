@@ -19,6 +19,7 @@ import { StatusIsland, MessageIsland } from "statusbar.slint";
 import { SearchIsland } from "search.slint";
 import { Gallery } from "gallery.slint";
 import { MobileShell } from "mobile/shell.slint";
+import { MobileGallery } from "mobile/gallery.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
 export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem }
@@ -51,6 +52,12 @@ export component MainWindow inherits Window {
     // The islands' distance from the window's edge: smaller when maximized.
     property <length> inset: root.maximized || !root.own-frame ? 8px : 12px;
     property <length> island-gap: 8px;
+    // The tools' dialogs on a phone (Plan 0008 Phase 4): a sheet's bottom and the room above it,
+    // and a row's height (a 44 px target, plan row MH).
+    property <length> sheet-bottom: mshell.floor - root.island-gap;
+    property <length> sheet-room: root.sheet-bottom - mshell.header-bottom - root.island-gap;
+    property <length> row-h: root.mobile ? 44px : 30px;
+    property <length> button-h: root.mobile ? 44px : 28px;
     property <length> canvas-top: root.mobile ? mshell.header-bottom + root.island-gap
         : root.inset + 40px + root.island-gap;
     property <bool> drawer-shown: !root.mobile && root.sidebar-visible && root.total_pages > 0;
@@ -104,6 +111,11 @@ export component MainWindow inherits Window {
     out property <length> gallery-strip-x: gallery.strip-abs-x;
     out property <length> gallery-strip-y: gallery.strip-abs-y;
     out property <length> gallery-view-w: root.width - gallery.inset-left;
+    // The phone's gallery column (Plan 0008 Phase 4): its scroll (0 or less), the gap a lifted
+    // page would land in, and its height.
+    in-out property <length> mgallery-offset: 0px;
+    in-out property <int> mgallery-drop: -1;
+    out property <length> mgallery-view-h: mgallery.height;
     // Shows the tile counters in the status island (when tracing).
     in-out property <bool> diagnostics: false;
 
@@ -440,6 +452,11 @@ export component MainWindow inherits Window {
     callback gallery_dropped(int);
     callback gallery_chosen_action(int);
     callback gallery_clear();
+    // The phone's gallery: a tap made a page the current one; every page chosen.
+    callback gallery_current(int);
+    callback gallery_choose_all();
+    // The phone's gallery: a lifted page was let go (after `gallery_dropped`, if it landed).
+    callback gallery_drag_ended();
 
 
     function apply-theme() {
@@ -485,6 +502,9 @@ export component MainWindow inherits Window {
         }
         if (root.find-visible) {
             root.find_close();
+            return true;
+        }
+        if (root.mobile && root.mode == 2 && mgallery.back()) {
             return true;
         }
         if (root.back_close()) {
@@ -1014,534 +1034,6 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
-                    // document; the open one can be among them, as it is now.
-                    if root.merge-visible : FocusScope {
-                        x: (parent.width - self.width) / 2;
-                        y: 16px;
-                        width: min(parent.width - 32px, 460px);
-                        height: min(parent.height - 32px, 360px);
-                        init => { self.focus(); }
-                        capture-key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                root.merge_close();
-                                return accept;
-                            }
-                            return reject;
-                        }
-                        Rectangle {
-                            background: Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.line-strong;
-                            border-radius: 4px;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: Theme.shadow;
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 8px;
-                                Text {
-                                    text: root.merge-images ? "Images to PDF - one page each, in this order"
-                                        : "Merge files - in this order";
-                                    font-weight: 600;
-                                    color: Theme.text;
-                                }
-                                ListView {
-                                    vertical-stretch: 1;
-                                    for name[index] in root.merge-files : Rectangle {
-                                        height: 26px;
-                                        background: index == root.merge-selected
-                                            ? Theme.selection : transparent;
-                                        Text {
-                                            x: 6px;
-                                            text: (index + 1) + ". " + name;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                            color: index == root.merge-selected
-                                                ? Theme.selection-text : Theme.text;
-                                        }
-                                        TouchArea { clicked => { root.merge-selected = index; } }
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 28px;
-                                    Button {
-                                        text: root.merge-images ? "Add images..." : "Add files...";
-                                        clicked => { root.merge_add(); }
-                                    }
-                                    if !root.merge-images : Button {
-                                        text: "Add open document";
-                                        enabled: root.total_pages > 0;
-                                        clicked => { root.merge_add_current(); }
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 28px;
-                                    Button {
-                                        text: "Up";
-                                        enabled: root.merge-selected > 0;
-                                        clicked => { root.merge_move(-1); }
-                                    }
-                                    Button {
-                                        text: "Down";
-                                        enabled: root.merge-selected >= 0
-                                            && root.merge-selected + 1 < root.merge-files.length;
-                                        clicked => { root.merge_move(1); }
-                                    }
-                                    Button {
-                                        text: "Remove";
-                                        enabled: root.merge-selected >= 0;
-                                        clicked => { root.merge_remove(); }
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button { text: "Cancel"; clicked => { root.merge_close(); } }
-                                    Button {
-                                        text: root.merge-images ? "Make PDF..." : "Merge...";
-                                        primary: true;
-                                        enabled: root.merge-files.length >= 1 && !root.tool-running;
-                                        clicked => { root.merge_run(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Split: the open document, as it is now, into files of N pages or by ranges.
-                    if root.split-visible : FocusScope {
-                        x: (parent.width - self.width) / 2;
-                        y: 16px;
-                        width: min(parent.width - 32px, 420px);
-                        height: 220px;
-                        capture-key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                root.split_close();
-                                return accept;
-                            }
-                            return reject;
-                        }
-                        Rectangle {
-                            background: Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.line-strong;
-                            border-radius: 4px;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: Theme.shadow;
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 8px;
-                                Text {
-                                    text: "Split into files";
-                                    font-weight: 600;
-                                    color: Theme.text;
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Button {
-                                        text: "Every";
-                                        checkable: true;
-                                        checked: root.split-mode == 0;
-                                        clicked => { root.split-mode = 0; }
-                                    }
-                                    LineEdit {
-                                        width: 60px;
-                                        text <=> root.split-every;
-                                        enabled: root.split-mode == 0;
-                                    }
-                                    Text {
-                                        text: "pages";
-                                        vertical-alignment: center;
-                                        color: Theme.text;
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Button {
-                                        text: "Ranges";
-                                        checkable: true;
-                                        checked: root.split-mode == 1;
-                                        clicked => { root.split-mode = 1; }
-                                    }
-                                    LineEdit {
-                                        placeholder-text: "1-3, 4, 5-";
-                                        text <=> root.split-ranges;
-                                        enabled: root.split-mode == 1;
-                                    }
-                                }
-                                Text {
-                                    text: root.split-error;
-                                    color: Theme.danger;
-                                    font-size: 12px;
-                                    overflow: elide;
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 28px;
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button { text: "Cancel"; clicked => { root.split_close(); } }
-                                    Button {
-                                        text: "Split...";
-                                        primary: true;
-                                        enabled: !root.tool-running;
-                                        clicked => { root.split_run(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Document Properties: the fields readers show, and what else the file says.
-                    // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
-                    if root.stamp-visible : FocusScope {
-                        x: (parent.width - self.width) / 2;
-                        y: 16px;
-                        width: min(parent.width - 32px, 440px);
-                        height: root.stamp-mode == 0 ? 300px : 330px;
-                        capture-key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                root.stamp_close();
-                                return accept;
-                            }
-                            return reject;
-                        }
-                        Rectangle {
-                            background: Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.line-strong;
-                            border-radius: 4px;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: Theme.shadow;
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 6px;
-                                Text {
-                                    text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
-                                    font-weight: 600;
-                                    color: Theme.text;
-                                }
-                                if root.stamp-mode == 0 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
-                                }
-                                if root.stamp-mode == 0 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
-                                    Button {
-                                        text: "Diagonal";
-                                        checkable: true;
-                                        checked: root.stamp-diagonal;
-                                        clicked => { root.stamp-diagonal = true; }
-                                    }
-                                    Button {
-                                        text: "Horizontal";
-                                        checkable: true;
-                                        checked: !root.stamp-diagonal;
-                                        clicked => { root.stamp-diagonal = false; }
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                if root.stamp-mode == 0 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Theme.text; }
-                                    Slider {
-                                        minimum: 5;
-                                        maximum: 100;
-                                        value <=> root.stamp-opacity;
-                                    }
-                                    Text {
-                                        width: 40px;
-                                        text: round(root.stamp-opacity) + "%";
-                                        vertical-alignment: center;
-                                        color: Theme.text;
-                                    }
-                                }
-                                if root.stamp-mode == 1 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit {
-                                        text <=> root.stamp-format;
-                                        placeholder-text: "{n} / {total}";
-                                        init => { self.focus(); }
-                                    }
-                                }
-                                if root.stamp-mode == 1 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit { width: 70px; text <=> root.stamp-first; }
-                                    Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit { width: 70px; text <=> root.stamp-size; }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                if root.stamp-mode == 1 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Position"; vertical-alignment: center; color: Theme.text; }
-                                    ComboBox {
-                                        model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
-                                        current-index <=> root.stamp-corner;
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Theme.text; }
-                                    ComboBox {
-                                        model: ["Grey", "Red", "Blue", "Black"];
-                                        current-index <=> root.stamp-colour;
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit {
-                                        text <=> root.stamp-pages;
-                                        placeholder-text: "All, or 1-3, 5, 8-";
-                                    }
-                                }
-                                Text {
-                                    vertical-stretch: 1;
-                                    text: root.stamp-error;
-                                    color: Theme.danger;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 28px;
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button { text: "Cancel"; clicked => { root.stamp_close(); } }
-                                    Button {
-                                        text: "Apply";
-                                        primary: true;
-                                        clicked => { root.stamp_apply(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Compress or export as images (Plan 0005 Phase 4): new files from the document as
-                    // it is now.
-                    if root.convert-visible : FocusScope {
-                        x: (parent.width - self.width) / 2;
-                        y: 16px;
-                        width: min(parent.width - 32px, 420px);
-                        height: root.convert-mode == 0 ? 170px : 230px;
-                        init => { self.focus(); }
-                        capture-key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                root.convert_close();
-                                return accept;
-                            }
-                            return reject;
-                        }
-                        Rectangle {
-                            background: Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.line-strong;
-                            border-radius: 4px;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: Theme.shadow;
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 6px;
-                                Text {
-                                    text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
-                                    font-weight: 600;
-                                    color: Theme.text;
-                                }
-                                if root.convert-mode == 0 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Theme.text; }
-                                    ComboBox {
-                                        model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
-                                        current-index <=> root.convert-preset;
-                                    }
-                                }
-                                if root.convert-mode == 1 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
-                                    ComboBox {
-                                        model: ["PNG", "JPEG"];
-                                        current-index <=> root.convert-format;
-                                    }
-                                    Text { text: "Resolution"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit { width: 70px; text <=> root.convert-dpi; }
-                                    Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
-                                }
-                                if root.convert-mode == 1 : HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit {
-                                        text <=> root.convert-pages;
-                                        placeholder-text: "All, or 1-3, 5, 8-";
-                                    }
-                                }
-                                Text {
-                                    vertical-stretch: 1;
-                                    text: root.convert-error;
-                                    color: Theme.danger;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 28px;
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button { text: "Cancel"; clicked => { root.convert_close(); } }
-                                    Button {
-                                        text: root.convert-mode == 0 ? "Compress..." : "Export...";
-                                        primary: true;
-                                        enabled: !root.tool-running;
-                                        clicked => { root.convert_run(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Crop: the rectangle the Crop tool drew, applied to its page or to every page.
-                    if root.crop-visible : FocusScope {
-                        x: (parent.width - self.width) / 2;
-                        y: 16px;
-                        width: min(parent.width - 32px, 380px);
-                        height: 96px;
-                        init => { self.focus(); }
-                        capture-key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                root.crop_cancel();
-                                return accept;
-                            }
-                            if (event.text == Key.Return) {
-                                root.crop_apply(false);
-                                return accept;
-                            }
-                            return reject;
-                        }
-                        Rectangle {
-                            background: Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.line-strong;
-                            border-radius: 4px;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: Theme.shadow;
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 8px;
-                                Text {
-                                    text: "Crop to the drawn area (" + root.crop-size + ")";
-                                    font-weight: 600;
-                                    color: Theme.text;
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 28px;
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
-                                    Button { text: "All pages"; clicked => { root.crop_apply(true); } }
-                                    Button {
-                                        text: "This page";
-                                        primary: true;
-                                        clicked => { root.crop_apply(false); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if root.props-visible : FocusScope {
-                        x: (parent.width - self.width) / 2;
-                        y: 16px;
-                        width: min(parent.width - 32px, 460px);
-                        height: min(parent.height - 32px, 380px);
-                        capture-key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                root.props_close();
-                                return accept;
-                            }
-                            return reject;
-                        }
-                        Rectangle {
-                            background: Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.line-strong;
-                            border-radius: 4px;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: Theme.shadow;
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 6px;
-                                Text {
-                                    text: "Document properties";
-                                    font-weight: 600;
-                                    color: Theme.text;
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit {
-                                        text <=> root.props-title;
-                                        read-only: !root.editable;
-                                        init => { self.focus(); }
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit { text <=> root.props-author; read-only: !root.editable; }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit { text <=> root.props-subject; read-only: !root.editable; }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 30px;
-                                    Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
-                                    LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
-                                }
-                                Text {
-                                    vertical-stretch: 1;
-                                    text: root.props-info;
-                                    wrap: word-wrap;
-                                    font-size: 12px;
-                                    color: Theme.text;
-                                    opacity: 0.75;
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    height: 28px;
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button { text: "Close"; clicked => { root.props_close(); } }
-                                    if root.editable : Button {
-                                        text: "Save";
-                                        primary: true;
-                                        clicked => { root.props_save(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-
                     // The selected annotation's colours and Delete, over its top edge; on a phone,
                     // 44 px targets (Plan 0008 row MH).
                     if root.has-annot-selection && root.annot-sel-rects.length > 0 && root.tool != 6 : annot-bar := Island {
@@ -1633,7 +1125,7 @@ export component MainWindow inherits Window {
             y: 0px;
             width: root.width;
             height: root.height;
-            visible: (root.tools-t > 0 || root.warm) && root.total_pages > 0;
+            visible: !root.mobile && (root.tools-t > 0 || root.warm) && root.total_pages > 0;
             opacity: root.tools-t;
             transform-scale: 0.88 + 0.12 * root.tools-t;
             inset-left: root.mobile ? root.island-gap : root.inset + sidebar.width + root.island-gap;
@@ -1656,6 +1148,574 @@ export component MainWindow inherits Window {
             dropped-at(index) => { root.gallery_dropped(index); }
             chosen-action(which) => { root.gallery_chosen_action(which); }
             clear-chosen => { root.gallery_clear(); }
+        }
+
+        // On a phone, the pages in one column (Plan 0008 Phase 4).
+        mgallery := MobileGallery {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            visible: root.mobile && (root.tools-t > 0 || root.warm) && root.total_pages > 0;
+            opacity: root.tools-t;
+            transform-scale: 0.88 + 0.12 * root.tools-t;
+            inset-top: root.canvas-top;
+            inset-bottom: root.doc-inset-bottom;
+            thumbs: root.thumbs;
+            total-pages: root.total_pages;
+            pages-chosen: root.pages-chosen;
+            editable: root.editable;
+            offset <=> root.mgallery-offset;
+            drop-index <=> root.mgallery-drop;
+            scrolled => { root.gallery_scrolled(); }
+            card-tapped(index) => { root.gallery_current(index); }
+            card-toggled(index) => { root.gallery_toggled(index); }
+            card-opened(index) => { root.gallery_opened(index); }
+            card-action(index, which) => { root.gallery_action(index, which); }
+            divider-action(index, which) => { root.gallery_divider(index, which); }
+            drag-started(index) => { root.thumb_drag_started(index); }
+            dropped-at(index) => { root.gallery_dropped(index); }
+            chosen-action(which) => { root.gallery_chosen_action(which); }
+            clear-chosen => { root.gallery_clear(); }
+            choose-all => { root.gallery_choose_all(); }
+            drag-ended => { root.gallery_drag_ended(); }
+        }
+
+        // The tools' dialogs (Plans 0005 and 0006), over the canvas and the gallery, so one opened
+        // in Tools shows there too. On a phone each is a sheet above the dock, the edit strip or
+        // the on-screen keyboard, with 44 px rows (Plan 0008 Phase 4).
+        dialogs := Rectangle {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+
+            // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
+            // document; the open one can be among them, as it is now.
+            if root.merge-visible : FocusScope {
+                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 460px);
+                height: root.mobile ? min(root.sheet-room, 420px) : min(parent.height - 32px, 360px);
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.merge_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                Rectangle {
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    border-radius: root.mobile ? 20px : 4px;
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: Theme.shadow;
+                    sheet-merge := VerticalLayout {
+                        padding: root.mobile ? 16px : 10px;
+                        spacing: 8px;
+                        Text {
+                            text: root.merge-images ? "Images to PDF - one page each, in this order"
+                                : "Merge files - in this order";
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        ListView {
+                            vertical-stretch: 1;
+                            for name[index] in root.merge-files : Rectangle {
+                                height: 26px;
+                                background: index == root.merge-selected
+                                    ? Theme.selection : transparent;
+                                Text {
+                                    x: 6px;
+                                    text: (index + 1) + ". " + name;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    color: index == root.merge-selected
+                                        ? Theme.selection-text : Theme.text;
+                                }
+                                TouchArea { clicked => { root.merge-selected = index; } }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            Button {
+                                text: root.merge-images ? "Add images..." : "Add files...";
+                                clicked => { root.merge_add(); }
+                            }
+                            if !root.merge-images : Button {
+                                text: "Add open document";
+                                enabled: root.total_pages > 0;
+                                clicked => { root.merge_add_current(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            Button {
+                                text: "Up";
+                                enabled: root.merge-selected > 0;
+                                clicked => { root.merge_move(-1); }
+                            }
+                            Button {
+                                text: "Down";
+                                enabled: root.merge-selected >= 0
+                                    && root.merge-selected + 1 < root.merge-files.length;
+                                clicked => { root.merge_move(1); }
+                            }
+                            Button {
+                                text: "Remove";
+                                enabled: root.merge-selected >= 0;
+                                clicked => { root.merge_remove(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Button { text: "Cancel"; clicked => { root.merge_close(); } }
+                            Button {
+                                text: root.merge-images ? "Make PDF..." : "Merge...";
+                                primary: true;
+                                enabled: root.merge-files.length >= 1 && !root.tool-running;
+                                clicked => { root.merge_run(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Split: the open document, as it is now, into files of N pages or by ranges.
+            if root.split-visible : FocusScope {
+                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 420px);
+                height: root.mobile ? min(root.sheet-room, sheet-split.preferred-height) : 220px;
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.split_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                Rectangle {
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    border-radius: root.mobile ? 20px : 4px;
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: Theme.shadow;
+                    sheet-split := VerticalLayout {
+                        padding: root.mobile ? 16px : 10px;
+                        spacing: 8px;
+                        Text {
+                            text: "Split into files";
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Button {
+                                text: "Every";
+                                checkable: true;
+                                checked: root.split-mode == 0;
+                                clicked => { root.split-mode = 0; }
+                            }
+                            LineEdit {
+                                width: 60px;
+                                text <=> root.split-every;
+                                enabled: root.split-mode == 0;
+                            }
+                            Text {
+                                text: "pages";
+                                vertical-alignment: center;
+                                color: Theme.text;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Button {
+                                text: "Ranges";
+                                checkable: true;
+                                checked: root.split-mode == 1;
+                                clicked => { root.split-mode = 1; }
+                            }
+                            LineEdit {
+                                placeholder-text: "1-3, 4, 5-";
+                                text <=> root.split-ranges;
+                                enabled: root.split-mode == 1;
+                            }
+                        }
+                        Text {
+                            text: root.split-error;
+                            color: Theme.danger;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button { text: "Cancel"; clicked => { root.split_close(); } }
+                            Button {
+                                text: "Split...";
+                                primary: true;
+                                enabled: !root.tool-running;
+                                clicked => { root.split_run(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Document Properties: the fields readers show, and what else the file says.
+            // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
+            if root.stamp-visible : FocusScope {
+                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 440px);
+                height: root.mobile ? min(root.sheet-room, sheet-stamp.preferred-height) : root.stamp-mode == 0 ? 300px : 330px;
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.stamp_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                Rectangle {
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    border-radius: root.mobile ? 20px : 4px;
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: Theme.shadow;
+                    sheet-stamp := VerticalLayout {
+                        padding: root.mobile ? 16px : 10px;
+                        spacing: 6px;
+                        Text {
+                            text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        if root.stamp-mode == 0 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
+                        }
+                        if root.stamp-mode == 0 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
+                            Button {
+                                text: "Diagonal";
+                                checkable: true;
+                                checked: root.stamp-diagonal;
+                                clicked => { root.stamp-diagonal = true; }
+                            }
+                            Button {
+                                text: "Horizontal";
+                                checkable: true;
+                                checked: !root.stamp-diagonal;
+                                clicked => { root.stamp-diagonal = false; }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        if root.stamp-mode == 0 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Theme.text; }
+                            Slider {
+                                minimum: 5;
+                                maximum: 100;
+                                value <=> root.stamp-opacity;
+                            }
+                            Text {
+                                width: 40px;
+                                text: round(root.stamp-opacity) + "%";
+                                vertical-alignment: center;
+                                color: Theme.text;
+                            }
+                        }
+                        if root.stamp-mode == 1 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit {
+                                text <=> root.stamp-format;
+                                placeholder-text: "{n} / {total}";
+                                init => { self.focus(); }
+                            }
+                        }
+                        if root.stamp-mode == 1 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit { width: 70px; text <=> root.stamp-first; }
+                            Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit { width: 70px; text <=> root.stamp-size; }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        if root.stamp-mode == 1 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Position"; vertical-alignment: center; color: Theme.text; }
+                            ComboBox {
+                                model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
+                                current-index <=> root.stamp-corner;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Theme.text; }
+                            ComboBox {
+                                model: ["Grey", "Red", "Blue", "Black"];
+                                current-index <=> root.stamp-colour;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit {
+                                text <=> root.stamp-pages;
+                                placeholder-text: "All, or 1-3, 5, 8-";
+                            }
+                        }
+                        Text {
+                            vertical-stretch: 1;
+                            text: root.stamp-error;
+                            color: Theme.danger;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button { text: "Cancel"; clicked => { root.stamp_close(); } }
+                            Button {
+                                text: "Apply";
+                                primary: true;
+                                clicked => { root.stamp_apply(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Compress or export as images (Plan 0005 Phase 4): new files from the document as
+            // it is now.
+            if root.convert-visible : FocusScope {
+                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 420px);
+                height: root.mobile ? min(root.sheet-room, sheet-convert.preferred-height) : root.convert-mode == 0 ? 170px : 230px;
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.convert_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                Rectangle {
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    border-radius: root.mobile ? 20px : 4px;
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: Theme.shadow;
+                    sheet-convert := VerticalLayout {
+                        padding: root.mobile ? 16px : 10px;
+                        spacing: 6px;
+                        Text {
+                            text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        if root.convert-mode == 0 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Theme.text; }
+                            ComboBox {
+                                model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
+                                current-index <=> root.convert-preset;
+                            }
+                        }
+                        if root.convert-mode == 1 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                            ComboBox {
+                                model: ["PNG", "JPEG"];
+                                current-index <=> root.convert-format;
+                            }
+                            Text { text: "Resolution"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit { width: 70px; text <=> root.convert-dpi; }
+                            Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
+                        }
+                        if root.convert-mode == 1 : HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit {
+                                text <=> root.convert-pages;
+                                placeholder-text: "All, or 1-3, 5, 8-";
+                            }
+                        }
+                        Text {
+                            vertical-stretch: 1;
+                            text: root.convert-error;
+                            color: Theme.danger;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button { text: "Cancel"; clicked => { root.convert_close(); } }
+                            Button {
+                                text: root.convert-mode == 0 ? "Compress..." : "Export...";
+                                primary: true;
+                                enabled: !root.tool-running;
+                                clicked => { root.convert_run(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Crop: the rectangle the Crop tool drew, applied to its page or to every page.
+            if root.crop-visible : FocusScope {
+                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 380px);
+                height: root.mobile ? min(root.sheet-room, sheet-crop.preferred-height) : 96px;
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.crop_cancel();
+                        return accept;
+                    }
+                    if (event.text == Key.Return) {
+                        root.crop_apply(false);
+                        return accept;
+                    }
+                    return reject;
+                }
+                Rectangle {
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    border-radius: root.mobile ? 20px : 4px;
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: Theme.shadow;
+                    sheet-crop := VerticalLayout {
+                        padding: root.mobile ? 16px : 10px;
+                        spacing: 8px;
+                        Text {
+                            text: "Crop to the drawn area (" + root.crop-size + ")";
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
+                            Button { text: "All pages"; clicked => { root.crop_apply(true); } }
+                            Button {
+                                text: "This page";
+                                primary: true;
+                                clicked => { root.crop_apply(false); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.props-visible : FocusScope {
+                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 460px);
+                height: root.mobile ? min(root.sheet-room, sheet-props.preferred-height) : min(parent.height - 32px, 380px);
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.props_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                Rectangle {
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    border-radius: root.mobile ? 20px : 4px;
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: Theme.shadow;
+                    sheet-props := VerticalLayout {
+                        padding: root.mobile ? 16px : 10px;
+                        spacing: 6px;
+                        Text {
+                            text: "Document properties";
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit {
+                                text <=> root.props-title;
+                                read-only: !root.editable;
+                                init => { self.focus(); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit { text <=> root.props-author; read-only: !root.editable; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit { text <=> root.props-subject; read-only: !root.editable; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.row-h;
+                            Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
+                            LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
+                        }
+                        Text {
+                            vertical-stretch: 1;
+                            text: root.props-info;
+                            wrap: word-wrap;
+                            font-size: 12px;
+                            color: Theme.text;
+                            opacity: 0.75;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button { text: "Close"; clicked => { root.props_close(); } }
+                            if root.editable : Button {
+                                text: "Save";
+                                primary: true;
+                                clicked => { root.props_save(); }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         title-row := TitleRow {

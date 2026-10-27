@@ -1,0 +1,585 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// Tools on a phone (Plan 0008 Phase 4, the concept's `MobileGalleryView`): the pages in one
+// column down the middle, each with its own buttons, and between two pages a "+" that opens into
+// Split Here, a blank page and pages from a file. A tap makes a page the current one and a second
+// tap opens it in Read; while pages are chosen (by their check boxes), a tap chooses or unchooses.
+// A finger held still on a page for half a second picks it up (with the other chosen pages when
+// it is one of them), and the gap nearest the finger is where they go when it lifts; near the
+// top or bottom the column scrolls along. The bar over the dock acts on the chosen pages.
+//
+// It only lays out: every command calls the handler the desktop gallery calls. The rows are the
+// thumbnails' rows; only the pages near the view are built, and Rust draws the pictures of the
+// ones in view (lib.rs `MOBILE_GALLERY_*`, which must match `MobileGalleryMetrics`). Every
+// control is a 44 px target (plan row MH).
+
+import { ThumbRow } from "../types.slint";
+import { Theme } from "../theme.slint";
+import { Island } from "../widgets.slint";
+import { TouchButton } from "shell.slint";
+
+export global MobileGalleryMetrics {
+    // The box a page's picture fits in (the concept's 230 x 325 card).
+    out property <length> card-w: 230px;
+    out property <length> card-h: 325px;
+    // A gap between two pages, holding its "+".
+    out property <length> gap: 64px;
+    // One gap and the page after it.
+    out property <length> pitch: 389px;
+    // Above the first gap, under the column's top inset.
+    out property <length> lead: 52px;
+}
+
+// A small button on a page: a 32 px chip in a 44 px target.
+component ChipButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> danger: false;
+    callback clicked();
+    width: 44px;
+    height: 44px;
+    Rectangle {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        background: touch.pressed ? Theme.active : Theme.surface;
+        border-width: 1px;
+        border-color: Theme.line-strong;
+        drop-shadow-blur: 3px;
+        drop-shadow-color: Theme.island-shadow;
+        Image {
+            source: root.icon;
+            width: 16px;
+            height: 16px;
+            colorize: root.danger ? Theme.danger : Theme.text;
+        }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// One page: its picture on white paper, its number, a check box and its buttons.
+component MobileCard inherits Rectangle {
+    in property <ThumbRow> page;
+    in property <bool> chosen;
+    in property <bool> editable;
+    in property <bool> can-delete;
+    // Picked up with the finger: shown faded where it was.
+    in property <bool> lifted;
+    callback tapped();
+    callback toggled();
+    callback action(int);
+    // Held still for half a second; the finger then moves (y in the card) and lifts.
+    callback lift();
+    callback lift-moved(length);
+    callback lift-ended();
+
+    property <float> ratio: root.page.ratio > 0 ? root.page.ratio : 0.7071;
+    property <length> page-w: min(MobileGalleryMetrics.card-w, MobileGalleryMetrics.card-h * root.ratio);
+    property <length> page-h: root.page-w / root.ratio;
+    // This press picked the page up, so its release is no tap.
+    property <bool> held;
+
+    width: MobileGalleryMetrics.card-w;
+    height: MobileGalleryMetrics.card-h;
+    opacity: root.lifted ? 0.4 : 1.0;
+
+    touch := TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.held = false;
+                hold.running = root.editable;
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                hold.running = false;
+                if (root.held) { root.lift-ended(); }
+            }
+        }
+        moved => {
+            if (root.held) {
+                root.lift-moved(self.mouse-y);
+            } else if (abs(self.mouse-x - self.pressed-x) > 8px || abs(self.mouse-y - self.pressed-y) > 8px) {
+                hold.running = false;
+            }
+        }
+        clicked => {
+            if (!root.held) { root.tapped(); }
+        }
+    }
+    hold := Timer {
+        interval: 500ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (touch.pressed) {
+                root.held = true;
+                root.lift();
+            }
+        }
+    }
+
+    paper := Rectangle {
+        x: (parent.width - root.page-w) / 2;
+        y: (parent.height - root.page-h) / 2;
+        width: root.page-w;
+        height: root.page-h;
+        background: #ffffff;
+        border-radius: 4px;
+        border-width: root.chosen ? 3px : root.page.current ? 2px : 1px;
+        border-color: root.chosen ? Theme.card-ring : root.page.current ? Theme.card-hover-ring : Theme.line-strong;
+        drop-shadow-blur: 12px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.island-shadow;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.page.image;
+            image-fit: fill;
+        }
+    }
+
+    // The page number, at the picture's top left.
+    Rectangle {
+        x: paper.x + 8px;
+        y: paper.y + 8px;
+        width: number.preferred-width + 12px;
+        height: 22px;
+        border-radius: 6px;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.line-strong;
+        number := Text {
+            text: root.page.label;
+            font-size: 12px;
+            font-weight: 700;
+            color: Theme.text;
+        }
+    }
+
+    // The check box, at the top right: chooses the page among others.
+    if root.editable : Rectangle {
+        x: paper.x + paper.width - self.width;
+        y: paper.y;
+        width: 44px;
+        height: 44px;
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            background: root.chosen ? Theme.check-fill : Theme.surface;
+            border-width: root.chosen ? 0px : 1px;
+            border-color: Theme.line-strong;
+            if root.chosen : Image {
+                source: @image-url("../icons/check.svg");
+                width: 16px;
+                height: 16px;
+                colorize: Theme.check-mark;
+            }
+        }
+        TouchArea { clicked => { root.toggled(); } }
+    }
+
+    // The page's buttons, along the bottom of its picture.
+    if root.editable : HorizontalLayout {
+        x: (parent.width - MobileGalleryMetrics.card-w) / 2;
+        y: paper.y + paper.height - 48px;
+        width: MobileGalleryMetrics.card-w;
+        height: 44px;
+        ChipButton {
+            icon: @image-url("../icons/rotate-ccw.svg");
+            clicked => { root.action(0); }
+        }
+        ChipButton {
+            icon: @image-url("../icons/rotate-cw.svg");
+            clicked => { root.action(1); }
+        }
+        ChipButton {
+            icon: @image-url("../icons/copy.svg");
+            clicked => { root.action(2); }
+        }
+        ChipButton {
+            icon: @image-url("../icons/external-link.svg");
+            clicked => { root.action(7); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        if root.can-delete : ChipButton {
+            icon: @image-url("../icons/trash-2.svg");
+            danger: true;
+            clicked => { root.action(3); }
+        }
+    }
+}
+
+// The gap before page `index`: a line with a "+", which a tap opens into its actions.
+component Gap inherits Rectangle {
+    in property <int> index;
+    in property <int> count;
+    in property <bool> open;
+    // Where lifted pages would land.
+    in property <bool> target;
+    callback opened();
+    callback closed();
+    callback action(int);
+
+    height: MobileGalleryMetrics.gap;
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: MobileGalleryMetrics.card-w;
+        height: root.target ? 3px : 1px;
+        border-radius: 1.5px;
+        background: root.target ? Theme.card-ring : Theme.line-strong;
+    }
+    if !root.open && !root.target : Rectangle {
+        width: 44px;
+        height: 44px;
+        Rectangle {
+            width: 32px;
+            height: 24px;
+            border-radius: 12px;
+            background: plus-touch.pressed ? Theme.active : Theme.surface;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            Image {
+                source: @image-url("../icons/plus.svg");
+                width: 14px;
+                height: 14px;
+                colorize: Theme.text-muted;
+            }
+        }
+        plus-touch := TouchArea { clicked => { root.opened(); } }
+    }
+    if root.open : Island {
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 22px;
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 2px;
+            // The pages from here on move to a new tab (Plan 0007 Phase 4).
+            if root.index > 0 && root.index < root.count : TouchButton {
+                icon: @image-url("../icons/scissors.svg");
+                tint: Theme.text;
+                clicked => { root.action(0); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/plus.svg");
+                tint: Theme.text;
+                clicked => { root.action(1); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/folder-input.svg");
+                tint: Theme.text;
+                clicked => { root.action(2); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/x.svg");
+                clicked => { root.closed(); }
+            }
+        }
+    }
+    if root.target : Island {
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-width: 2px;
+        border-color: Theme.card-ring;
+        HorizontalLayout {
+            padding: 8px;
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 6px;
+            Image {
+                source: @image-url("../icons/move-vertical.svg");
+                width: 16px;
+                height: 16px;
+                colorize: Theme.text;
+            }
+            Text {
+                text: "Move Here";
+                font-size: 12px;
+                font-weight: 700;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component MobileGallery inherits Rectangle {
+    in property <[ThumbRow]> thumbs;
+    in property <int> total-pages;
+    in property <int> pages-chosen;
+    in property <bool> editable;
+    // The column runs under the header and the dock; these keep its ends clear of them.
+    in property <length> inset-top;
+    in property <length> inset-bottom;
+    // The column's scroll (the Flickable's `content-y`, 0 or less).
+    in-out property <length> offset: 0px;
+    // The gap a lifted page would land in, or -1.
+    in-out property <int> drop-index: -1;
+    callback scrolled();
+    // A tap: makes the page current (`tapped`) or opens it in Read (`opened`).
+    callback card-tapped(int);
+    callback card-toggled(int);
+    callback card-opened(int);
+    // An action on a page (0 rotate left, 1 rotate right, 2 duplicate, 3 delete, 7 extract): on
+    // all the chosen pages when it is one of them, else on it alone.
+    callback card-action(int, int);
+    // An action in the gap before a page (0 split here, 1 blank page, 2 pages from a file).
+    callback divider-action(int, int);
+    callback drag-started(int);
+    callback dropped-at(int);
+    // The finger let a lifted page go, after `dropped-at` when it landed in a gap.
+    callback drag-ended();
+    // The bar over the dock: an action on every chosen page; unchoosing them; choosing all.
+    callback chosen-action(int);
+    callback clear-chosen();
+    callback choose-all();
+
+    // The gap whose actions are open, or -1.
+    property <int> open-gap: -1;
+    // The page the finger picked up, or -1, and the finger's y in the view.
+    property <int> lift-index: -1;
+    property <length> finger-y;
+    // The gap nearest the finger: the line between gap i and page i lies at `lead + i * pitch`
+    // plus half a gap.
+    property <int> nearest-gap: max(0, min(root.total-pages, round(
+        (root.finger-y - root.offset - root.inset-top - MobileGalleryMetrics.lead
+            - MobileGalleryMetrics.gap / 2) / MobileGalleryMetrics.pitch)));
+    property <length> content-h: root.inset-top + MobileGalleryMetrics.lead
+        + root.total-pages * MobileGalleryMetrics.pitch + MobileGalleryMetrics.gap
+        + root.inset-bottom + 64px;
+
+    // Android's Back: closes an open gap; false when none was open.
+    public function back() -> bool {
+        if (root.open-gap >= 0) {
+            root.open-gap = -1;
+            return true;
+        }
+        return false;
+    }
+
+    function finger-at(y: length) {
+        root.finger-y = y;
+        root.drop-index = root.nearest-gap;
+    }
+
+    background: Theme.desk;
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("../textures/desk.svg");
+        horizontal-tiling: repeat;
+        vertical-tiling: repeat;
+        colorize: Theme.desk-ink;
+    }
+
+    column := Flickable {
+        content-width: self.width;
+        content-height: root.content-h;
+        content-y <=> root.offset;
+        interactive: root.lift-index < 0;
+        changed content-y => { root.scrolled(); }
+
+        Gap {
+            x: 0px;
+            y: root.inset-top + MobileGalleryMetrics.lead;
+            width: root.width;
+            index: 0;
+            count: root.total-pages;
+            open: root.open-gap == 0 && root.editable;
+            target: root.lift-index >= 0 && root.drop-index == 0;
+            opened => { root.open-gap = root.editable ? 0 : -1; }
+            closed => { root.open-gap = -1; }
+            action(which) => {
+                root.open-gap = -1;
+                root.divider-action(0, which);
+            }
+        }
+
+        for row[index] in root.thumbs : slot := Rectangle {
+            x: 0px;
+            y: root.inset-top + MobileGalleryMetrics.lead + MobileGalleryMetrics.gap
+                + index * MobileGalleryMetrics.pitch;
+            width: root.width;
+            height: MobileGalleryMetrics.pitch;
+            // A page that moves, or whose neighbour came or went, slides to its place.
+            animate y { duration: Theme.motion; easing: ease-out-expo; }
+            property <bool> near: self.y + self.height > -root.offset - MobileGalleryMetrics.pitch
+                && self.y < -root.offset + root.height + MobileGalleryMetrics.pitch;
+            if slot.near : MobileCard {
+                x: (parent.width - self.width) / 2;
+                y: 0px;
+                page: row;
+                chosen: row.selected;
+                editable: root.editable;
+                can-delete: root.total-pages > 1;
+                lifted: root.lift-index >= 0 && (index == root.lift-index || (row.selected && root.pages-chosen > 0));
+                tapped => {
+                    root.open-gap = -1;
+                    if (root.pages-chosen > 0 && root.editable) {
+                        root.card-toggled(index);
+                    } else if (row.current) {
+                        root.card-opened(index);
+                    } else {
+                        root.card-tapped(index);
+                    }
+                }
+                toggled => { root.card-toggled(index); }
+                action(which) => { root.card-action(index, which); }
+                lift => {
+                    root.open-gap = -1;
+                    root.lift-index = index;
+                    root.drag-started(index);
+                }
+                lift-moved(y) => {
+                    root.finger-at(slot.y + self.y + y + root.offset);
+                    scroller.running = true;
+                }
+                lift-ended => {
+                    scroller.running = false;
+                    if (root.lift-index >= 0 && root.drop-index >= 0) {
+                        root.dropped-at(root.drop-index);
+                    }
+                    root.lift-index = -1;
+                    root.drop-index = -1;
+                    root.drag-ended();
+                }
+            }
+            if slot.near : Gap {
+                x: 0px;
+                y: MobileGalleryMetrics.card-h;
+                width: parent.width;
+                index: index + 1;
+                count: root.total-pages;
+                open: root.open-gap == index + 1 && root.editable;
+                target: root.lift-index >= 0 && root.drop-index == index + 1;
+                opened => { root.open-gap = root.editable ? index + 1 : -1; }
+                closed => { root.open-gap = -1; }
+                action(which) => {
+                    root.open-gap = -1;
+                    root.divider-action(index + 1, which);
+                }
+            }
+        }
+    }
+
+    // With a page picked up, the column scrolls along while the finger is near its top or
+    // bottom, faster the closer it is.
+    scroller := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            if (root.lift-index < 0) {
+                self.running = false;
+                return;
+            }
+            let edge = 96px;
+            let top = root.inset-top + edge;
+            let bottom = root.height - root.inset-bottom - edge;
+            let step = root.finger-y < top ? (top - root.finger-y) / 6
+                : root.finger-y > bottom ? -(root.finger-y - bottom) / 6 : 0px;
+            if (step != 0px) {
+                root.offset = max(min(0px, column.height - root.content-h), min(0px, root.offset + step));
+                root.drop-index = root.nearest-gap;
+            }
+        }
+    }
+
+    // The number of pages, and choosing them all, under the header.
+    if root.total-pages > 0 : Island {
+        x: (parent.width - self.width) / 2;
+        y: root.inset-top;
+        width: min(parent.width - 16px, 360px);
+        height: 44px;
+        border-radius: 22px;
+        HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 4px;
+            Text {
+                text: root.pages-chosen > 0 ? root.pages-chosen + " of " + root.total-pages + " pages chosen"
+                    : root.total-pages + (root.total-pages == 1 ? " page" : " pages");
+                font-size: 13px;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if root.editable && root.pages-chosen < root.total-pages : Rectangle {
+                width: all-text.preferred-width + 24px;
+                height: 44px;
+                border-radius: 18px;
+                background: all-touch.pressed ? Theme.active : transparent;
+                all-text := Text {
+                    text: "Choose all";
+                    font-size: 13px;
+                    color: Theme.text-muted;
+                }
+                all-touch := TouchArea { clicked => { root.choose-all(); } }
+            }
+        }
+    }
+
+    // The bar over the dock while pages are chosen (the concept's bulk actions).
+    if root.editable && root.pages-chosen > 0 : Island {
+        width: self.preferred-width;
+        height: self.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: parent.height - root.inset-bottom - self.height;
+        border-radius: 26px;
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 2px;
+            Rectangle {
+                width: max(44px, count.preferred-width + 20px);
+                height: 44px;
+                Rectangle {
+                    width: parent.width - 8px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: Theme.text;
+                    count := Text {
+                        text: root.pages-chosen;
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: Theme.surface;
+                    }
+                }
+            }
+            TouchButton {
+                icon: @image-url("../icons/rotate-ccw.svg");
+                tint: Theme.text;
+                clicked => { root.chosen-action(0); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/rotate-cw.svg");
+                tint: Theme.text;
+                clicked => { root.chosen-action(1); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/copy.svg");
+                tint: Theme.text;
+                clicked => { root.chosen-action(2); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/external-link.svg");
+                tint: Theme.text;
+                clicked => { root.chosen-action(7); }
+            }
+            if root.pages-chosen < root.total-pages : TouchButton {
+                icon: @image-url("../icons/trash-2.svg");
+                tint: Theme.danger;
+                clicked => { root.chosen-action(3); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/x.svg");
+                clicked => { root.clear-chosen(); }
+            }
+        }
+    }
+}

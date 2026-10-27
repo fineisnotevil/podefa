@@ -85,6 +85,14 @@ const GALLERY_PAD_PX: f32 = 72.0;
 const GALLERY_CARD_PX: f32 = 232.0;
 const GALLERY_BOX_W_PX: f32 = 216.0;
 const GALLERY_BOX_H_PX: f32 = 300.0;
+/// The phone's gallery column (Plan 0008 Phase 4); must match `MobileGalleryMetrics` in
+/// `ui/mobile/gallery.slint`: the box a picture fits in, a gap and a page, and the room above the
+/// first gap under the column's top inset.
+const MOBILE_GALLERY_CARD_W_PX: f32 = 230.0;
+const MOBILE_GALLERY_CARD_H_PX: f32 = 325.0;
+const MOBILE_GALLERY_GAP_PX: f32 = 64.0;
+const MOBILE_GALLERY_PITCH_PX: f32 = 389.0;
+const MOBILE_GALLERY_LEAD_PX: f32 = 52.0;
 /// Pages left and right of the gallery's view whose pictures are drawn ahead.
 const GALLERY_MARGIN_CARDS: usize = 2;
 /// Pictures the gallery keeps: larger than the drawer's, so fewer of them (the view shows about
@@ -363,6 +371,9 @@ struct AppState {
     touch_down: Option<(f32, f32)>,
     /// Whether the last press was a finger: a finger has no hover, so its moves show no tips.
     touch_input: bool,
+    /// The mobile shell is shown (Plan 0008): Tools is the one-column gallery. Read from the
+    /// window when the mode changes.
+    mobile: bool,
     long_press: slint::Timer,
     /// A pinch being made (Plan 0008 Phase 2): the zoom it started from and the viewport point
     /// the pages scale around.
@@ -435,6 +446,8 @@ struct AppState {
     page_sel: std::collections::BTreeSet<u32>,
     page_sel_anchor: Option<u32>,
     drag_pages: Vec<u32>,
+    /// The drag chose its page (it was not chosen before), so on a phone the choice ends with it.
+    drag_chose: bool,
     /// Counts layouts: opens and structural edits. Text lines and annotations are asked for with it,
     /// so an answer about a page index from before a structural edit is dropped.
     layout_generation: u64,
@@ -520,6 +533,7 @@ impl AppState {
             last_double: None,
             touch_down: None,
             touch_input: false,
+            mobile: false,
             long_press: slint::Timer::default(),
             pinch: None,
             tap_back: None,
@@ -565,6 +579,7 @@ impl AppState {
             page_sel: std::collections::BTreeSet::new(),
             page_sel_anchor: None,
             drag_pages: Vec::new(),
+            drag_chose: false,
             layout_generation: 0,
             running_tool: None,
             next_job_id: 0,
@@ -1453,6 +1468,13 @@ impl AppState {
             self.select_annotation(ui, None);
             return true;
         }
+        // In Tools, the chosen pages (Plan 0008 Phase 4); elsewhere they are not shown.
+        if self.in_gallery() && !self.page_sel.is_empty() {
+            self.page_sel.clear();
+            self.page_sel_anchor = None;
+            self.show_page_sel(ui);
+            return true;
+        }
         false
     }
 
@@ -1991,7 +2013,8 @@ impl AppState {
     /// A thumbnail drag began: it moves the chosen pages when it started on one of them, else
     /// that page alone.
     fn thumb_drag_started(&mut self, ui: &MainWindow, row: u32) {
-        if !self.page_sel.contains(&row) {
+        self.drag_chose = !self.page_sel.contains(&row);
+        if self.drag_chose {
             self.page_sel.clear();
             self.page_sel.insert(row);
             self.page_sel_anchor = Some(row);
@@ -2520,7 +2543,9 @@ impl AppState {
     /// The width a page's thumbnail is drawn at, in pixels: the drawer's, or in the gallery the
     /// width that fits the page's box.
     fn thumb_width_px(&self, page: u32) -> u32 {
-        let logical = if self.in_gallery() {
+        let logical = if self.in_gallery() && self.mobile {
+            MOBILE_GALLERY_CARD_W_PX.min(MOBILE_GALLERY_CARD_H_PX * self.page_ratio(page as usize))
+        } else if self.in_gallery() {
             GALLERY_BOX_W_PX.min(GALLERY_BOX_H_PX * self.page_ratio(page as usize))
         } else {
             THUMB_WIDTH_LOGICAL_PX
@@ -2545,6 +2570,7 @@ impl AppState {
             return;
         }
         self.mode = mode;
+        self.mobile = ui.get_mobile();
         let motion = Duration::from_millis(MODE_MOTION_MS + MODE_SETTLE_MS);
         self.motion_until = Some(Instant::now() + motion);
         if self.in_gallery() {
@@ -2578,6 +2604,10 @@ impl AppState {
 
     /// Scrolls the gallery so `page` is in view, in the middle when it was not.
     fn reveal_in_gallery(&mut self, ui: &MainWindow, page: usize) {
+        if self.mobile {
+            self.reveal_in_column(ui, page);
+            return;
+        }
         let view = ui.get_gallery_view_w();
         let count = self.page_sizes.len() as f32;
         let content = GALLERY_LEAD_PX + count * GALLERY_PITCH_PX + GALLERY_PAD_PX;
@@ -2591,12 +2621,52 @@ impl AppState {
         }
     }
 
+    /// The phone's column (Plan 0008 Phase 4): scrolls so `page` is between the header and the
+    /// dock, in the middle when it was not.
+    fn reveal_in_column(&mut self, ui: &MainWindow, page: usize) {
+        let (top_inset, bottom_inset) = (ui.get_doc_inset_top(), ui.get_doc_inset_bottom());
+        let view = ui.get_mgallery_view_h();
+        let count = self.page_sizes.len() as f32;
+        let content = top_inset
+            + MOBILE_GALLERY_LEAD_PX
+            + count * MOBILE_GALLERY_PITCH_PX
+            + MOBILE_GALLERY_GAP_PX
+            + bottom_inset
+            + 64.0;
+        let max = (content - view).max(0.0);
+        let top = top_inset
+            + MOBILE_GALLERY_LEAD_PX
+            + MOBILE_GALLERY_GAP_PX
+            + page as f32 * MOBILE_GALLERY_PITCH_PX;
+        let scroll = -ui.get_mgallery_offset();
+        if top < scroll + top_inset || top + MOBILE_GALLERY_CARD_H_PX > scroll + view - bottom_inset
+        {
+            let middle = top - (view + top_inset - bottom_inset - MOBILE_GALLERY_CARD_H_PX) / 2.0;
+            ui.set_mgallery_offset(-middle.clamp(0.0, max));
+            self.pump_thumbs(ui);
+        }
+    }
+
     /// Thumbnail rows in view plus the margin, in order from the top; empty while the thumbnail
     /// list is not shown.
     fn thumb_range(&self, ui: &MainWindow) -> std::ops::Range<usize> {
         let rows = self.thumbs_model.row_count();
         if rows == 0 {
             return 0..0;
+        }
+        if self.in_gallery() && self.mobile {
+            let scroll = (-ui.get_mgallery_offset()).max(0.0);
+            let start = ui.get_doc_inset_top() + MOBILE_GALLERY_LEAD_PX + MOBILE_GALLERY_GAP_PX;
+            let view = ui.get_mgallery_view_h().max(0.0);
+            let first = ((scroll - start) / MOBILE_GALLERY_PITCH_PX)
+                .floor()
+                .max(0.0) as usize;
+            let last = ((scroll + view - start) / MOBILE_GALLERY_PITCH_PX)
+                .ceil()
+                .max(0.0) as usize;
+            let first = first.saturating_sub(GALLERY_MARGIN_CARDS);
+            let last = (last + GALLERY_MARGIN_CARDS).min(rows);
+            return first.min(last)..last;
         }
         if self.in_gallery() {
             let scroll = ui.get_gallery_scroll().max(0.0);
@@ -3441,6 +3511,7 @@ impl AppState {
         self.reset_thumbs(self.page_sizes.len());
         ui.set_thumb_scroll_y(0.0);
         ui.set_gallery_scroll(0.0);
+        ui.set_mgallery_offset(0.0);
         self.rendered = 0;
         ui.set_tiles_rendered(0);
         ui.set_tiles_requested(0);
@@ -5003,8 +5074,19 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
             let Ok(row) = u32::try_from(row) else {
                 return;
             };
+            // On a phone a page's own button leaves nothing chosen that was not (Plan 0008
+            // Phase 4): chosen pages turn the column's taps into choosing.
+            let alone = ui.get_mobile()
+                && with_state_ret(|state| !state.page_sel.contains(&row)).unwrap_or(false);
             with_state(|state| state.gallery_choose_for_action(&ui, row));
             gallery_run(&ui, which);
+            if alone {
+                with_state(|state| {
+                    state.page_sel.clear();
+                    state.page_sel_anchor = None;
+                    state.show_page_sel(&ui);
+                });
+            }
         });
         let weak = main_window.as_weak();
         main_window.on_gallery_chosen_action(move |which| {
@@ -5036,6 +5118,36 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
                 tools_ui::insert_from_file_at(&ui, Some(at));
             } else {
                 with_state(|state| state.gallery_divider(at, which));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_current(move |row| {
+            if let Some(ui) = weak.upgrade()
+                && let Ok(row) = usize::try_from(row)
+            {
+                with_state(|state| state.go_to_page(&ui, row));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_choose_all(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| {
+                    state.page_sel = (0..state.page_sizes.len() as u32).collect();
+                    state.page_sel_anchor = Some(0);
+                    state.show_page_sel(&ui);
+                });
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_gallery_drag_ended(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| {
+                    if std::mem::take(&mut state.drag_chose) {
+                        state.page_sel.clear();
+                        state.page_sel_anchor = None;
+                        state.show_page_sel(&ui);
+                    }
+                });
             }
         });
         main_window.on_gallery_dropped(move |at| {
