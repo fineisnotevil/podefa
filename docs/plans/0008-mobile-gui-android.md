@@ -11,7 +11,8 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27** (§5, "Phase 1:
 results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); **Phase 3 (Edit on
 touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"); **Phase 4 (Tools on touch) passed
-its gate on 2026-10-28** (§5, "Phase 4: results"). By the maintainer's order the shell came before Phase 1's platform work
+its gate on 2026-10-28** (§5, "Phase 4: results"); **Phase 5 (landscape, "Open with" and
+"Share", icon, release signing) is implemented and at its gate** (§5, "Phase 5: results"). By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -33,7 +34,12 @@ its gate on 2026-10-28** (§5, "Phase 4: results"). By the maintainer's order th
   each page's buttons and check box, the gaps' Split, blank page and pages from a file, a long
   press that moves pages, the bar over the dock for the chosen pages, and the tools' dialogs as
   sheets; Plan 0005's page operations pass on the phone (`--bench-pages` 13 of 14, the miss being
-  a desktop sidebar drag, and every operation by hand). Phase 5: not started.
+  a desktop sidebar drag, and every operation by hand).
+- Phase 5: implemented and at its gate (2026-10-28): landscape (row MK passes on the phone), the
+  menus and the tools' sheets scroll when a phone on its side leaves them too little room, "Share"
+  next to "Open with", the app's icon, a release key of the maintainer's own whose password
+  apksigner asks for (`docs/android-release.md`). The review in both themes is the
+  maintainer's.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -351,6 +357,65 @@ ADR 0012 records the design.
 - **Not done:** the Edit strip is Phase 3, so the ink tool was chosen with the `I` key over
   `adb`; the library suite on the phone (see §5's note) was built (26 test binaries link without
   `RUSTFLAGS`) but not run: the phone left USB before it could be pushed.
+
+### Phase 5: results (2026-10-28)
+
+- **Landscape** (row MK). The activity already took its own orientation changes
+  (`config_changes`), so turning the phone resizes the window and nothing restarts; the scroll
+  position and the zoom stay, as on a desktop window's resize. What changed:
+  - The mobile shell keeps its islands inside the safe area's sides too (`safe-left`,
+    `safe-right` from `Window.safe-area-insets`): on the A34 on its side the camera cutout takes
+    27 px on the left. The header, the dock, the cards, the menus, the edit strip, the bottom sheet
+    and the tools' sheets start at `left` and run `span` (`shell.slint`, `main.slint`).
+  - On its side the phone is 891 x 411 px with about 236 px between the header and the dock. The
+    header's two menus (documents, More) are capped at the room under the header and scroll
+    (`menu-room`); before, More ran off the screen and its last items could not be reached. The
+    tools' sheets (Split, Watermark and Page Numbers, Compress and Export as Images, Crop,
+    Properties) scroll their rows (a `Flickable` around each, its layout as tall as the sheet or
+    its minimum; on the desktop it does not scroll and its dialogs look as before). With the
+    on-screen keyboard up, a phone on its side has about 90 px left: when less than 160 px is
+    left under the header, the sheet covers the header (the sheets stand over the mobile shell,
+    `z`), so the field being typed in stays in sight. Merge keeps its list, which scrolls already.
+  - Tools: a page (325 px) is taller than that room. Revealing a page shows its top under the
+    column's bar, and the column scrolls through the rest (`reveal_in_column`); before, it centred
+    the page, with its top under the header.
+  - The mobile shell's smallest window is 320 x 320 px (was 320 x 480), so `--mobile` on the
+    desktop can be laid on its side; `--landscape` opens it that way (a phone-sized wide window on
+    the desktop; on the phone the activity asks for landscape).
+  - `--bench-rotate N` turns the screen to landscape and back N times through
+    `platform::request_orientation` (the activity's `setRequestedOrientation`, so the system's
+    rotation setting is not touched; the desktop swaps the window's sides) and checks that the
+    page and the zoom are kept and the header and the dock lie inside the safe area. On the
+    phone: 6 of 6 turns pass, the view covered again 114-209 ms after each request
+    (`docs/benchmarks.md` §14.8).
+- **"Open with" and "Share".** "Open with" was Phase 1's (VIEW). "Share" (SEND with a PDF) now opens
+  the PDF the same way: the activity takes the stream extra as it takes VIEW's data, and copies
+  it in. Checked with `am start -a android.intent.action.SEND` on a cold start (the document
+  opens) and while the app runs (it opens in a new tab).
+- **The icon and the name.** An adaptive icon (`crates/android/res`): the title island's brand
+  mark, the "P" on the dark tile (`#18181B`, light theme's `Theme.text`), drawn as a vector, with
+  a monochrome layer for Android 13's themed icons. No PNGs: the app runs from API 26, which has
+  adaptive icons. The name stays "PODEFA". `aapt dump badging` shows the icon and
+  `versionName='0.1.0'`.
+- **Release signing.** `scripts/android-build.sh` signs with the maintainer's release key when
+  `PODEFA_KEYSTORE` names it; apksigner then asks for the password on the terminal, so no password
+  goes through the environment or a file (the old `PODEFA_KEYSTORE_PASSWORD` is gone); without
+  it, the throwaway debug key as before (CI). The script checks the signature at the end.
+  `docs/android-release.md` has the steps for making the key and the version rule. Making the
+  release key and building the first signed APK are the maintainer's: the key's password is
+  theirs to type.
+- **Size** (row MA): 11.6 MiB (12,210,819 bytes), within 16 MiB.
+- **Checks:** on the phone `--bench-rotate` 6 of 6 and `--bench-pages` 13 of 14 (the same desktop
+  sidebar step as in Phase 4); on the desktop `--bench-pages` 14 of 14, `--bench-stamps` 4 of 4,
+  `--bench-tools` 3 of 3, `--bench-forms` 35 of 35, `--mobile --bench-rotate 2` 4 of 4; the
+  workspace's tests, clippy and fmt pass. Seen on the phone on its side: Read, Tools, the More menu
+  scrolled to its end, the Watermark sheet with and without the keyboard (scrolled to Apply), the
+  bottom sheet.
+- **Not done here:** the review in both themes and the icon on the launcher are the maintainer's;
+  the desktop's dialogs were checked by their benches, not by eye.
+- **Open for the maintainer:** in Tools on a phone on its side one page fills more than the view.
+  Smaller pages would shrink the page's 44 px buttons below row MH; two or three pages side by
+  side would be a layout of its own. Kept as it is unless the maintainer wants that layout.
 
 ### Phase 4: results (2026-10-28)
 

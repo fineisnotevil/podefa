@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Landscape on a phone** (Plan 0008 Phase 5): turning the phone keeps the page and the zoom; the
+  header, the dock, the menus and the sheets stay clear of the camera cutout and the system bars,
+  and menus and sheets that do not fit scroll. With the keyboard up, a sheet may cover the header
+  so the field being typed in stays in sight. `--landscape` opens the app on its side, and
+  `--bench-rotate N` measures the turns.
+- **Share to PODEFA:** a PDF shared from another Android app opens like one opened with it.
+- **The Android app's icon:** the "P" brand mark as an adaptive icon.
+- **Release signing for Android:** `scripts/android-build.sh` signs with the release key named by
+  `PODEFA_KEYSTORE` and asks for its password on the terminal; `docs/android-release.md` has the
+  steps. `PODEFA_KEYSTORE_PASSWORD` is no longer read.
 - **Tools by touch** (Plan 0008 Phase 4): on a phone, Tools shows the pages in one column, each
   with its number, a check box and buttons to rotate, duplicate, extract and delete. A tap makes a
   page current and a second tap opens it; a "+" between pages splits there or inserts a blank page

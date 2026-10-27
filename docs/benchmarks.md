@@ -1760,6 +1760,22 @@ per page, 2.4 MB) written for this run; PSS sampled once a second with `dumpsys 
 | MF | 90 real flings (`adb shell input swipe 540 1900 540 300 60`, back to back for 30 s, through the Flickable's own fling) | reached page 196; after 4 s still, the screen showed the page drawn with no hole (screenshot); PSS rose from 180 to 208 MiB in the first 10 s, then stayed between 208 and 217 MiB; peak 217.1 MiB. PASS (no holes after settle, memory flat after the first 10 s, under row MB's 250 MiB) |
 | MG | `large_200p.pdf --bench-idle 5` | 0 frames in 5014 ms; `t_first_page` 106 ms. PASS |
 
+### 14.8 Phase 5: landscape (row MK, 2026-10-28)
+
+**Metric.** `--bench-rotate N` (Plan 0008 §5, "Phase 5: results"): after the opening view is
+covered and settled, page 5 at 150%; then N turns to landscape and back through the activity's
+`setRequestedOrientation`. For each turn, `t_cover` is the time from the request until the window
+has its new shape and every visible tile is drawn; the current page (the page under the view's
+centre) and the zoom must be the ones before the turns, and the header and the dock inside the
+safe area. PASS when every turn keeps them.
+
+**Phone** (`large_200p.pdf`, release build): 6 of 6 turns pass in one run of `--bench-rotate 3`,
+4 of 4 in an earlier `--bench-rotate 2`; `t_cover` 189-209 ms to landscape (2340 x 1080 px, safe
+insets left 27, top 30, bottom 15), 114-127 ms back to portrait (safe insets top 27, bottom 15).
+**Desktop** (`--mobile --bench-rotate 2`): 4 of 4, `t_cover` 11-15 ms (832 x 384 and back).
+
+**APK** (row MA): 12,210,819 bytes (11.6 MiB) with the icon and the scrolling sheets.
+
 ### 14.7 Phase 4: tools on touch (2026-10-28)
 
 **Page operations.** `--bench-pages` on `pages_bench_200.pdf` (§11.4), the phone's mobile shell:
