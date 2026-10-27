@@ -176,6 +176,12 @@ pub struct Cfg {
     /// time each tab took to show its view covered, and `peak_ws` (Plan 0007 Phase 4, row AU;
     /// benchmarks §13.5). Runs alone.
     pub tabs: u32,
+    /// `--bench-pinch N`: once the opening view is covered, makes N pinches through the window's
+    /// pinch callback, in to twice the zoom and out again in turn, each [`PINCH_STEPS`] frames
+    /// long with the fingers' centre drifting; reports the tiles requested and rendered and the
+    /// frame timing while the fingers move, then how long the view took to be covered after
+    /// they lift (Plan 0008 Phase 2, row ME; benchmarks §14.4). Runs alone.
+    pub pinches: u32,
 }
 
 impl Default for Cfg {
@@ -216,6 +222,7 @@ impl Default for Cfg {
             forms: false,
             idle_s: 0.0,
             modes: 0,
+            pinches: 0,
             tabs: 0,
         }
     }
@@ -245,6 +252,7 @@ impl Cfg {
             && self.idle_s <= 0.0
             && self.modes == 0
             && self.tabs == 0
+            && self.pinches == 0
     }
 }
 
@@ -390,6 +398,10 @@ pub fn parse_args(args: &[String]) -> (Vec<String>, Cfg) {
             }
             "--bench-modes" => {
                 cfg.modes = number.unwrap_or(1.0).max(1.0) as u32;
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-pinch" => {
+                cfg.pinches = number.unwrap_or(4.0).max(1.0) as u32;
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-tabs" => {
@@ -1337,6 +1349,16 @@ impl Trace {
 
     /// The canvas window moved (Plan 0002, §4.2): `us` is how long rewriting the canvas took,
     /// `pos_y` the document position and `start` the new window start, both in device pixels.
+    /// A pinch began (`phase` 0) at `milli`, or ended (2) and zoomed to it.
+    pub fn pinch(&mut self, phase: i32, milli: u32) {
+        if !self.on || self.quiet {
+            return;
+        }
+        let t = self.t_ms();
+        let what = if phase == 0 { "started" } else { "ended" };
+        self.print(format_args!("pinch {what} t={t}ms scale={milli}"));
+    }
+
     pub fn reanchored(&mut self, us: u128, pos_y: f64, start: f64) {
         if !self.on || self.quiet {
             return;
@@ -3974,6 +3996,10 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
         start_tabs(ui, cfg.tabs);
         return;
     }
+    if cfg.pinches > 0 {
+        start_pinches(ui, cfg.pinches);
+        return;
+    }
     if cfg.is_empty() {
         println!(
             "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll, --bench-jump or --bench-nav"
@@ -4347,6 +4373,129 @@ fn start_modes(ui: &MainWindow, rounds: u32) {
             ui.get_tiles_rendered(),
         ));
         ui.set_mode(to);
+        done += 1;
+    });
+    TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
+}
+
+/// Frames of one scripted pinch, one per [`PINCH_STEP`].
+const PINCH_STEPS: u32 = 30;
+const PINCH_STEP: Duration = Duration::from_millis(16);
+/// How far the fingers' centre drifts during one pinch, in logical pixels.
+const PINCH_DRIFT: (f32, f32) = (30.0, 20.0);
+/// How long, after the fingers lift, the view has to be covered.
+const PINCH_COVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `--bench-pinch N` (row ME): waits for the opening view to be covered, settles, then makes `N`
+/// pinches through `MainWindow::invoke_pinch`, the callback Slint's `ScaleRotateGestureHandler`
+/// calls: the even ones to twice the zoom, the odd ones to half, centred on the view and drifting
+/// by [`PINCH_DRIFT`]. While the fingers move it counts the tiles requested and rendered and times
+/// the frames; after they lift it waits until the view is covered again (`t_cover`). Exits 0 when
+/// no pinch requested or rendered a tile while moving and no frame took longer than
+/// [`FRAME_BUDGET_MS`].
+fn start_pinches(ui: &MainWindow, pinches: u32) {
+    println!(
+        "[bench] pinch run: {pinches} pinch(es) of {PINCH_STEPS} frames every {}ms, drift {PINCH_DRIFT:?}",
+        PINCH_STEP.as_millis()
+    );
+    let weak = ui.as_weak();
+    let mut covered: Option<Instant> = None;
+    // (step, tiles requested and rendered before the pinch, the centre it started at)
+    let mut moving: Option<(u32, i32, i32, (f32, f32))> = None;
+    // When the fingers lifted, while the view is not covered yet.
+    let mut lifted: Option<Instant> = None;
+    let mut done = 0u32;
+    let (mut worst_frame, mut tiles, mut worst_cover) = (0.0f64, 0i32, 0u128);
+    let opened = Instant::now();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, PINCH_STEP, move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let full = crate::APP.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|state| {
+                    let visible = state.visible(&ui);
+                    (state.bench.first_full_ms(), holes(&state.scheduler, &visible) == 0)
+                })
+        });
+        let Some((first, now_covered)) = full else {
+            return;
+        };
+        if first.is_none() {
+            if opened.elapsed() > IDLE_COVER_TIMEOUT {
+                println!("[bench] pinch FAIL: the opening view was never covered");
+                crate::exit_process(1);
+            }
+            return;
+        }
+        let since = *covered.get_or_insert_with(Instant::now);
+        if since.elapsed() < IDLE_SETTLE {
+            return;
+        }
+        if let Some(at) = lifted {
+            if !now_covered {
+                if at.elapsed() > PINCH_COVER_TIMEOUT {
+                    println!("[bench] pinch FAIL: the view was not covered after a pinch");
+                    crate::exit_process(1);
+                }
+                return;
+            }
+            let cover = at.elapsed().as_millis();
+            worst_cover = worst_cover.max(cover);
+            println!(
+                "[bench] pinch {done} t_cover={cover}ms zoom={:.1}%",
+                ui.get_zoom_percent()
+            );
+            lifted = None;
+            covered = Some(Instant::now());
+            return;
+        }
+        let Some((step, requested, rendered, (cx, cy))) = moving else {
+            if done == pinches {
+                let pass = tiles == 0 && worst_frame <= FRAME_BUDGET_MS;
+                println!(
+                    "[bench] pinch pinches={pinches} tiles={tiles} worst_frame={worst_frame:.1}ms \
+                     budget={FRAME_BUDGET_MS:.1}ms worst_cover={worst_cover}ms"
+                );
+                println!("[bench] pinch {}", if pass { "PASS" } else { "FAIL" });
+                crate::exit_process(if pass { 0 } else { 1 });
+            }
+            let centre = (ui.get_view_w() / 2.0, ui.get_view_h() / 2.0);
+            frame_window_reset();
+            moving = Some((
+                0,
+                ui.get_tiles_requested(),
+                ui.get_tiles_rendered(),
+                centre,
+            ));
+            ui.invoke_pinch(0, 1.0, centre.0, centre.1);
+            return;
+        };
+        let target = if done % 2 == 0 { 2.0f32 } else { 0.5 };
+        let step = step + 1;
+        let f = step as f32 / PINCH_STEPS as f32;
+        let scale = 1.0 + (target - 1.0) * f;
+        let (x, y) = (cx + PINCH_DRIFT.0 * f, cy + PINCH_DRIFT.1 * f);
+        if step < PINCH_STEPS {
+            ui.invoke_pinch(1, scale, x, y);
+            moving = Some((step, requested, rendered, (cx, cy)));
+            return;
+        }
+        // The fingers lift: what the motion cost, before the zoom asks for tiles.
+        let window = frame_window();
+        let requested = ui.get_tiles_requested() - requested;
+        let rendered = ui.get_tiles_rendered() - rendered;
+        println!(
+            "[bench] pinch {} x{target} tiles_requested={requested} tiles_rendered={rendered} {window}",
+            done + 1
+        );
+        worst_frame = worst_frame.max(window.max_ms);
+        tiles += requested + rendered;
+        ui.invoke_pinch(2, scale, x, y);
+        moving = None;
+        lifted = Some(Instant::now());
         done += 1;
     });
     TIMER.with(|cell| *cell.borrow_mut() = Some(timer));

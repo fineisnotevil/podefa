@@ -111,6 +111,12 @@ export component MainWindow inherits Window {
     // Rust writes it to scroll programmatically (anchored zoom, re-anchor, go-to-page).
     in-out property <length> scroll-x: 0px;
     in-out property <length> scroll-y: 0px;
+    // The pinch being made: the pages' scale and shift on the GPU, around `pinch-o*`.
+    in-out property <float> pinch-scale: 1;
+    in-out property <length> pinch-dx: 0px;
+    in-out property <length> pinch-dy: 0px;
+    in-out property <length> pinch-ox: 0px;
+    in-out property <length> pinch-oy: 0px;
     in-out property <length> view-w: 0px;
     in-out property <length> view-h: 0px;
 
@@ -319,6 +325,9 @@ export component MainWindow inherits Window {
     callback global_key(string, bool, bool) -> bool;
     // Ctrl+wheel: the wheel delta and the cursor, viewport-relative, in logical pixels.
     callback wheel_zoom(length, length, length);
+    // A pinch (Plan 0008 Phase 2): 0 started, 1 updated, 2 ended, 3 cancelled; the cumulative
+    // scale and the centre between the fingers, viewport-relative.
+    callback pinch(int, float, length, length);
     callback go_to_page(string);
     // The scrollbar thumb was dragged to `offset` within a track of `track`.
     callback scrollbar_moved(length, length);
@@ -484,115 +493,141 @@ export component MainWindow inherits Window {
                     transform-scale: 1 - 0.08 * root.tools-t;
                     visible: root.tools-t < 1;
 
-                    viewport := Flickable {
-                        // A failed open keeps the document that was already showing.
-                        visible: root.total_pages > 0;
-                        content-width: root.canvas-w;
-                        content-height: root.canvas-h;
-                        content-x <=> root.scroll-x;
-                        content-y <=> root.scroll-y;
-                        // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
-                        // except while a long press is selecting or the Ink tool draws.
-                        mouse-drag-pan-enabled: false;
-                        interactive: !root.touch-selecting && root.tool != 6;
+                    // Two fingers (or a trackpad pinch) zoom (Plan 0008 Phase 2): while they move,
+                    // the pages only scale on the GPU, around where the fingers started and
+                    // following them, and nothing is drawn; once they lift, Rust zooms to the
+                    // scale shown, with the same page point under the fingers.
+                    pinch := ScaleRotateGestureHandler {
+                        width: parent.width;
+                        height: parent.height;
+                        enabled: root.total_pages > 0;
+                        started => { root.pinch(0, self.scale, self.center.x, self.center.y); }
+                        updated => { root.pinch(1, self.scale, self.center.x, self.center.y); }
+                        ended => { root.pinch(2, self.scale, self.center.x, self.center.y); }
+                        cancelled => { root.pinch(3, self.scale, self.center.x, self.center.y); }
 
-                        // These fire on every change, user or programmatic, including each tick of
-                        // the 180 ms wheel animation, which makes them the viewport source of truth.
-                        changed content-x => { root.viewport_moved(); }
-                        changed content-y => { root.viewport_moved(); }
-                        changed width  => { root.view-w = viewport.width;  root.viewport_moved(); }
-                        changed height => { root.view-h = viewport.height; root.viewport_moved(); }
+                        Rectangle {
+                            x: root.pinch-dx;
+                            y: root.pinch-dy;
+                            width: parent.width;
+                            height: parent.height;
+                            transform-scale: root.pinch-scale;
+                            transform-origin: { x: root.pinch-ox, y: root.pinch-oy };
+                            viewport := Flickable {
+                                // A failed open keeps the document that was already showing.
+                                visible: root.total_pages > 0;
+                                content-width: root.canvas-w;
+                                content-height: root.canvas-h;
+                                content-x <=> root.scroll-x;
+                                content-y <=> root.scroll-y;
+                                // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
+                                // except while a long press is selecting or the Ink tool draws.
+                                mouse-drag-pan-enabled: false;
+                                interactive: !root.touch-selecting && root.tool != 6;
 
-                        // Declared before the tiles so they paint under them: a cell still in flight
-                        // shows its page's base layer, or white paper on a page drawn as one image.
-                        for page in root.pages : Rectangle {
-                            x: page.x; y: page.y; width: page.w; height: page.h;
-                            background: white;
-                            Image {
-                                source: page.image;
-                                width: parent.width; height: parent.height;
-                            }
-                        }
+                                // These fire on every change, user or programmatic, including each tick of
+                                // the 180 ms wheel animation, which makes them the viewport source of truth.
+                                changed content-x => { root.viewport_moved(); }
+                                changed content-y => { root.viewport_moved(); }
+                                changed width  => { root.view-w = viewport.width;  root.viewport_moved(); }
+                                changed height => { root.view-h = viewport.height; root.viewport_moved(); }
 
-                        for tile in root.tiles : Image {
-                            source: tile.image;
-                            visible: tile.visible;
-                            x: tile.x; y: tile.y; width: tile.w; height: tile.h;
-                        }
-
-                        // Form fields over the tiles, so they show before they are touched; a required
-                        // field has a red edge.
-                        for field in root.field-rects : Rectangle {
-                            visible: root.field-highlight;
-                            x: field.x; y: field.y; width: field.w; height: field.h;
-                            background: rgba(64, 128, 255, 0.16);
-                            border-width: 1px;
-                            border-color: field.required ? rgba(220, 38, 38, 0.85) : rgba(64, 128, 255, 0.5);
-                        }
-
-                        // Search hits over the tiles: page-relative rectangles placed like tiles.
-                        for hit in root.hit-rects : Rectangle {
-                            x: hit.x; y: hit.y; width: hit.w; height: hit.h;
-                            background: hit.current ? #ff8c0080 : #ffd60066;
-                            border-width: hit.current ? 1px : 0px;
-                            border-color: #e65100;
-                        }
-
-                        // The text selection, over the tiles and the search hits.
-                        for sel in root.sel-rects : Rectangle {
-                            x: sel.x; y: sel.y; width: sel.w; height: sel.h;
-                            background: rgba(37, 99, 235, 0.35);
-                        }
-
-                        // The selected annotation's bounds.
-                        for annot in root.annot-sel-rects : Rectangle {
-                            x: annot.x - 2px; y: annot.y - 2px;
-                            width: annot.w + 4px; height: annot.h + 4px;
-                            border-width: 2px;
-                            border-radius: 2px;
-                            border-color: rgba(37, 99, 235, 0.9);
-                        }
-
-                        // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
-                        // children first, so this area - kept over the viewport, not the canvas -
-                        // sees them; without ctrl it rejects them and the Flickable scrolls.
-                        TouchArea {
-                            x: -root.scroll-x; y: -root.scroll-y;
-                            width: viewport.width; height: viewport.height;
-                            scroll-event(event) => {
-                                if (event.modifiers.control) {
-                                    root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
-                                    return accept;
-                                }
-                                return reject;
-                            }
-                            mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
-                                : root.field-cursor == 1 ? MouseCursor.text
-                                : root.field-cursor == 2 ? MouseCursor.pointer
-                                : root.text-cursor ? MouseCursor.text : MouseCursor.default;
-                            changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
-                            changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
-                            pointer-event(event) => {
-                                if (event.kind == PointerEventKind.down) {
-                                    viewport-keys.focus();
-                                }
-                                if (event.button == PointerEventButton.left || event.touch-finger-id != 0) {
-                                    if (event.kind == PointerEventKind.down) {
-                                        root.select_pointer(0, self.mouse-x, self.mouse-y, event.modifiers.shift, event.touch-finger-id != 0);
-                                    } else if (event.kind == PointerEventKind.up) {
-                                        root.select_pointer(1, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
-                                    } else if (event.kind == PointerEventKind.cancel) {
-                                        root.select_pointer(4, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                // Declared before the tiles so they paint under them: a cell still in flight
+                                // shows its page's base layer, or white paper on a page drawn as one image.
+                                for page in root.pages : Rectangle {
+                                    x: page.x; y: page.y; width: page.w; height: page.h;
+                                    background: white;
+                                    Image {
+                                        source: page.image;
+                                        width: parent.width; height: parent.height;
                                     }
                                 }
-                            }
-                            moved => {
-                                if (self.pressed) {
-                                    root.select_pointer(2, self.mouse-x, self.mouse-y, false, false);
+
+                                for tile in root.tiles : Image {
+                                    source: tile.image;
+                                    visible: tile.visible;
+                                    x: tile.x; y: tile.y; width: tile.w; height: tile.h;
                                 }
-                            }
-                            double-clicked => {
-                                root.select_pointer(3, self.mouse-x, self.mouse-y, false, false);
+
+                                // Form fields over the tiles, so they show before they are touched; a required
+                                // field has a red edge.
+                                for field in root.field-rects : Rectangle {
+                                    visible: root.field-highlight;
+                                    x: field.x; y: field.y; width: field.w; height: field.h;
+                                    background: rgba(64, 128, 255, 0.16);
+                                    border-width: 1px;
+                                    border-color: field.required ? rgba(220, 38, 38, 0.85) : rgba(64, 128, 255, 0.5);
+                                }
+
+                                // Search hits over the tiles: page-relative rectangles placed like tiles.
+                                for hit in root.hit-rects : Rectangle {
+                                    x: hit.x; y: hit.y; width: hit.w; height: hit.h;
+                                    background: hit.current ? #ff8c0080 : #ffd60066;
+                                    border-width: hit.current ? 1px : 0px;
+                                    border-color: #e65100;
+                                }
+
+                                // The text selection, over the tiles and the search hits.
+                                for sel in root.sel-rects : Rectangle {
+                                    x: sel.x; y: sel.y; width: sel.w; height: sel.h;
+                                    background: rgba(37, 99, 235, 0.35);
+                                }
+
+                                // The selected annotation's bounds.
+                                for annot in root.annot-sel-rects : Rectangle {
+                                    x: annot.x - 2px; y: annot.y - 2px;
+                                    width: annot.w + 4px; height: annot.h + 4px;
+                                    border-width: 2px;
+                                    border-radius: 2px;
+                                    border-color: rgba(37, 99, 235, 0.9);
+                                }
+
+                                // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
+                                // children first, so this area - kept over the viewport, not the canvas -
+                                // sees them; without ctrl it rejects them and the Flickable scrolls.
+                                TouchArea {
+                                    x: -root.scroll-x; y: -root.scroll-y;
+                                    width: viewport.width; height: viewport.height;
+                                    // Whether the last press was a finger: a double tap zooms,
+                                    // a double-click selects a word.
+                                    property <bool> touch: false;
+                                    scroll-event(event) => {
+                                        if (event.modifiers.control) {
+                                            root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
+                                            return accept;
+                                        }
+                                        return reject;
+                                    }
+                                    mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
+                                        : root.field-cursor == 1 ? MouseCursor.text
+                                        : root.field-cursor == 2 ? MouseCursor.pointer
+                                        : root.text-cursor ? MouseCursor.text : MouseCursor.default;
+                                    changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
+                                    changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down) {
+                                            viewport-keys.focus();
+                                            self.touch = event.touch-finger-id != 0;
+                                        }
+                                        if (event.button == PointerEventButton.left || event.touch-finger-id != 0) {
+                                            if (event.kind == PointerEventKind.down) {
+                                                root.select_pointer(0, self.mouse-x, self.mouse-y, event.modifiers.shift, event.touch-finger-id != 0);
+                                            } else if (event.kind == PointerEventKind.up) {
+                                                root.select_pointer(1, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                            } else if (event.kind == PointerEventKind.cancel) {
+                                                root.select_pointer(4, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                            }
+                                        }
+                                    }
+                                    moved => {
+                                        if (self.pressed) {
+                                            root.select_pointer(2, self.mouse-x, self.mouse-y, false, false);
+                                        }
+                                    }
+                                    double-clicked => {
+                                        root.select_pointer(3, self.mouse-x, self.mouse-y, false, self.touch);
+                                    }
+                                }
                             }
                         }
                     }

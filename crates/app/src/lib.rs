@@ -101,6 +101,9 @@ const MODE_TOOLS: i32 = 2;
 
 /// How long a finger must rest before a touch starts a selection instead of a pan.
 const LONG_PRESS_MS: u64 = 500;
+/// A double tap counts a zoom as fit width when it is within one part in this many of it.
+const DOUBLE_TAP_SAME_PER_MILLE: u32 = 50;
+
 /// A click this soon after a double-click, near it, is a triple-click (a line).
 const TRIPLE_CLICK_MS: u128 = 500;
 /// How far a finger may move before a pending long press becomes a pan, logical pixels.
@@ -352,6 +355,11 @@ struct AppState {
     /// A touch that may become a long press: where it went down.
     touch_down: Option<(f32, f32)>,
     long_press: slint::Timer,
+    /// A pinch being made (Plan 0008 Phase 2): the zoom it started from and the viewport point
+    /// the pages scale around.
+    pinch: Option<(u32, (f32, f32))>,
+    /// The zoom a double tap left for fit width, which the next double tap goes back to.
+    tap_back: Option<u32>,
     touch_selecting: bool,
     /// Text line boxes of the pages near the view, to tell text from margins under the pointer
     /// (Plan 0003 Phase 4 review), and the pages asked for and not answered yet.
@@ -501,6 +509,8 @@ impl AppState {
             last_double: None,
             touch_down: None,
             long_press: slint::Timer::default(),
+            pinch: None,
+            tap_back: None,
             touch_selecting: false,
             text_lines: HashMap::new(),
             lines_pending: HashSet::new(),
@@ -1288,6 +1298,11 @@ impl AppState {
                     let id = note.id;
                     self.note_drag = None;
                     self.open_note_editor(ui, p.page, NoteTarget::Existing(id));
+                    return;
+                }
+                // A double tap zooms; a long press, not a double tap, selects with a finger.
+                if touch {
+                    self.double_tap(ui, x, y);
                     return;
                 }
                 let Some(point) = point.filter(|p| self.on_text(Some(*p))) else {
@@ -2723,6 +2738,80 @@ impl AppState {
         self.navigate_to(ui, pos);
     }
 
+    /// A pinch (Plan 0008 Phase 2): `kind` 0 started, 1 updated, 2 ended, 3 cancelled; `scale` is
+    /// the cumulative scale since it started and `(x, y)` the point between the fingers, both as
+    /// Slint's `ScaleRotateGestureHandler` reports them. While it moves only the GPU transform
+    /// changes, so no tile is drawn until the fingers lift.
+    fn pinch(&mut self, ui: &MainWindow, kind: i32, scale: f32, x: f32, y: f32) {
+        match kind {
+            0 => {
+                if self.layout.is_empty() {
+                    return;
+                }
+                // Two fingers are no long press and no tap.
+                self.long_press.stop();
+                self.touch_down = None;
+                self.pinch = Some((self.scale_milli, (x, y)));
+                ui.set_pinch_ox(x);
+                ui.set_pinch_oy(y);
+                self.show_pinch(ui, scale, x, y);
+                self.bench.pinch(0, self.scale_milli);
+            }
+            1 => self.show_pinch(ui, scale, x, y),
+            _ => {
+                let Some((from, (ox, oy))) = self.pinch.take() else {
+                    return;
+                };
+                let shown = pinch_scale(from, scale);
+                ui.set_pinch_scale(1.0);
+                ui.set_pinch_dx(0.0);
+                ui.set_pinch_dy(0.0);
+                if kind == 2 {
+                    let milli = (from as f64 * shown as f64).round() as u32;
+                    self.zoom_moved(ui, milli, (ox, oy), (x - ox, y - oy));
+                    self.bench.pinch(2, self.scale_milli);
+                }
+            }
+        }
+    }
+
+    /// The pages of a pinch being made: scaled around where it started and shifted with the
+    /// fingers, within the zoom range.
+    fn show_pinch(&self, ui: &MainWindow, scale: f32, x: f32, y: f32) {
+        let Some((from, (ox, oy))) = self.pinch else {
+            return;
+        };
+        ui.set_pinch_scale(pinch_scale(from, scale));
+        ui.set_pinch_dx(x - ox);
+        ui.set_pinch_dy(y - oy);
+    }
+
+    /// A double tap at `(x, y)` (viewport, logical pixels): fit width for the page under it,
+    /// and back to the zoom before when it is already there (Plan 0008, §4).
+    fn double_tap(&mut self, ui: &MainWindow, x: f32, y: f32) {
+        let sf = self.sf();
+        let page = self
+            .layout
+            .page_near(self.pos.1 + y as f64 * sf)
+            .unwrap_or_else(|| self.current_page(ui));
+        let Some(size) = self.page_sizes.get(page).copied() else {
+            return;
+        };
+        let (view_w, _) = self.free_view(ui);
+        let fit = fit_width_milli(&size, view_w, self.gap_px());
+        let at_fit = self.scale_milli.abs_diff(fit) * DOUBLE_TAP_SAME_PER_MILLE <= fit;
+        let target = if at_fit {
+            self.tap_back
+                .take()
+                .filter(|back| back.abs_diff(fit) * DOUBLE_TAP_SAME_PER_MILLE > fit)
+                .unwrap_or(fit.saturating_mul(2))
+        } else {
+            self.tap_back = Some(self.scale_milli);
+            fit
+        };
+        self.zoom(ui, target, x, y);
+    }
+
     /// Fit-width or fit-page for the current page, anchored at that page's top (Plan 0002, §4.5).
     fn fit(&mut self, ui: &MainWindow, whole_page: bool) {
         let page = self.current_page(ui);
@@ -3260,14 +3349,34 @@ impl AppState {
     /// The anchor is resolved on its page, not on the whole document: the gap between pages does
     /// not scale, so scaling the document offset would drift (Plan 0002, §4.5).
     fn zoom(&mut self, ui: &MainWindow, new_milli: u32, anchor_x: f32, anchor_y: f32) {
+        self.zoom_moved(ui, new_milli, (anchor_x, anchor_y), (0.0, 0.0));
+    }
+
+    /// [`Self::zoom`], then the pages moved by `shift` logical pixels, in one step: the end of a
+    /// pinch, whose fingers also moved.
+    fn zoom_moved(
+        &mut self,
+        ui: &MainWindow,
+        new_milli: u32,
+        anchor: (f32, f32),
+        shift: (f32, f32),
+    ) {
         let new_milli = new_milli.clamp(ZOOM_MIN_MILLI, ZOOM_MAX_MILLI);
-        if new_milli == self.scale_milli || self.layout.is_empty() {
+        if self.layout.is_empty() {
             return;
         }
         let sf = self.sf();
+        let shift = (shift.0 as f64 * sf, shift.1 as f64 * sf);
+        if new_milli == self.scale_milli {
+            if shift != (0.0, 0.0) {
+                self.scroll_to(ui, (self.pos.0 - shift.0, self.pos.1 - shift.1));
+            }
+            return;
+        }
         let to = self.layout_for(ui, new_milli);
-        let anchor = (anchor_x as f64 * sf, anchor_y as f64 * sf);
-        self.pos = self.layout.zoom_anchor(&to, self.pos, anchor);
+        let anchor = (anchor.0 as f64 * sf, anchor.1 as f64 * sf);
+        let pos = self.layout.zoom_anchor(&to, self.pos, anchor);
+        self.pos = (pos.0 - shift.0, pos.1 - shift.1);
         self.layout = to;
         self.scale_milli = new_milli;
         self.bench.level_changed(new_milli, "zoom");
@@ -3298,6 +3407,16 @@ fn remap<T: Clone>(map: &[Option<u32>], old: &HashMap<u32, T>) -> HashMap<u32, T
         .enumerate()
         .filter_map(|(new, from)| Some((new as u32, old.get(&(*from)?)?.clone())))
         .collect()
+}
+
+/// A pinch's scale on screen: `scale` from where it started at `from`, kept inside the zoom range.
+fn pinch_scale(from: u32, scale: f32) -> f32 {
+    if !scale.is_finite() || from == 0 {
+        return 1.0;
+    }
+    let lo = ZOOM_MIN_MILLI as f32 / from as f32;
+    let hi = ZOOM_MAX_MILLI as f32 / from as f32;
+    scale.clamp(lo, hi)
 }
 
 /// Runs `f` with the programmatic-update guard raised.
@@ -4296,6 +4415,15 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
 
     {
         let weak = main_window.as_weak();
+        main_window.on_pinch(move |kind, scale, x, y| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.pinch(&ui, kind, scale, x, y));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
         main_window.on_go_to_page(move |text| {
             if let Some(ui) = weak.upgrade() {
                 // 1-based, as the field shows it; anything that is not a page number is ignored
@@ -4999,6 +5127,18 @@ mod tests {
 
     fn key(k: Key) -> String {
         char::from(k).to_string()
+    }
+
+    /// A pinch shows its scale as it is, but never past the zoom range, from wherever it began.
+    #[test]
+    fn pinch_scale_stays_inside_the_zoom_range() {
+        assert_eq!(pinch_scale(1_000, 2.0), 2.0);
+        assert_eq!(pinch_scale(1_000, 0.5), 0.5);
+        let max = ZOOM_MAX_MILLI as f32 / 1_000.0;
+        assert_eq!(pinch_scale(1_000, max * 3.0), max);
+        assert_eq!(pinch_scale(ZOOM_MAX_MILLI, 2.0), 1.0);
+        assert_eq!(pinch_scale(ZOOM_MIN_MILLI, 0.1), 1.0);
+        assert_eq!(pinch_scale(1_000, f32::NAN), 1.0);
     }
 
     #[test]
