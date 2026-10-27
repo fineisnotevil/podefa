@@ -8,8 +8,14 @@
 #
 # Needs: ANDROID_HOME (SDK with a platform and build-tools 35+), ANDROID_NDK_HOME (NDK r28+),
 # a JDK (javac, keytool) on PATH or in JAVA_HOME, cargo-apk 0.10, and the Rust target
-# aarch64-linux-android. Signs with PODEFA_KEYSTORE / PODEFA_KEYSTORE_PASSWORD when set; otherwise
-# with a throwaway debug key it makes in target/android (fine for testing, not for publishing).
+# aarch64-linux-android.
+#
+# Signing (Plan 0008 Phase 5): with PODEFA_KEYSTORE set to a release keystore, the APK is signed
+# with its key (PODEFA_KEY_ALIAS picks one when it holds several) and apksigner asks for the
+# keystore's password on the terminal: no password goes through the environment or a file.
+# Without it, the APK is signed with a throwaway debug key the script makes in target/android
+# (fine for testing, not for publishing; CI builds that way). docs/android-release.md has the
+# steps for a release key.
 #
 # Three steps cargo-apk cannot do alone:
 #  1. MuPDF's bundled FreeType and libjpeg clash with Skia's (Plan 0008, §3.3): the build uses a
@@ -83,17 +89,23 @@ cp "$root/Cargo.lock" "$lock_backup"
 restore_lock() { cp "$lock_backup" "$root/Cargo.lock"; }
 trap restore_lock EXIT
 
-# Signing.
-keystore="${PODEFA_KEYSTORE:-$work/debug.keystore}"
-password="${PODEFA_KEYSTORE_PASSWORD:-android}"
-if [[ ! -f "$keystore" ]]; then
-    keytool -genkeypair -keystore "$keystore" -storepass "$password" -keypass "$password" \
-        -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-        -dname "CN=PODEFA debug" >/dev/null
+# Signing. cargo-apk always signs with the throwaway debug key; the last step signs again, with
+# the release key when one is given.
+debug_keystore="$work/debug.keystore"
+debug_password=android
+if [[ ! -f "$debug_keystore" ]]; then
+    keytool -genkeypair -keystore "$debug_keystore" -storepass "$debug_password" \
+        -keypass "$debug_password" -alias androiddebugkey -keyalg RSA -keysize 2048 \
+        -validity 10000 -dname "CN=PODEFA debug" >/dev/null
+fi
+release_keystore="${PODEFA_KEYSTORE:-}"
+if [[ -n "$release_keystore" && ! -f "$release_keystore" ]]; then
+    echo "PODEFA_KEYSTORE: no keystore at $release_keystore" >&2
+    exit 1
 fi
 profile_upper=$(echo "$profile" | tr '[:lower:]' '[:upper:]')
-export "CARGO_APK_${profile_upper}_KEYSTORE=$keystore"
-export "CARGO_APK_${profile_upper}_KEYSTORE_PASSWORD=$password"
+export "CARGO_APK_${profile_upper}_KEYSTORE=$debug_keystore"
+export "CARGO_APK_${profile_upper}_KEYSTORE_PASSWORD=$debug_password"
 
 (cd "$work" && cargo apk build --manifest-path "$root/crates/android/Cargo.toml" --lib $profile_flag)
 
@@ -112,6 +124,19 @@ cp "$work/dex/classes.dex" "$apk_dir/classes.dex"
 (cd "$apk_dir" && "$build_tools/aapt" remove podefa-unaligned.apk classes.dex >/dev/null 2>&1 || true)
 (cd "$apk_dir" && "$build_tools/aapt" add podefa-unaligned.apk classes.dex >/dev/null)
 "$build_tools/zipalign" -f 4 "$unaligned" "$work/podefa.apk"
-"$build_tools/apksigner" sign --ks "$keystore" --ks-pass "pass:$password" "$work/podefa.apk"
+if [[ -n "$release_keystore" ]]; then
+    # No --ks-pass: apksigner reads the password from the terminal.
+    alias_args=()
+    if [[ -n "${PODEFA_KEY_ALIAS:-}" ]]; then
+        alias_args=(--ks-key-alias "$PODEFA_KEY_ALIAS")
+    fi
+    "$build_tools/apksigner" sign --ks "$release_keystore" "${alias_args[@]}" "$work/podefa.apk"
+    signed_with="the release key in $release_keystore"
+else
+    "$build_tools/apksigner" sign --ks "$debug_keystore" --ks-pass "pass:$debug_password" \
+        "$work/podefa.apk"
+    signed_with="the throwaway debug key"
+fi
+"$build_tools/apksigner" verify "$work/podefa.apk"
 
-echo "built $work/podefa.apk ($(du -h "$work/podefa.apk" | cut -f1))"
+echo "built $work/podefa.apk ($(du -h "$work/podefa.apk" | cut -f1)), signed with $signed_with"

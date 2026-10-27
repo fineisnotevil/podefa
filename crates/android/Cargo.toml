@@ -29,6 +29,8 @@ libc = "0.2"
 [package.metadata.android]
 package = "org.fineassociation.podefa"
 apk_name = "podefa"
+# The icon (Plan 0008 Phase 5), compiled by aapt.
+resources = "res"
 build_targets = ["aarch64-linux-android"]
 
 [package.metadata.android.sdk]
@@ -37,6 +39,7 @@ target_sdk_version = 35
 
 [package.metadata.android.application]
 label = "PODEFA"
+icon = "@mipmap/ic_launcher"
 # The activity's Java class comes from the dex the build script adds (ADR 0012).
 has_code = true
 
@@ -52,3 +55,9 @@ exported = true
 actions = ["android.intent.action.VIEW"]
 categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
 data = [{ scheme = "content", mime_type = "application/pdf" }, { scheme = "file", mime_type = "application/pdf" }]
+
+# "Share": a PDF sent from another app opens like one opened with it (Plan 0008 Phase 5).
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.SEND"]
+categories = ["android.intent.category.DEFAULT"]
+data = [{ mime_type = "application/pdf" }]

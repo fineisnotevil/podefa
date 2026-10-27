@@ -449,6 +449,24 @@ pub fn close_app() {
     }
 }
 
+/// `ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE`, `_PORTRAIT` and `_UNSPECIFIED`.
+pub fn request_orientation(_window: &slint::Window, landscape: Option<bool>) {
+    let orientation: jint = match landscape {
+        Some(true) => 0,
+        Some(false) => 1,
+        None => -1,
+    };
+    with_env(|env, activity| {
+        env.call_method(
+            activity,
+            "requestOrientation",
+            "(I)V",
+            &[JValue::Int(orientation)],
+        )?;
+        Ok(())
+    });
+}
+
 pub fn shutdown() {}
 
 fn remember_file(path: &Path, uri: String) {

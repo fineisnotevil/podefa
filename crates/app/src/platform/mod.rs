@@ -205,6 +205,13 @@ pub fn close_app() {
     imp::close_app();
 }
 
+/// Turns the screen to landscape (`Some(true)`), portrait (`Some(false)`) or back to the user's
+/// own (`None`), for the bench harness (Plan 0008 Phase 5, row MK). Android asks the activity, so
+/// the system's rotation setting stays as it is; the desktop swaps the window's width and height.
+pub fn request_orientation(window: &slint::Window, landscape: Option<bool>) {
+    imp::request_orientation(window, landscape);
+}
+
 /// After the event loop: lets go of what the platform held (the desktop's clipboard).
 pub fn shutdown() {
     imp::shutdown();

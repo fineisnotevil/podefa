@@ -105,6 +105,20 @@ pub fn close_app() {
     let _ = slint::quit_event_loop();
 }
 
+pub fn request_orientation(window: &slint::Window, landscape: Option<bool>) {
+    let size = window.size().to_logical(window.scale_factor());
+    let (mut long, mut short) = (size.width.max(size.height), size.width.min(size.height));
+    if short <= 0.0 {
+        // Not shown yet: the mobile shell's preferred size (`main.slint`).
+        (long, short) = (832.0, 384.0);
+    }
+    let size = match landscape {
+        Some(true) => slint::LogicalSize::new(long, short),
+        Some(false) | None => slint::LogicalSize::new(short, long),
+    };
+    window.set_size(size);
+}
+
 pub fn shutdown() {
     let clipboard = CLIPBOARD.with(|cell| cell.borrow_mut().take());
     drop(clipboard);

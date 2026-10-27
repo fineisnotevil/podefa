@@ -45,7 +45,8 @@ export component MainWindow inherits Window {
     // A field's options: 44 px rows on a phone (Plan 0008 row MH). Rust places the list by it.
     out property <length> choice-row-h: root.mobile ? 44px : 24px;
     min-width: root.mobile ? 320px : 640px;
-    min-height: root.mobile ? 480px : 660px;
+    // A phone on its side is about 360-430 px tall (Plan 0008 Phase 5, landscape).
+    min-height: root.mobile ? 320px : 660px;
     preferred-width: root.mobile ? 384px : 900px;
     preferred-height: root.mobile ? 832px : 700px;
 
@@ -55,7 +56,15 @@ export component MainWindow inherits Window {
     // The tools' dialogs on a phone (Plan 0008 Phase 4): a sheet's bottom and the room above it,
     // and a row's height (a 44 px target, plan row MH).
     property <length> sheet-bottom: mshell.floor - root.island-gap;
-    property <length> sheet-room: root.sheet-bottom - mshell.header-bottom - root.island-gap;
+    // When the on-screen keyboard of a phone on its side leaves less than that under the header,
+    // the sheet covers the header too (Plan 0008 Phase 5).
+    property <length> sheet-top: root.sheet-bottom - mshell.header-bottom - root.island-gap < 160px
+        ? root.safe-area-insets.top + root.island-gap : mshell.header-bottom + root.island-gap;
+    property <length> sheet-room: root.sheet-bottom - root.sheet-top;
+    // Across the width inside the safe area's sides (in landscape a cutout can sit at one).
+    property <length> sheet-x: root.safe-area-insets.left + root.island-gap;
+    property <length> sheet-w: root.width - root.safe-area-insets.left - root.safe-area-insets.right
+        - 2 * root.island-gap;
     property <length> row-h: root.mobile ? 44px : 30px;
     property <length> button-h: root.mobile ? 44px : 28px;
     property <length> canvas-top: root.mobile ? mshell.header-bottom + root.island-gap
@@ -116,6 +125,11 @@ export component MainWindow inherits Window {
     in-out property <length> mgallery-offset: 0px;
     in-out property <int> mgallery-drop: -1;
     out property <length> mgallery-view-h: mgallery.height;
+    out property <bool> mobile-in-safe-area: mshell.in-safe-area;
+    out property <length> safe-inset-left: root.safe-area-insets.left;
+    out property <length> safe-inset-top: root.safe-area-insets.top;
+    out property <length> safe-inset-right: root.safe-area-insets.right;
+    out property <length> safe-inset-bottom: root.safe-area-insets.bottom;
     // Shows the tile counters in the status island (when tracing).
     in-out property <bool> diagnostics: false;
 
@@ -1189,13 +1203,16 @@ export component MainWindow inherits Window {
             y: 0px;
             width: root.width;
             height: root.height;
+            // Over the mobile shell, whose header a sheet covers when the keyboard leaves it too
+            // little room (Plan 0008 Phase 5); the desktop keeps the order of the children.
+            z: root.mobile ? 1 : 0;
 
             // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
             // document; the open one can be among them, as it is now.
             if root.merge-visible : FocusScope {
-                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
                 y: root.mobile ? root.sheet-bottom - self.height : 16px;
-                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 460px);
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 460px);
                 height: root.mobile ? min(root.sheet-room, 420px) : min(parent.height - 32px, 360px);
                 init => { self.focus(); }
                 capture-key-pressed(event) => {
@@ -1286,9 +1303,9 @@ export component MainWindow inherits Window {
 
             // Split: the open document, as it is now, into files of N pages or by ranges.
             if root.split-visible : FocusScope {
-                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
                 y: root.mobile ? root.sheet-bottom - self.height : 16px;
-                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 420px);
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 420px);
                 height: root.mobile ? min(root.sheet-room, sheet-split.preferred-height) : 220px;
                 capture-key-pressed(event) => {
                     if (event.text == Key.Escape) {
@@ -1304,66 +1321,74 @@ export component MainWindow inherits Window {
                     border-radius: root.mobile ? 20px : 4px;
                     drop-shadow-blur: 8px;
                     drop-shadow-color: Theme.shadow;
-                    sheet-split := VerticalLayout {
-                        padding: root.mobile ? 16px : 10px;
-                        spacing: 8px;
-                        Text {
-                            text: "Split into files";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Button {
-                                text: "Every";
-                                checkable: true;
-                                checked: root.split-mode == 0;
-                                clicked => { root.split-mode = 0; }
-                            }
-                            LineEdit {
-                                width: 60px;
-                                text <=> root.split-every;
-                                enabled: root.split-mode == 0;
-                            }
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-split-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-split.height;
+                        sheet-split := VerticalLayout {
+                            width: sheet-split-scroll.width;
+                            height: max(sheet-split-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 8px;
                             Text {
-                                text: "pages";
-                                vertical-alignment: center;
+                                text: "Split into files";
+                                font-weight: 600;
                                 color: Theme.text;
                             }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Button {
-                                text: "Ranges";
-                                checkable: true;
-                                checked: root.split-mode == 1;
-                                clicked => { root.split-mode = 1; }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Button {
+                                    text: "Every";
+                                    checkable: true;
+                                    checked: root.split-mode == 0;
+                                    clicked => { root.split-mode = 0; }
+                                }
+                                LineEdit {
+                                    width: 60px;
+                                    text <=> root.split-every;
+                                    enabled: root.split-mode == 0;
+                                }
+                                Text {
+                                    text: "pages";
+                                    vertical-alignment: center;
+                                    color: Theme.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                            LineEdit {
-                                placeholder-text: "1-3, 4, 5-";
-                                text <=> root.split-ranges;
-                                enabled: root.split-mode == 1;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Button {
+                                    text: "Ranges";
+                                    checkable: true;
+                                    checked: root.split-mode == 1;
+                                    clicked => { root.split-mode = 1; }
+                                }
+                                LineEdit {
+                                    placeholder-text: "1-3, 4, 5-";
+                                    text <=> root.split-ranges;
+                                    enabled: root.split-mode == 1;
+                                }
                             }
-                        }
-                        Text {
-                            text: root.split-error;
-                            color: Theme.danger;
-                            font-size: 12px;
-                            overflow: elide;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.button-h;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.split_close(); } }
-                            Button {
-                                text: "Split...";
-                                primary: true;
-                                enabled: !root.tool-running;
-                                clicked => { root.split_run(); }
+                            Text {
+                                text: root.split-error;
+                                color: Theme.danger;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.split_close(); } }
+                                Button {
+                                    text: "Split...";
+                                    primary: true;
+                                    enabled: !root.tool-running;
+                                    clicked => { root.split_run(); }
+                                }
                             }
                         }
                     }
@@ -1373,9 +1398,9 @@ export component MainWindow inherits Window {
             // Document Properties: the fields readers show, and what else the file says.
             // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
             if root.stamp-visible : FocusScope {
-                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
                 y: root.mobile ? root.sheet-bottom - self.height : 16px;
-                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 440px);
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 440px);
                 height: root.mobile ? min(root.sheet-room, sheet-stamp.preferred-height) : root.stamp-mode == 0 ? 300px : 330px;
                 capture-key-pressed(event) => {
                     if (event.text == Key.Escape) {
@@ -1391,116 +1416,124 @@ export component MainWindow inherits Window {
                     border-radius: root.mobile ? 20px : 4px;
                     drop-shadow-blur: 8px;
                     drop-shadow-color: Theme.shadow;
-                    sheet-stamp := VerticalLayout {
-                        padding: root.mobile ? 16px : 10px;
-                        spacing: 6px;
-                        Text {
-                            text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        if root.stamp-mode == 0 : HorizontalLayout {
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-stamp-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-stamp.height;
+                        sheet-stamp := VerticalLayout {
+                            width: sheet-stamp-scroll.width;
+                            height: max(sheet-stamp-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
                             spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
-                        }
-                        if root.stamp-mode == 0 : HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
-                            Button {
-                                text: "Diagonal";
-                                checkable: true;
-                                checked: root.stamp-diagonal;
-                                clicked => { root.stamp-diagonal = true; }
-                            }
-                            Button {
-                                text: "Horizontal";
-                                checkable: true;
-                                checked: !root.stamp-diagonal;
-                                clicked => { root.stamp-diagonal = false; }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        if root.stamp-mode == 0 : HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Theme.text; }
-                            Slider {
-                                minimum: 5;
-                                maximum: 100;
-                                value <=> root.stamp-opacity;
-                            }
                             Text {
-                                width: 40px;
-                                text: round(root.stamp-opacity) + "%";
-                                vertical-alignment: center;
+                                text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
+                                font-weight: 600;
                                 color: Theme.text;
                             }
-                        }
-                        if root.stamp-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.stamp-format;
-                                placeholder-text: "{n} / {total}";
-                                init => { self.focus(); }
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
                             }
-                        }
-                        if root.stamp-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { width: 70px; text <=> root.stamp-first; }
-                            Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { width: 70px; text <=> root.stamp-size; }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        if root.stamp-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Position"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
-                                current-index <=> root.stamp-corner;
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
+                                Button {
+                                    text: "Diagonal";
+                                    checkable: true;
+                                    checked: root.stamp-diagonal;
+                                    clicked => { root.stamp-diagonal = true; }
+                                }
+                                Button {
+                                    text: "Horizontal";
+                                    checkable: true;
+                                    checked: !root.stamp-diagonal;
+                                    clicked => { root.stamp-diagonal = false; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["Grey", "Red", "Blue", "Black"];
-                                current-index <=> root.stamp-colour;
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Theme.text; }
+                                Slider {
+                                    minimum: 5;
+                                    maximum: 100;
+                                    value <=> root.stamp-opacity;
+                                }
+                                Text {
+                                    width: 40px;
+                                    text: round(root.stamp-opacity) + "%";
+                                    vertical-alignment: center;
+                                    color: Theme.text;
+                                }
                             }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.stamp-pages;
-                                placeholder-text: "All, or 1-3, 5, 8-";
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit {
+                                    text <=> root.stamp-format;
+                                    placeholder-text: "{n} / {total}";
+                                    init => { self.focus(); }
+                                }
                             }
-                        }
-                        Text {
-                            vertical-stretch: 1;
-                            text: root.stamp-error;
-                            color: Theme.danger;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.button-h;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.stamp_close(); } }
-                            Button {
-                                text: "Apply";
-                                primary: true;
-                                clicked => { root.stamp_apply(); }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit { width: 70px; text <=> root.stamp-first; }
+                                Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit { width: 70px; text <=> root.stamp-size; }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Position"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
+                                    current-index <=> root.stamp-corner;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["Grey", "Red", "Blue", "Black"];
+                                    current-index <=> root.stamp-colour;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit {
+                                    text <=> root.stamp-pages;
+                                    placeholder-text: "All, or 1-3, 5, 8-";
+                                }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.stamp-error;
+                                color: Theme.danger;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.stamp_close(); } }
+                                Button {
+                                    text: "Apply";
+                                    primary: true;
+                                    clicked => { root.stamp_apply(); }
+                                }
                             }
                         }
                     }
@@ -1510,9 +1543,9 @@ export component MainWindow inherits Window {
             // Compress or export as images (Plan 0005 Phase 4): new files from the document as
             // it is now.
             if root.convert-visible : FocusScope {
-                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
                 y: root.mobile ? root.sheet-bottom - self.height : 16px;
-                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 420px);
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 420px);
                 height: root.mobile ? min(root.sheet-room, sheet-convert.preferred-height) : root.convert-mode == 0 ? 170px : 230px;
                 init => { self.focus(); }
                 capture-key-pressed(event) => {
@@ -1529,61 +1562,69 @@ export component MainWindow inherits Window {
                     border-radius: root.mobile ? 20px : 4px;
                     drop-shadow-blur: 8px;
                     drop-shadow-color: Theme.shadow;
-                    sheet-convert := VerticalLayout {
-                        padding: root.mobile ? 16px : 10px;
-                        spacing: 6px;
-                        Text {
-                            text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        if root.convert-mode == 0 : HorizontalLayout {
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-convert-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-convert.height;
+                        sheet-convert := VerticalLayout {
+                            width: sheet-convert-scroll.width;
+                            height: max(sheet-convert-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
                             spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
-                                current-index <=> root.convert-preset;
+                            Text {
+                                text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
+                                font-weight: 600;
+                                color: Theme.text;
                             }
-                        }
-                        if root.convert-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
-                            ComboBox {
-                                model: ["PNG", "JPEG"];
-                                current-index <=> root.convert-format;
+                            if root.convert-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
+                                    current-index <=> root.convert-preset;
+                                }
                             }
-                            Text { text: "Resolution"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { width: 70px; text <=> root.convert-dpi; }
-                            Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
-                        }
-                        if root.convert-mode == 1 : HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.convert-pages;
-                                placeholder-text: "All, or 1-3, 5, 8-";
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["PNG", "JPEG"];
+                                    current-index <=> root.convert-format;
+                                }
+                                Text { text: "Resolution"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit { width: 70px; text <=> root.convert-dpi; }
+                                Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
                             }
-                        }
-                        Text {
-                            vertical-stretch: 1;
-                            text: root.convert-error;
-                            color: Theme.danger;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.button-h;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.convert_close(); } }
-                            Button {
-                                text: root.convert-mode == 0 ? "Compress..." : "Export...";
-                                primary: true;
-                                enabled: !root.tool-running;
-                                clicked => { root.convert_run(); }
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit {
+                                    text <=> root.convert-pages;
+                                    placeholder-text: "All, or 1-3, 5, 8-";
+                                }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.convert-error;
+                                color: Theme.danger;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.convert_close(); } }
+                                Button {
+                                    text: root.convert-mode == 0 ? "Compress..." : "Export...";
+                                    primary: true;
+                                    enabled: !root.tool-running;
+                                    clicked => { root.convert_run(); }
+                                }
                             }
                         }
                     }
@@ -1592,9 +1633,9 @@ export component MainWindow inherits Window {
 
             // Crop: the rectangle the Crop tool drew, applied to its page or to every page.
             if root.crop-visible : FocusScope {
-                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
                 y: root.mobile ? root.sheet-bottom - self.height : 16px;
-                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 380px);
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 380px);
                 height: root.mobile ? min(root.sheet-room, sheet-crop.preferred-height) : 96px;
                 init => { self.focus(); }
                 capture-key-pressed(event) => {
@@ -1615,24 +1656,32 @@ export component MainWindow inherits Window {
                     border-radius: root.mobile ? 20px : 4px;
                     drop-shadow-blur: 8px;
                     drop-shadow-color: Theme.shadow;
-                    sheet-crop := VerticalLayout {
-                        padding: root.mobile ? 16px : 10px;
-                        spacing: 8px;
-                        Text {
-                            text: "Crop to the drawn area (" + root.crop-size + ")";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.button-h;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
-                            Button { text: "All pages"; clicked => { root.crop_apply(true); } }
-                            Button {
-                                text: "This page";
-                                primary: true;
-                                clicked => { root.crop_apply(false); }
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-crop-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-crop.height;
+                        sheet-crop := VerticalLayout {
+                            width: sheet-crop-scroll.width;
+                            height: max(sheet-crop-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Crop to the drawn area (" + root.crop-size + ")";
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
+                                Button { text: "All pages"; clicked => { root.crop_apply(true); } }
+                                Button {
+                                    text: "This page";
+                                    primary: true;
+                                    clicked => { root.crop_apply(false); }
+                                }
                             }
                         }
                     }
@@ -1640,9 +1689,9 @@ export component MainWindow inherits Window {
             }
 
             if root.props-visible : FocusScope {
-                x: root.mobile ? root.island-gap : (parent.width - self.width) / 2;
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
                 y: root.mobile ? root.sheet-bottom - self.height : 16px;
-                width: root.mobile ? parent.width - 2 * root.island-gap : min(parent.width - 32px, 460px);
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 460px);
                 height: root.mobile ? min(root.sheet-room, sheet-props.preferred-height) : min(parent.height - 32px, 380px);
                 capture-key-pressed(event) => {
                     if (event.text == Key.Escape) {
@@ -1658,59 +1707,67 @@ export component MainWindow inherits Window {
                     border-radius: root.mobile ? 20px : 4px;
                     drop-shadow-blur: 8px;
                     drop-shadow-color: Theme.shadow;
-                    sheet-props := VerticalLayout {
-                        padding: root.mobile ? 16px : 10px;
-                        spacing: 6px;
-                        Text {
-                            text: "Document properties";
-                            font-weight: 600;
-                            color: Theme.text;
-                        }
-                        HorizontalLayout {
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-props-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-props.height;
+                        sheet-props := VerticalLayout {
+                            width: sheet-props-scroll.width;
+                            height: max(sheet-props-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
                             spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit {
-                                text <=> root.props-title;
-                                read-only: !root.editable;
-                                init => { self.focus(); }
+                            Text {
+                                text: "Document properties";
+                                font-weight: 600;
+                                color: Theme.text;
                             }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.props-author; read-only: !root.editable; }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.props-subject; read-only: !root.editable; }
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.row-h;
-                            Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
-                            LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
-                        }
-                        Text {
-                            vertical-stretch: 1;
-                            text: root.props-info;
-                            wrap: word-wrap;
-                            font-size: 12px;
-                            color: Theme.text;
-                            opacity: 0.75;
-                        }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            height: root.button-h;
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Close"; clicked => { root.props_close(); } }
-                            if root.editable : Button {
-                                text: "Save";
-                                primary: true;
-                                clicked => { root.props_save(); }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit {
+                                    text <=> root.props-title;
+                                    read-only: !root.editable;
+                                    init => { self.focus(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit { text <=> root.props-author; read-only: !root.editable; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit { text <=> root.props-subject; read-only: !root.editable; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
+                                LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.props-info;
+                                wrap: word-wrap;
+                                font-size: 12px;
+                                color: Theme.text;
+                                opacity: 0.75;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Close"; clicked => { root.props_close(); } }
+                                if root.editable : Button {
+                                    text: "Save";
+                                    primary: true;
+                                    clicked => { root.props_save(); }
+                                }
                             }
                         }
                     }
@@ -1942,6 +1999,8 @@ export component MainWindow inherits Window {
             thumb-scroll-y <=> root.thumb-scroll-y;
             safe-top: root.safe-area-insets.top;
             safe-bottom: root.safe-area-insets.bottom;
+            safe-left: root.safe-area-insets.left;
+            safe-right: root.safe-area-insets.right;
             keyboard-top: root.virtual-keyboard-size.height > 0 ? root.virtual-keyboard-position.y : root.height;
             tool: root.tool;
             colour-index: root.colour-index;

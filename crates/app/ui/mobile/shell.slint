@@ -193,6 +193,9 @@ export component MobileShell inherits Rectangle {
     // The system bars and the on-screen keyboard's top edge (the window's height without one).
     in property <length> safe-top;
     in property <length> safe-bottom;
+    // Landscape (Plan 0008 Phase 5): the camera cutout and the navigation bar can sit at a side.
+    in property <length> safe-left;
+    in property <length> safe-right;
     in property <length> keyboard-top;
     // Edit (Plan 0008 Phase 3): the tool (0 select, 1-4 markup, 5 note, 6 ink, 7 crop), the
     // colour and ink width chosen, and whether the document has form fields.
@@ -207,6 +210,12 @@ export component MobileShell inherits Rectangle {
     // Where the header ends and the dock begins, for the document's insets.
     out property <length> header-bottom: header.y + header.height;
     out property <length> dock-top: dock.y;
+    // The header and the dock lie inside the safe area (row MK, `--bench-rotate`).
+    out property <bool> in-safe-area: header.x >= root.safe-left && header.y >= root.safe-top
+        && header.x + header.width <= root.width - root.safe-right
+        && dock.x >= root.safe-left && dock.x + dock.width <= root.width - root.safe-right
+        && dock.y + dock.height <= root.height - root.safe-bottom
+        && header.y + header.height <= dock.y;
     // The top of what floats over the bottom of the document: the dock, the edit strip, its
     // palette, or the on-screen keyboard. An editor on the page is kept above it (row MI).
     out property <length> floor: min(root.keyboard-top, root.stack-top);
@@ -256,6 +265,13 @@ export component MobileShell inherits Rectangle {
     callback flatten-form();
 
     property <length> edge: 8px;
+    // Where the islands start and how wide they run, inside the safe area's sides.
+    property <length> left: root.safe-left + root.edge;
+    property <length> span: root.width - root.safe-left - root.safe-right - 2 * root.edge;
+    // The room a menu under the header has: on a phone on its side less than its rows need, so
+    // they scroll (Plan 0008 Phase 5).
+    property <length> menu-room: root.height - root.safe-bottom - root.edge
+        - (header.y + header.height + root.edge);
     property <bool> docs-menu: false;
     property <bool> more-menu: false;
     // The card over the dock: 0 none, 1 go to page, 2 zoom, 3 the form.
@@ -322,9 +338,9 @@ export component MobileShell inherits Rectangle {
 
     // The header island: the document (a tap lists the open ones), search, save, pages and more.
     header := Island {
-        x: root.edge;
+        x: root.left;
         y: root.safe-top + root.edge;
-        width: root.width - 2 * root.edge;
+        width: root.span;
         height: 56px;
         border-radius: 16px;
         HorizontalLayout {
@@ -436,9 +452,9 @@ export component MobileShell inherits Rectangle {
 
     // The search bar, under the header.
     if root.find-visible : Island {
-        x: root.edge;
+        x: root.left;
         y: header.y + header.height + root.edge;
-        width: root.width - 2 * root.edge;
+        width: root.span;
         height: 52px;
         border-radius: 16px;
         HorizontalLayout {
@@ -487,9 +503,9 @@ export component MobileShell inherits Rectangle {
 
     // An error, under the header (and the search bar).
     if root.has-error : Rectangle {
-        x: root.edge;
+        x: root.left;
         y: header.y + header.height + root.edge + (root.find-visible ? 60px : 0px);
-        width: root.width - 2 * root.edge;
+        width: root.span;
         height: 44px;
         background: Theme.danger-surface;
         border-color: Theme.danger-line;
@@ -510,9 +526,9 @@ export component MobileShell inherits Rectangle {
 
     // The thumb dock: pages on the left, the three modes in the middle, the zoom on the right.
     dock := Rectangle {
-        x: root.edge;
+        x: root.left;
         y: root.height - root.safe-bottom - root.edge - self.height;
-        width: root.width - 2 * root.edge;
+        width: root.span;
         height: 56px;
         // The pager and the zoom are small capsules, as in the concept (the pager at most 92 px);
         // their touch areas run the dock's full height, so a thumb still finds them.
@@ -633,9 +649,9 @@ export component MobileShell inherits Rectangle {
     // The edit strip (the concept's `MobileEditorToolbar`): the tools, rotation and the form,
     // in a row that scrolls sideways when the phone is narrower than it.
     if root.strip-shown : Island {
-        x: root.edge;
+        x: root.left;
         y: root.strip-y;
-        width: root.width - 2 * root.edge;
+        width: root.span;
         height: 56px;
         border-radius: 16px;
         clip: true;
@@ -760,9 +776,9 @@ export component MobileShell inherits Rectangle {
 
     // The chosen tool's palette, over the strip: the colours, and the Ink tool's line widths.
     if root.palette-shown : Island {
-        x: root.edge;
+        x: root.left;
         y: root.palette-y;
-        width: root.width - 2 * root.edge;
+        width: root.span;
         height: root.palette-h;
         border-radius: 16px;
         VerticalLayout {
@@ -800,8 +816,8 @@ export component MobileShell inherits Rectangle {
 
     // The form: Reset Field and Reset Form, its data, and Flatten (the desktop's form menu).
     if root.card == 3 && root.strip-shown : Island {
-        x: root.edge;
-        width: root.width - 2 * root.edge;
+        x: root.left;
+        width: root.span;
         height: form-list.preferred-height;
         y: root.stack-top - root.edge - self.height;
         border-radius: 16px;
@@ -857,8 +873,8 @@ export component MobileShell inherits Rectangle {
 
     // Go to a page: over the dock, and over the on-screen keyboard while it shows.
     if root.card == 1 : Island {
-        x: root.edge;
-        width: root.width - 2 * root.edge;
+        x: root.left;
+        width: root.span;
         height: 60px;
         y: min(root.stack-top - root.edge, root.keyboard-top - root.edge) - self.height;
         border-radius: 16px;
@@ -903,8 +919,8 @@ export component MobileShell inherits Rectangle {
 
     // The zoom: smaller and larger, the percentage, and the fits.
     if root.card == 2 : Island {
-        x: root.edge;
-        width: root.width - 2 * root.edge;
+        x: root.left;
+        width: root.span;
         height: 112px;
         y: root.stack-top - root.edge - self.height;
         border-radius: 16px;
@@ -960,43 +976,49 @@ export component MobileShell inherits Rectangle {
         dismissed => { root.docs-menu = false; }
     }
     if root.docs-menu : Island {
-        x: root.edge;
+        x: root.left;
         y: header.y + header.height + root.edge;
-        width: root.width - 2 * root.edge;
-        height: docs-list.preferred-height;
+        width: root.span;
+        height: min(root.menu-room, docs-list.preferred-height);
         border-radius: 16px;
-        docs-list := VerticalLayout {
-            padding: 6px;
-            spacing: 2px;
-            HorizontalLayout {
-                padding-left: 10px;
-                Text {
-                    text: "Open documents (" + root.tabs.length + ")";
-                    color: Theme.text-faint;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
+        docs-scroll := Flickable {
+            content-width: self.width;
+            content-height: docs-list.preferred-height;
+            docs-list := VerticalLayout {
+                width: docs-scroll.width;
+                height: self.preferred-height;
+                padding: 6px;
+                spacing: 2px;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    Text {
+                        text: "Open documents (" + root.tabs.length + ")";
+                        color: Theme.text-faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    SheetRow {
+                        width: 96px;
+                        label: "Manage";
+                        clicked => { root.open-sheet(2); }
+                    }
+                }
+                for tab[index] in root.tabs : SheetRow {
+                    label: (tab.dirty ? "* " : "") + tab.title;
+                    current: index == root.active-tab;
+                    clicked => {
+                        root.docs-menu = false;
+                        root.select-tab(index);
+                    }
                 }
                 SheetRow {
-                    width: 96px;
-                    label: "Manage";
-                    clicked => { root.open-sheet(2); }
-                }
-            }
-            for tab[index] in root.tabs : SheetRow {
-                label: (tab.dirty ? "* " : "") + tab.title;
-                current: index == root.active-tab;
-                clicked => {
-                    root.docs-menu = false;
-                    root.select-tab(index);
-                }
-            }
-            SheetRow {
-                icon: @image-url("../icons/folder-open.svg");
-                label: "Open a file...";
-                clicked => {
-                    root.docs-menu = false;
-                    root.open-file();
+                    icon: @image-url("../icons/folder-open.svg");
+                    label: "Open a file...";
+                    clicked => {
+                        root.docs-menu = false;
+                        root.open-file();
+                    }
                 }
             }
         }
@@ -1007,109 +1029,115 @@ export component MobileShell inherits Rectangle {
         dismissed => { root.more-menu = false; }
     }
     if root.more-menu : Island {
-        width: min(root.width - 2 * root.edge, 300px);
-        x: root.width - root.edge - self.width;
+        width: min(root.span, 300px);
+        x: root.left + root.span - self.width;
         y: header.y + header.height + root.edge;
-        height: more-list.preferred-height;
+        height: min(root.menu-room, more-list.preferred-height);
         border-radius: 16px;
-        more-list := VerticalLayout {
-            padding: 6px;
-            spacing: 2px;
-            Rectangle {
-                height: 48px;
-                border-radius: 12px;
-                background: Theme.hover;
-                HorizontalLayout {
-                    padding: 4px;
-                    spacing: 4px;
-                    Segment {
-                        horizontal-stretch: 1;
-                        label: "Light";
-                        icon: @image-url("../icons/sun.svg");
-                        checked: root.theme == 1;
-                        clicked => { root.choose-theme(1); }
+        more-scroll := Flickable {
+            content-width: self.width;
+            content-height: more-list.preferred-height;
+            more-list := VerticalLayout {
+                width: more-scroll.width;
+                height: self.preferred-height;
+                padding: 6px;
+                spacing: 2px;
+                Rectangle {
+                    height: 48px;
+                    border-radius: 12px;
+                    background: Theme.hover;
+                    HorizontalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Light";
+                            icon: @image-url("../icons/sun.svg");
+                            checked: root.theme == 1;
+                            clicked => { root.choose-theme(1); }
+                        }
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Dark";
+                            icon: @image-url("../icons/moon.svg");
+                            checked: root.theme == 2;
+                            clicked => { root.choose-theme(2); }
+                        }
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "System";
+                            icon: @image-url("../icons/monitor.svg");
+                            checked: root.theme == 0;
+                            clicked => { root.choose-theme(0); }
+                        }
                     }
-                    Segment {
-                        horizontal-stretch: 1;
-                        label: "Dark";
-                        icon: @image-url("../icons/moon.svg");
-                        checked: root.theme == 2;
-                        clicked => { root.choose-theme(2); }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/undo-2.svg");
+                    label: "Undo";
+                    enabled: root.can-undo;
+                    clicked => { root.undo(); }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/redo-2.svg");
+                    label: "Redo";
+                    enabled: root.can-redo;
+                    clicked => { root.redo(); }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/file-output.svg");
+                    label: "Save as...";
+                    enabled: root.has-doc;
+                    clicked => {
+                        root.more-menu = false;
+                        root.save-as();
                     }
-                    Segment {
-                        horizontal-stretch: 1;
-                        label: "System";
-                        icon: @image-url("../icons/monitor.svg");
-                        checked: root.theme == 0;
-                        clicked => { root.choose-theme(0); }
+                }
+                Rectangle { height: 1px; background: Theme.line; }
+                SheetRow {
+                    icon: @image-url("../icons/info.svg");
+                    label: "Document properties";
+                    enabled: root.has-doc;
+                    clicked => {
+                        root.more-menu = false;
+                        root.props-open();
                     }
                 }
-            }
-            SheetRow {
-                icon: @image-url("../icons/undo-2.svg");
-                label: "Undo";
-                enabled: root.can-undo;
-                clicked => { root.undo(); }
-            }
-            SheetRow {
-                icon: @image-url("../icons/redo-2.svg");
-                label: "Redo";
-                enabled: root.can-redo;
-                clicked => { root.redo(); }
-            }
-            SheetRow {
-                icon: @image-url("../icons/file-output.svg");
-                label: "Save as...";
-                enabled: root.has-doc;
-                clicked => {
-                    root.more-menu = false;
-                    root.save-as();
+                SheetRow {
+                    icon: @image-url("../icons/stamp.svg");
+                    label: "Watermark";
+                    enabled: root.has-doc && root.editable;
+                    clicked => {
+                        root.more-menu = false;
+                        root.stamp-open(0);
+                    }
                 }
-            }
-            Rectangle { height: 1px; background: Theme.line; }
-            SheetRow {
-                icon: @image-url("../icons/info.svg");
-                label: "Document properties";
-                enabled: root.has-doc;
-                clicked => {
-                    root.more-menu = false;
-                    root.props-open();
+                SheetRow {
+                    icon: @image-url("../icons/list-ordered.svg");
+                    label: "Page numbers";
+                    enabled: root.has-doc && root.editable;
+                    clicked => {
+                        root.more-menu = false;
+                        root.stamp-open(1);
+                    }
                 }
-            }
-            SheetRow {
-                icon: @image-url("../icons/stamp.svg");
-                label: "Watermark";
-                enabled: root.has-doc && root.editable;
-                clicked => {
-                    root.more-menu = false;
-                    root.stamp-open(0);
+                SheetRow {
+                    icon: @image-url("../icons/file-archive.svg");
+                    label: "Compress a copy";
+                    enabled: root.has-doc;
+                    clicked => {
+                        root.more-menu = false;
+                        root.convert-open(0);
+                    }
                 }
-            }
-            SheetRow {
-                icon: @image-url("../icons/list-ordered.svg");
-                label: "Page numbers";
-                enabled: root.has-doc && root.editable;
-                clicked => {
-                    root.more-menu = false;
-                    root.stamp-open(1);
-                }
-            }
-            SheetRow {
-                icon: @image-url("../icons/file-archive.svg");
-                label: "Compress a copy";
-                enabled: root.has-doc;
-                clicked => {
-                    root.more-menu = false;
-                    root.convert-open(0);
-                }
-            }
-            SheetRow {
-                icon: @image-url("../icons/image.svg");
-                label: "Export as images";
-                enabled: root.has-doc;
-                clicked => {
-                    root.more-menu = false;
-                    root.convert-open(1);
+                SheetRow {
+                    icon: @image-url("../icons/image.svg");
+                    label: "Export as images";
+                    enabled: root.has-doc;
+                    clicked => {
+                        root.more-menu = false;
+                        root.convert-open(1);
+                    }
                 }
             }
         }
@@ -1135,8 +1163,8 @@ export component MobileShell inherits Rectangle {
         TouchArea { }
         VerticalLayout {
             padding-top: 8px;
-            padding-left: 12px;
-            padding-right: 12px;
+            padding-left: root.safe-left + 12px;
+            padding-right: root.safe-right + 12px;
             padding-bottom: root.safe-bottom + 8px;
             spacing: 8px;
             HorizontalLayout {

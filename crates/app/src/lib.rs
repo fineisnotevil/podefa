@@ -2639,10 +2639,21 @@ impl AppState {
             + MOBILE_GALLERY_GAP_PX
             + page as f32 * MOBILE_GALLERY_PITCH_PX;
         let scroll = -ui.get_mgallery_offset();
-        if top < scroll + top_inset || top + MOBILE_GALLERY_CARD_H_PX > scroll + view - bottom_inset
-        {
-            let middle = top - (view + top_inset - bottom_inset - MOBILE_GALLERY_CARD_H_PX) / 2.0;
-            ui.set_mgallery_offset(-middle.clamp(0.0, max));
+        let room = view - top_inset - bottom_inset;
+        let target = if MOBILE_GALLERY_CARD_H_PX <= room {
+            let shown = top >= scroll + top_inset
+                && top + MOBILE_GALLERY_CARD_H_PX <= scroll + view - bottom_inset;
+            // In the middle.
+            (!shown).then(|| top - (room - MOBILE_GALLERY_CARD_H_PX) / 2.0 - top_inset)
+        } else {
+            // A phone on its side has less room than a page (Plan 0008 Phase 5): its top shows,
+            // under the column's bar, and the column scrolls through the rest.
+            let under_bar = top - top_inset - MOBILE_GALLERY_LEAD_PX;
+            let shown = top >= scroll + top_inset && top <= scroll + view - bottom_inset;
+            (!shown).then_some(under_bar)
+        };
+        if let Some(target) = target {
+            ui.set_mgallery_offset(-target.clamp(0.0, max));
             self.pump_thumbs(ui);
         }
     }
@@ -4338,6 +4349,12 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
     let mobile = cfg!(target_os = "android") || args.iter().any(|arg| arg == "--mobile");
     args.retain(|arg| arg != "--mobile");
     main_window.set_mobile(mobile);
+    // `--landscape` (Plan 0008 Phase 5): the screen on its side, for trying the landscape layout
+    // by hand; a phone-sized wide window on the desktop.
+    if args.iter().any(|arg| arg == "--landscape") {
+        args.retain(|arg| arg != "--landscape");
+        platform::request_orientation(main_window.window(), Some(true));
+    }
     let (paths, cfg) = bench::parse_args(&args);
     let trace_on = bench::trace_enabled() || !cfg.is_empty();
     if trace_on {

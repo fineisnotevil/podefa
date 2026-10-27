@@ -182,6 +182,12 @@ pub struct Cfg {
     /// frame timing while the fingers move, then how long the view took to be covered after
     /// they lift (Plan 0008 Phase 2, row ME; benchmarks §14.4). Runs alone.
     pub pinches: u32,
+    /// `--bench-rotate N`: once the opening view is covered, shows page 5 at 150% (the last page
+    /// when there are fewer), then turns the screen to landscape and back N times through
+    /// [`crate::platform::request_orientation`], checking after each turn that the page and the
+    /// zoom are kept and the header and the dock lie inside the safe area, and timing how long the
+    /// view took to be covered (Plan 0008 Phase 5, row MK; benchmarks §14.8). Runs alone.
+    pub rotations: u32,
 }
 
 impl Default for Cfg {
@@ -223,6 +229,7 @@ impl Default for Cfg {
             idle_s: 0.0,
             modes: 0,
             pinches: 0,
+            rotations: 0,
             tabs: 0,
         }
     }
@@ -253,6 +260,7 @@ impl Cfg {
             && self.modes == 0
             && self.tabs == 0
             && self.pinches == 0
+            && self.rotations == 0
     }
 }
 
@@ -402,6 +410,10 @@ pub fn parse_args(args: &[String]) -> (Vec<String>, Cfg) {
             }
             "--bench-pinch" => {
                 cfg.pinches = number.unwrap_or(4.0).max(1.0) as u32;
+                consumed = if number.is_some() { 2 } else { 1 };
+            }
+            "--bench-rotate" => {
+                cfg.rotations = number.unwrap_or(2.0).max(1.0) as u32;
                 consumed = if number.is_some() { 2 } else { 1 };
             }
             "--bench-tabs" => {
@@ -4049,6 +4061,10 @@ pub fn start(ui: &MainWindow, cfg: Cfg) {
         start_pinches(ui, cfg.pinches);
         return;
     }
+    if cfg.rotations > 0 {
+        start_rotations(ui, cfg.rotations);
+        return;
+    }
     if cfg.is_empty() {
         println!(
             "[bench] nothing to do: give --bench-zoom, --bench-pan, --bench-scroll, --bench-jump or --bench-nav"
@@ -4546,6 +4562,156 @@ fn start_pinches(ui: &MainWindow, pinches: u32) {
         moving = None;
         lifted = Some(Instant::now());
         done += 1;
+    });
+    TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
+}
+
+/// How long a turn of the screen may take to reach the window, and its view to be covered.
+const ROTATE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The zoom `--bench-rotate` reads at, so a kept zoom is not the default by chance.
+const ROTATE_ZOOM_MILLI: u32 = 1_500;
+
+/// `--bench-rotate N` (row MK): waits for the opening view to be covered, shows page 5 (or the
+/// last) at [`ROTATE_ZOOM_MILLI`] and settles, then turns the screen to landscape and back `N`
+/// times. After each turn it waits until the window has its new shape and the view is covered
+/// (`t_cover`, from the request), then checks the current page and the zoom against the ones
+/// before the turns and that the header and the dock lie inside the safe area. Exits 0 when every
+/// turn kept them; the screen goes back to the user's own orientation first.
+fn start_rotations(ui: &MainWindow, rotations: u32) {
+    println!("[bench] rotate run: {rotations} turn(s) to landscape and back");
+    let weak = ui.as_weak();
+    let mut covered: Option<Instant> = None;
+    // The page and zoom the turns must keep, once shown.
+    let mut kept: Option<(usize, u32)> = None;
+    // The turn under way: when it was asked for and whether it goes to landscape.
+    let mut turning: Option<(Instant, bool)> = None;
+    let (mut turns, mut pass, mut worst_cover) = (0u32, true, 0u128);
+    let opened = Instant::now();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, PINCH_STEP, move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let state = crate::APP.with(|cell| {
+            cell.borrow().as_ref().map(|state| {
+                let visible = state.visible(&ui);
+                (
+                    state.bench.first_full_ms(),
+                    holes(&state.scheduler, &visible) == 0,
+                    state.current_page(&ui),
+                    state.scale_milli,
+                    state.page_sizes.len(),
+                )
+            })
+        });
+        let Some((first, now_covered, page, milli, pages)) = state else {
+            return;
+        };
+        if first.is_none() {
+            if opened.elapsed() > IDLE_COVER_TIMEOUT {
+                println!("[bench] rotate FAIL: the opening view was never covered");
+                crate::exit_process(1);
+            }
+            return;
+        }
+        let Some((page_kept, milli_kept)) = kept else {
+            let since = *covered.get_or_insert_with(Instant::now);
+            if since.elapsed() < IDLE_SETTLE {
+                return;
+            }
+            let target = 4.min(pages.saturating_sub(1));
+            crate::with_state(|state| {
+                let (ax, ay) = crate::viewport_center(&ui);
+                state.zoom(&ui, ROTATE_ZOOM_MILLI, ax, ay);
+                state.go_to_page(&ui, target);
+            });
+            kept = Some((target, ROTATE_ZOOM_MILLI));
+            covered = None;
+            return;
+        };
+        let size = ui.window().size();
+        let landscape_now = size.width > size.height;
+        let Some((asked, landscape)) = turning else {
+            // Settled before the next turn.
+            if !now_covered {
+                return;
+            }
+            let since = *covered.get_or_insert_with(Instant::now);
+            if since.elapsed() < IDLE_SETTLE {
+                return;
+            }
+            if turns == 0 && (page != page_kept || milli != milli_kept) {
+                println!(
+                    "[bench] rotate FAIL: page {} at {:.1}% before the turns, not page {} at {:.1}%",
+                    page + 1,
+                    milli as f32 / 10.0,
+                    page_kept + 1,
+                    milli_kept as f32 / 10.0
+                );
+                crate::exit_process(1);
+            }
+            if turns == 2 * rotations {
+                crate::platform::request_orientation(ui.window(), None);
+                println!(
+                    "[bench] rotate turns={turns} worst_cover={worst_cover}ms page={} zoom={:.1}%",
+                    page_kept + 1,
+                    milli_kept as f32 / 10.0
+                );
+                println!("[bench] rotate {}", if pass { "PASS" } else { "FAIL" });
+                crate::exit_process(if pass { 0 } else { 1 });
+            }
+            let landscape = turns % 2 == 0;
+            crate::platform::request_orientation(ui.window(), Some(landscape));
+            turning = Some((Instant::now(), landscape));
+            covered = None;
+            return;
+        };
+        if landscape_now != landscape || !now_covered {
+            if asked.elapsed() > ROTATE_TIMEOUT {
+                println!(
+                    "[bench] rotate FAIL: turn {} did not {} in {}s ({}x{} px)",
+                    turns + 1,
+                    if landscape_now == landscape {
+                        "cover the view"
+                    } else {
+                        "reach the window"
+                    },
+                    ROTATE_TIMEOUT.as_secs(),
+                    size.width,
+                    size.height
+                );
+                crate::platform::request_orientation(ui.window(), None);
+                crate::exit_process(1);
+            }
+            return;
+        }
+        let cover = asked.elapsed().as_millis();
+        worst_cover = worst_cover.max(cover);
+        let safe = (
+            ui.get_safe_inset_left(),
+            ui.get_safe_inset_top(),
+            ui.get_safe_inset_right(),
+            ui.get_safe_inset_bottom(),
+        );
+        let in_safe_area = !ui.get_mobile() || ui.get_mobile_in_safe_area();
+        let ok = page == page_kept && milli == milli_kept && in_safe_area;
+        pass &= ok;
+        turns += 1;
+        println!(
+            "[bench] rotate {turns} {} {}x{} px t_cover={cover}ms page={} zoom={:.1}% \
+             safe=({:.0},{:.0},{:.0},{:.0}) in_safe_area={in_safe_area} {}",
+            if landscape { "landscape" } else { "portrait" },
+            size.width,
+            size.height,
+            page + 1,
+            milli as f32 / 10.0,
+            safe.0,
+            safe.1,
+            safe.2,
+            safe.3,
+            if ok { "ok" } else { "FAIL" }
+        );
+        turning = None;
     });
     TIMER.with(|cell| *cell.borrow_mut() = Some(timer));
 }

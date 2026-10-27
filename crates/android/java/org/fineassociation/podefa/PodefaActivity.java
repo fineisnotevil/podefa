@@ -109,11 +109,28 @@ public class PodefaActivity extends NativeActivity {
         return path == null ? null : new String[] {path, uri.toString()};
     }
 
+    /** The document of "Open with" (VIEW) or of "Share" (SEND, Plan 0008 Phase 5), or null. */
+    @SuppressWarnings("deprecation")
     private static Uri viewedUri(Intent intent) {
-        if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) {
+        if (intent == null) {
             return null;
         }
-        return intent.getData();
+        if (Intent.ACTION_VIEW.equals(intent.getAction())) {
+            return intent.getData();
+        }
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            // getParcelableExtra(String, Class) is API 33; the app runs from API 26.
+            return intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        }
+        return null;
+    }
+
+    /**
+     * Asks for an orientation (ActivityInfo.SCREEN_ORIENTATION_*, -1 for the user's own): the
+     * bench harness turns the phone's screen without touching the system's rotation setting.
+     */
+    public void requestOrientation(final int orientation) {
+        runOnUiThread(() -> setRequestedOrientation(orientation));
     }
 
     /** Starts a picker; the answer comes through nativePicked with the same request code. */
