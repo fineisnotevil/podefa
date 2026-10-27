@@ -392,16 +392,41 @@ ADR 0012 records the design.
   placed, selected, opened, deleted and moved by touch.
 - **Desktop:** `--bench-forms` 35 of 35, `--bench-note` 5 of 5; `--bench-ink` 3 of 4 with backlog
   item 24's known failure.
-- **Found, not fixed (needs the maintainer's word):** Android's Back key closes the app when no
-  text field has the keyboard, and an unsaved document is lost without the unsaved prompt. Slint
-  1.18.1 sends Back to the window as `Key.Back` and finishes the activity only when nothing
-  accepts it (`i-slint-backend-android-activity-1.18.1/javahelper.rs:788-810`), so the window can
-  close the sheet, cards and editors first and ask about unsaved changes (backlog item 25).
+- **Back key** (fixed in this phase, by the maintainer's word; was backlog item 25): Back closed
+  the app whenever no text field had the keyboard, and an unsaved document was lost without the
+  unsaved prompt. Slint 1.18.1 sends Back to the window as `Key.Back` and finishes the activity
+  only when nothing accepts it (`i-slint-backend-android-activity-1.18.1/javahelper.rs:788-810`).
+  The window's `back()` (`main.slint`) now takes it one level at a time: the shell's menus, card
+  or sheet (`MobileShell.back()`), an open dialog, the search bar, an open field or note editor
+  (committed, as a tap elsewhere does) or a selection (`AppState::back_close`), Edit or Tools back
+  to Read, and last, with unsaved changes, the same question as closing the window
+  (`tabs::quit`, which on Android ends with `Activity.finish()`, `platform::close_app`). With
+  nothing unsaved it does not take Back, and Slint closes the app.
+  - The page takes the keys back before anything closes: a closed editor left the focus nowhere,
+    and the next Back skipped the window and closed the app.
+  - Field and note editors move the focus away before their text is read: on Android the
+    keyboard's composing word reaches `text` only at FocusOut
+    (`i-slint-core-1.18.1/items/text.rs:1258-1278`), so a Back right after typing lost the last
+    word.
+  - On the phone, with "Back" typed into a field: the 1st Back hides the keyboard (the IME takes
+    it), the 2nd commits the field (the header's Save turns on), the 3rd goes from Edit to Read,
+    the 4th asks "Save the changes to "form.pdf" before closing it?". Cancel keeps the app and
+    the changes; No closes it and leaves the file byte for byte as it was; Yes saves, closes,
+    and the value is there at the next start. The sheet also closes on Back. No crash.
+  - On the way: Android keeps the process after the activity finishes, and a new launch runs
+    `android_main` again in it. `platform::android` kept the first launch's activity in a
+    `OnceLock`, so the unsaved question of a second launch went to the finished activity and the
+    app crashed (`BadTokenException`). Each launch now replaces it. Slint's own `finish()` on
+    Back left the process in the same state before.
 - **Not checked by script:** typing with the phone's own keyboard. Through `adb shell input text`,
   one run lost the word being composed when Enter was pressed in a single-line field, and a word
   composed for a combo box that takes no text showed up in the next field's editor; with spaces
-  typed between words the text arrived whole. Both are the IME's composing text, which Slint
-  handles; the maintainer's typing by hand decides whether anything is wrong.
+  typed between words the text arrived whole. The Back tests found why the word moves: typed
+  into a field that was empty, "Ab" became "ZqAb", "Zq" being the last word typed in the field
+  before (even in the launch before). Slint 1.18.1 restarts the keyboard's input only when the
+  input type changes (`SlintAndroidJavaHelper.java:215-225`), so when the focus moves to another
+  text input of the same type, the keyboard keeps its composing word and commits it there
+  (backlog item 26).
 - **Not explained:** one Save did not write the file (the header's Save, after a Reset Field by
   mistake); two later saves did. Not reproduced.
 

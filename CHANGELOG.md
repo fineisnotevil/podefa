@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   annotation, and opens a selected note; a long press on a note moves it; Ink and Crop draw with
   one finger. A field or note being edited moves above the on-screen keyboard and below the
   header. Ink strokes log their frames in the bench trace.
+- **Back on the phone** (Plan 0008 Phase 3) closes one thing at a time: a menu, a card, the
+  bottom sheet, a dialog, the search bar, an editor (keeping its text) or a selection, then goes
+  from Edit or Tools back to Read, and last asks about unsaved changes before the app closes.
+  It used to close the app at once and lose unsaved changes.
 - **Pinch zoom and double tap** (Plan 0008 Phase 2): two fingers on a touch screen, or a pinch on
   a trackpad, zoom around the fingers; the pages follow them at once and sharpen when they lift. A
   double tap with a finger fits the page's width, and a second one goes back to the zoom before.

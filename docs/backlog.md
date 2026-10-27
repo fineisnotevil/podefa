@@ -791,3 +791,26 @@ Accept it in the window: close the topmost of the sheet, the menus, the cards, t
 editor, the search bar; else, with unsaved changes, ask as Close does; else leave it unaccepted so
 the app closes.
 
+**Done in Plan 0008 Phase 3 (2026-10-27):** the window's `back()` does this (plan §5, "Phase 3:
+results").
+
+## 26. The phone's keyboard carries a composed word into the next text field
+
+**Labels:** `android`, `bug`, `upstream`
+
+### Problem Statement
+
+On the phone (Plan 0008 Phase 3), a word still being composed on the keyboard when a field or
+note editor closes comes back in the next text input: "Ab" typed into an empty field arrived as
+"ZqAb", "Zq" being the last word typed before, in another field or the launch before. Seen with
+`adb shell input text` and the Samsung keyboard; typing by hand not yet checked.
+
+### Proposed Solution
+
+Slint 1.18.1 calls `InputMethodManager.restartInput` only when the input type changes
+(`i-slint-backend-android-activity-1.18.1/java/SlintAndroidJavaHelper.java:215-225`), and not when
+the focus moves to another text input or the input closes, so the keyboard keeps its composing
+state. Options: report it to Slint with a fix that restarts the input on `InputMethodRequest::Enable`
+and `Disable`; meanwhile, have `PodefaActivity` restart the input on the focused view when an
+editor opens or closes (one JNI call from `platform::android`).
+
