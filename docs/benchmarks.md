@@ -1706,3 +1706,32 @@ same phone, documents pushed to `{files}`. PSS sampled once a second for 25 s pe
 
 Row MB's peak PSS (at most 175.0 MiB) passes its 250 MiB ceiling for these runs; its pinch and
 fling by hand come with Phase 2. Row MD is a manual check, recorded in the plan's §5.
+
+### 14.4 Phase 2: pinch (row ME)
+
+**`--bench-pinch N`** (defined 2026-10-27, before it was measured): once the opening view is
+covered and has settled for a second, the harness makes `N` pinches through the window's `pinch`
+callback, the one Slint's `ScaleRotateGestureHandler` calls for two fingers or a trackpad. Each
+pinch is 30 updates 16 ms apart, centred on the view, its centre drifting by (30, 20) logical px;
+the odd ones scale to x2, the even ones to x0.5. Over each pinch, from `started` to the last
+update before `ended`:
+
+- **`tiles_requested`, `tiles_rendered`:** the change of the status counters; row ME wants 0.
+- **`frame_max`, `gap_max`:** as in §13.4, over the same window; row ME wants `frame_max` at most
+  16.7 ms.
+- **`t_cover`:** from `ended` (the one zoom) until every visible cell holds a tile of the new
+  scale (`bench::holes` = 0), sampled every 16 ms.
+
+PASS when no pinch requested or rendered a tile while moving and no frame took longer than
+16.7 ms. A scripted pinch drives the same Rust and Slint path as fingers, but not Slint's touch
+recognizer; on the phone a real two-finger pinch is written to the touch screen's input device
+(`/dev/input/event3`, which the `adb` shell may write) and timed with `FA_PDF_TRACE`'s frame lines.
+
+Desktop (§1 machine, release build, `FA_PDF_TRACE=1`, 2026-10-27):
+
+| Document | Result |
+| :--- | :--- |
+| `large_200p.pdf --bench-pinch 4` | tiles 0 in every pinch; `frame_max` 0.5-0.6 ms; `t_cover` 15-16 ms. PASS |
+| `dense_vector.pdf --bench-pinch 4` | tiles 0 in every pinch; `frame_max` 0.5-0.8 ms; `t_cover` 31-54 ms. PASS |
+
+On the phone: not measured yet (the phone was off USB).

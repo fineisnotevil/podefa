@@ -19,8 +19,8 @@ results"); the rest of Phase 2 is under way. By the maintainer's order the shell
 - Phase 1 (platform): passed its gate on 2026-10-27 (ADR 0012). Rows MA, MB, MC pass on the phone;
   row MD passes for the system picker, saving in place and Save As, with Google Drive and another
   reader left to the maintainer; the desktop rows are unchanged.
-- The rest of Phase 2 (touch: pinch, fling, double tap): started 2026-10-27. Phases 3 to 5: not
-  started.
+- The rest of Phase 2 (touch): pinch and double tap implemented (§5, "Phase 2, touch"); the
+  phone's rows ME, MF, MG wait for the phone on USB. Phases 3 to 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -334,6 +334,27 @@ ADR 0012 records the design.
 - **Not done:** the Edit strip is Phase 3, so the ink tool was chosen with the `I` key over
   `adb`; the library suite on the phone (see §5's note) was built (26 test binaries link without
   `RUSTFLAGS`) but not run: the phone left USB before it could be pushed.
+
+### Phase 2, touch: progress (2026-10-27)
+
+- **Pinch:** `ScaleRotateGestureHandler` (§3.1) around the viewport. While the fingers move,
+  Rust only sets a transform on the layer holding the Flickable: a scale around the point where
+  they started (`transform-origin`) and a shift by how far that point moved, clamped so the scale
+  stays inside 1%-6400%. Nothing is laid out or requested. When they lift, `zoom_moved` zooms to the
+  scale shown, anchored where the fingers started and moved by their drift, in one step, and the
+  transform goes back to none in the same frame. A trackpad pinch on the desktop takes the same
+  path. While a gesture is active the handler holds the pointer, so the Flickable does not pan.
+- **Fling:** Slint's Flickable already flings a touch release with its own constant deceleration
+  (`i-slint-core-1.18.1/items/flickable.rs:645-668`); the canvas window (Plan 0002) is wide
+  enough that a fling does not reach its edge before it stops.
+- **Double tap:** a finger's double tap (the TouchArea records whether the press was a finger)
+  zooms to fit width for the page under it, anchored at the tap; a double tap at fit width (within
+  2%) goes back to the zoom before, or to twice fit width. A mouse double-click still selects a
+  word.
+- **`--bench-pinch N`** (`docs/benchmarks.md` §14.4): on the desktop 0 tiles during every pinch,
+  `frame_max` under 1 ms, the view covered 15-54 ms after the fingers lift.
+- **Not yet:** rows ME, MF and MG on the phone (the phone left USB); a real two-finger pinch for
+  row ME is prepared as raw touch events for the touch screen's input device.
 
 ### Phase 2, interface part: results (2026-10-26)
 
