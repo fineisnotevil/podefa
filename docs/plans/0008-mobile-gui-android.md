@@ -10,7 +10,7 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 **Phase 0 passed its gate on 2026-10-26; the maintainer approved the mobile shell (the interface
 part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27** (§5, "Phase 1:
 results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); **Phase 3 (Edit on
-touch) is implemented and at its gate** (§5, "Phase 3: results"). By the maintainer's order the shell came before Phase 1's platform work
+touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"). By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -25,7 +25,9 @@ touch) is implemented and at its gate** (§5, "Phase 3: results"). By the mainta
   library suite (215 of 215); a pinch by hand is the maintainer's. Passed its gate on 2026-10-27.
 - Phase 3 (Edit on touch): implemented and at its gate (2026-10-27): the edit strip and palettes,
   taps for fields, notes and annotations, a long press to move a note, editors kept above the
-  on-screen keyboard; rows MI and MJ pass on the phone. Phases 4 and 5: not started.
+  on-screen keyboard; rows MI and MJ pass on the phone; Back closes one level at a time and asks
+  about unsaved changes last. Passed its gate on 2026-10-27; the keyboard's composing word
+  (backlog item 26) stays open. Phases 4 and 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
