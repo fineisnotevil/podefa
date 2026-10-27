@@ -10,8 +10,8 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 **Phase 0 passed its gate on 2026-10-26; the maintainer approved the mobile shell (the interface
 part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27** (§5, "Phase 1:
 results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); **Phase 3 (Edit on
-touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"); **Phase 4 (Tools on touch) is
-implemented and at its gate** (§5, "Phase 4: results"). By the maintainer's order the shell came before Phase 1's platform work
+touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"); **Phase 4 (Tools on touch) passed
+its gate on 2026-10-28** (§5, "Phase 4: results"). By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -29,7 +29,7 @@ implemented and at its gate** (§5, "Phase 4: results"). By the maintainer's ord
   on-screen keyboard; rows MI and MJ pass on the phone; Back closes one level at a time and asks
   about unsaved changes last. Passed its gate on 2026-10-27; the keyboard's composing word
   (backlog item 26) stays open.
-- Phase 4 (Tools on touch): implemented and at its gate (2026-10-28): the one-column gallery with
+- Phase 4 (Tools on touch): passed its gate on 2026-10-28: the one-column gallery with
   each page's buttons and check box, the gaps' Split, blank page and pages from a file, a long
   press that moves pages, the bar over the dock for the chosen pages, and the tools' dialogs as
   sheets; Plan 0005's page operations pass on the phone (`--bench-pages` 13 of 14, the miss being
@@ -353,6 +353,8 @@ ADR 0012 records the design.
   `RUSTFLAGS`) but not run: the phone left USB before it could be pushed.
 
 ### Phase 4: results (2026-10-28)
+
+**Phase 4 passed its gate on 2026-10-28** ("Faz 4 onaylandı.").
 
 - **The gallery column** (`crates/app/ui/mobile/gallery.slint`, `MobileGallery`, the concept's
   `MobileGalleryView`): in Tools on a phone the pages stand in one column in a Flickable, each in
