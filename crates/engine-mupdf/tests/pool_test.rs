@@ -522,9 +522,10 @@ fn abort_latency_on_a_heavy_tile() {
     let workers = worker_count();
 
     // Enough work queued that the cancel lands while the pool is deep in the batch: a few of the
-    // heavy fixture's tiles per worker (each is slow enough to still be running), a whole row per
-    // worker of the A0's sub-millisecond ones, which otherwise finish before the cancel is seen.
-    for (fixture, per_worker) in [("large_format_a0.pdf", 30), (HEAVY_FIXTURE, 4)] {
+    // heavy fixture's tiles per worker (each is slow enough to still be running), five rows per
+    // worker of the A0's sub-millisecond ones, which otherwise finish before the cancel is seen
+    // (one row per worker did on a fast CI runner, 2026-10-27). Never more than the page's grid.
+    for (fixture, per_worker) in [("large_format_a0.pdf", 150), (HEAVY_FIXTURE, 4)] {
         let mut serial = MupdfEngine::new();
         serial
             .open_document(&fixture_path(fixture), None)
@@ -543,7 +544,7 @@ fn abort_latency_on_a_heavy_tile() {
             .expect("serial tile");
         let tile_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-        let count = workers as i32 * per_worker;
+        let count = (workers as i32 * per_worker).min(geometry.cols() * geometry.rows());
         let aborted = batch(
             &handle,
             &rx,
