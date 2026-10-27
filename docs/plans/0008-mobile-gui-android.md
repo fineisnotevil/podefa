@@ -20,8 +20,8 @@ results"); the rest of Phase 2 is under way. By the maintainer's order the shell
   row MD passes for the system picker, saving in place and Save As, with Google Drive and another
   reader left to the maintainer; the desktop rows are unchanged.
 - The rest of Phase 2 (touch): pinch and double tap implemented (§5, "Phase 2, touch"); on the
-  phone the scripted pinch (row ME), the fling (MF) and idle (MG) pass; a pinch by hand is the
-  maintainer's; the double tap waits for the phone on USB. Phases 3 to 5: not started.
+  phone the scripted pinch (row ME), the fling (MF), idle (MG) and the double tap pass, and the
+  library suite (215 of 215); a pinch by hand is the maintainer's. Phases 3 to 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -360,9 +360,13 @@ ADR 0012 records the design.
 - **On the phone** (`docs/benchmarks.md` §14.4-14.5): the scripted pinch keeps every frame at
   2-4 ms with 0 tiles (one 48.7 ms frame in 24 pinches); 90 real flings through the 1000-page
   document leave no hole and PSS flat at 208-217 MiB; idle 0 frames.
+- **Double tap on the phone** (two `input tap` 114-121 ms apart, on the 1000-page document at
+  100%): the trace shows both taps as touches and the zoom going to 58.0% (fit width; the page
+  fills the width on the screenshot), and the next double tap back to 100%.
+- **Library suite on the phone** at `fb90872`: 215 of 215 tests in 26 executables pass
+  (`docs/backlog.md` item 9).
 - **Not yet:** a pinch by hand (the `adb` shell may not write the touch screen's input device:
-  SELinux), so row ME's last part is the maintainer's; the double tap on the phone (the phone left
-  USB before the APK with the Rust double tap was tried). `--bench-ink`'s commit check fails also
+  SELinux), so row ME's last part is the maintainer's. `--bench-ink`'s commit check fails also
   before this phase (backlog item 24).
 
 ### Phase 2, interface part: results (2026-10-26)

@@ -393,8 +393,11 @@ crates (below); the app crate has not been built for either:
   - The libc++ link is part of the build: `crates/engine-mupdf/build.rs` (its test binaries) and
     `crates/android/build.rs` (the app's library) add `-lc++_static -lc++abi` at the end of the
     link line. A `rustc-link-lib` line does not work: it lands before MuPDF's archives. With it
-    the 26 test executables of `pdf-core` and `engine-mupdf` link without `RUSTFLAGS`; they were
-    not run on the phone this time (it was off USB).
+    the 26 test executables of `pdf-core` and `engine-mupdf` link without `RUSTFLAGS`.
+  - **Run on the same phone, 2026-10-27, at `fb90872` (Plan 0008 Phase 2): 215 of 215 tests pass**
+    in 26 test executables, the same method (built in 8 min on the mini PC). New since the last
+    run: `form_test` 14, `undo_test` 7, `ink_test` 3, `note_test` 3, `shared_pool_test` 1, and
+    `pdf_core` at 122. The 11 ignored measurement tests were not run.
   - The environment is in `scripts/android-build.sh` (the NDK's libclang and sysroot for bindgen,
     the LLVM tools for the symbol rename) and in CI's `android` job.
   - Still open: a supported way upstream in mupdf-sys (a symbol prefix for its bundled
