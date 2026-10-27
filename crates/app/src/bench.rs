@@ -848,6 +848,8 @@ pub struct Trace {
     /// `ink_rebuild_ms` samples as `(points in the stroke, microseconds)`, and the last stroke
     /// the app committed, simplified (row V).
     ink_rebuild_us: Vec<(usize, u128)>,
+    /// Where the stroke being drawn starts in `ink_rebuild_us`.
+    stroke_from: usize,
     last_ink: Option<Vec<(f32, f32)>>,
     /// When the opening view was first fully covered, in ms from the process start
     /// (`t_first_page`, benchmarks §13.1).
@@ -894,6 +896,7 @@ impl Trace {
             edit_requests: None,
             edit_ws: Vec::new(),
             ink_rebuild_us: Vec::new(),
+            stroke_from: 0,
             last_ink: None,
             restructure_started: None,
             restructure_ms: Vec::new(),
@@ -1358,6 +1361,33 @@ impl Trace {
         self.print(format_args!(
             "pointer t={t}ms kind={kind} x={x:.0} y={y:.0} touch={touch}"
         ));
+    }
+
+    /// An ink stroke began (`None`) or ended with this many points: the frames between the two
+    /// are timed (§14.6, row MJ), with the longest rebuild of the live stroke.
+    pub fn stroke(&mut self, points: Option<usize>) {
+        if !self.on || self.quiet {
+            return;
+        }
+        let t = self.t_ms();
+        match points {
+            None => {
+                frame_window_reset();
+                self.stroke_from = self.ink_rebuild_us.len();
+                self.print(format_args!("ink started t={t}ms"));
+            }
+            Some(points) => {
+                let window = frame_window();
+                let rebuild_max = self
+                    .ink_rebuild_us
+                    .get(self.stroke_from..)
+                    .and_then(|rebuilds| rebuilds.iter().map(|(_, us)| *us).max())
+                    .unwrap_or(0);
+                self.print(format_args!(
+                    "ink ended t={t}ms points={points} rebuild_max_us={rebuild_max} {window}"
+                ));
+            }
+        }
     }
 
     /// A pinch began (`phase` 0) at `milli`, or ended (2) and zoomed to it. The frames between the

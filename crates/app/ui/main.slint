@@ -41,6 +41,8 @@ export component MainWindow inherits Window {
     // The mobile shell (Plan 0008) instead of the desktop's islands: on a phone, and on the
     // desktop with `--mobile`, in a phone-sized window.
     in property <bool> mobile: false;
+    // A field's options: 44 px rows on a phone (Plan 0008 row MH). Rust places the list by it.
+    out property <length> choice-row-h: root.mobile ? 44px : 24px;
     min-width: root.mobile ? 320px : 640px;
     min-height: root.mobile ? 480px : 660px;
     preferred-width: root.mobile ? 384px : 900px;
@@ -62,12 +64,17 @@ export component MainWindow inherits Window {
     out property <length> doc-inset-top: root.canvas-top;
     out property <length> doc-inset-left: root.mobile ? 6px : root.canvas-left;
     out property <length> doc-inset-right: root.mobile ? 6px : root.inset;
-    out property <length> doc-inset-bottom: root.mobile ? root.height - mshell.dock-top + root.island-gap
+    // On a phone the last page can scroll up above the on-screen keyboard too (row MI).
+    out property <length> doc-inset-bottom: root.mobile ? root.height - min(mshell.dock-top, mshell.keyboard-top) + root.island-gap
         : root.inset + status.height + root.island-gap;
     changed doc-inset-top => { root.insets_changed(); }
     changed doc-inset-left => { root.insets_changed(); }
     changed doc-inset-right => { root.insets_changed(); }
     changed doc-inset-bottom => { root.insets_changed(); }
+    // The lowest window y an editor on the page may reach: above the mobile shell's dock, edit
+    // strip and palette, and the on-screen keyboard (Plan 0008 row MI).
+    out property <length> edit-floor: root.mobile ? mshell.floor : root.height;
+    changed edit-floor => { root.edit_floor_changed(); }
     // The scroll bar's track: the window's right edge between the title row and the status island.
     out property <length> sb-track-h: root.view-h - root.doc-inset-top - root.doc-inset-bottom;
 
@@ -416,6 +423,7 @@ export component MainWindow inherits Window {
     callback open_drop(data-transfer);
     // The mode changed (Rust waits for the motion to end before it draws anything new).
     callback mode_changed();
+    callback edit_floor_changed();
     // The gallery: it scrolled; a page was ticked, double-clicked (back to Read on it), or one
     // of its actions or a gap's was pressed; pages were dropped in a gap; the chosen pages' bar.
     // A click on a page is a thumbnail's click (`thumb_clicked`).
@@ -521,9 +529,10 @@ export component MainWindow inherits Window {
                                 content-x <=> root.scroll-x;
                                 content-y <=> root.scroll-y;
                                 // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
-                                // except while a long press is selecting or the Ink tool draws.
+                                // except while a long press is selecting (or moving a note) or the Ink
+                                // or Crop tool draws.
                                 mouse-drag-pan-enabled: false;
-                                interactive: !root.touch-selecting && root.tool != 6;
+                                interactive: !root.touch-selecting && root.tool != 6 && root.tool != 7;
 
                                 // These fire on every change, user or programmatic, including each tick of
                                 // the 180 ms wheel animation, which makes them the viewport source of truth.
@@ -809,7 +818,7 @@ export component MainWindow inherits Window {
                         x: root.field-choices-x;
                         y: root.field-choices-y;
                         width: root.field-choices-w;
-                        height: min(8, root.field-choices.length) * 24px + 4px;
+                        height: min(8, root.field-choices.length) * root.choice-row-h + 4px;
                         init => {
                             if (!root.field-editor-visible) {
                                 self.focus();
@@ -867,7 +876,7 @@ export component MainWindow inherits Window {
                                 for label[index] in root.field-choices : Rectangle {
                                     property <bool> chosen: root.field-choices-multi
                                         ? root.field-choice-marks[index] : index == root.field-choice-selected;
-                                    height: 24px;
+                                    height: root.choice-row-h;
                                     background: self.chosen ? Theme.selection : transparent;
                                     // In a multi-select list the keyboard's place is outlined.
                                     border-width: root.field-choices-multi && index == root.field-choice-selected ? 1px : 0px;
@@ -930,7 +939,8 @@ export component MainWindow inherits Window {
                                     spacing: 6px;
                                     height: 28px;
                                     Text {
-                                        text: "Ctrl+Enter";
+                                        // A phone's keyboard has no Ctrl.
+                                        text: root.mobile ? "" : "Ctrl+Enter";
                                         color: Theme.text;
                                         opacity: 0.6;
                                         font-size: 11px;
@@ -1472,9 +1482,12 @@ export component MainWindow inherits Window {
                     }
 
 
-                    // The selected annotation's colours and Delete, over its top edge.
-                    if root.has-annot-selection && root.annot-sel-rects.length > 0 && root.tool != 6 : Island {
+                    // The selected annotation's colours and Delete, over its top edge; on a phone,
+                    // 44 px targets (Plan 0008 row MH).
+                    if root.has-annot-selection && root.annot-sel-rects.length > 0 && root.tool != 6 : annot-bar := Island {
                         property <HitView> first: root.annot-sel-rects[0];
+                        property <length> swatch: root.mobile ? 30px : 18px;
+                        property <length> target: root.mobile ? 44px : 18px;
                         width: self.preferred-width;
                         height: self.preferred-height;
                         x: max(4px, min(canvas.width - self.width - 16px, self.first.x + root.scroll-x));
@@ -1485,22 +1498,23 @@ export component MainWindow inherits Window {
                             padding: 4px;
                             padding-left: 8px;
                             spacing: 6px;
-                            for swatch[index] in root.swatches : VerticalLayout {
-                                alignment: center;
+                            for swatch[index] in root.swatches : Rectangle {
+                                width: annot-bar.target;
+                                height: annot-bar.target;
                                 Rectangle {
-                                    width: 18px;
-                                    height: 18px;
-                                    border-radius: 4px;
+                                    width: annot-bar.swatch;
+                                    height: annot-bar.swatch;
+                                    border-radius: root.mobile ? self.width / 2 : 4px;
                                     background: swatch;
                                     border-width: index == root.colour-index ? 2px : 1px;
                                     border-color: index == root.colour-index ? Theme.text : Theme.line-strong;
-                                    TouchArea { clicked => { root.choose_colour(index); } }
                                 }
+                                TouchArea { clicked => { root.choose_colour(index); } }
                             }
                             Rectangle { width: 1px; background: Theme.line-strong; }
                             IconButton {
-                                width: 28px;
-                                height: 28px;
+                                width: root.mobile ? 44px : 28px;
+                                height: root.mobile ? 44px : 28px;
                                 icon: @image-url("icons/trash-2.svg");
                                 icon-size: 14px;
                                 tip: "Delete (Delete)";
@@ -1510,8 +1524,10 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Reset Field, beside the field with the keyboard focus (concept step 37).
-                    if root.editable && root.has-field-focus && (root.field-focus-visible || root.field-editor-visible) : IconButton {
+                    // Reset Field, beside the field with the keyboard focus (concept step 37). Not on a
+                    // phone: a 44 px button there covers the next field; the edit strip's Form card
+                    // has Reset Field.
+                    if !root.mobile && root.editable && root.has-field-focus && (root.field-focus-visible || root.field-editor-visible) : IconButton {
                         property <bool> over-editor: root.field-editor-visible;
                         x: (self.over-editor ? root.field-editor-x + root.field-editor-w : root.field-focus-x + root.field-focus-w) + 6px;
                         y: self.over-editor ? root.field-editor-y : root.field-focus-y;
@@ -1807,6 +1823,24 @@ export component MainWindow inherits Window {
             safe-top: root.safe-area-insets.top;
             safe-bottom: root.safe-area-insets.bottom;
             keyboard-top: root.virtual-keyboard-size.height > 0 ? root.virtual-keyboard-position.y : root.height;
+            tool: root.tool;
+            colour-index: root.colour-index;
+            swatches: root.swatches;
+            ink-width-index: root.ink-width-index;
+            form-fields: root.form-fields;
+            field-highlight: root.field-highlight;
+            has-field-focus: root.has-field-focus;
+            choose-tool(tool) => { root.choose_tool(tool); }
+            choose-colour(index) => { root.choose_colour(index); }
+            choose-ink-width(index) => { root.choose_ink_width(index); }
+            crop-tool => { root.crop_tool(); }
+            page-op(op) => { root.page_op(op); }
+            toggle-field-highlight => { root.toggle_field_highlight(); }
+            reset-field => { root.reset_field(); }
+            reset-form => { root.reset_form(); }
+            import-form-data => { root.import_form_data(); }
+            export-form-data => { root.export_form_data(); }
+            flatten-form => { root.flatten_form(); }
             sheet-changed(open, tab) => {
                 if (tab <= 1 && root.sidebar-tab != tab) {
                     root.sidebar-tab = tab;

@@ -101,6 +101,10 @@ const MODE_TOOLS: i32 = 2;
 
 /// How long a finger must rest before a touch starts a selection instead of a pan.
 const LONG_PRESS_MS: u64 = 500;
+/// An editor on the page keeps this far above the on-screen keyboard and the bottom islands.
+const EDITOR_FLOOR_GAP_LOGICAL_PX: f32 = 8.0;
+/// The note editor's height (`main.slint`).
+const NOTE_EDITOR_H_LOGICAL_PX: f32 = 170.0;
 /// A second tap this soon after the first, this close to it, is a double tap.
 const DOUBLE_TAP_MS: u128 = 300;
 const DOUBLE_TAP_SLOP_LOGICAL_PX: f32 = 24.0;
@@ -357,6 +361,8 @@ struct AppState {
     last_double: Option<Instant>,
     /// A touch that may become a long press: where it went down.
     touch_down: Option<(f32, f32)>,
+    /// Whether the last press was a finger: a finger has no hover, so its moves show no tips.
+    touch_input: bool,
     long_press: slint::Timer,
     /// A pinch being made (Plan 0008 Phase 2): the zoom it started from and the viewport point
     /// the pages scale around.
@@ -513,6 +519,7 @@ impl AppState {
             sel_pressed: false,
             last_double: None,
             touch_down: None,
+            touch_input: false,
             long_press: slint::Timer::default(),
             pinch: None,
             tap_back: None,
@@ -1003,7 +1010,7 @@ impl AppState {
 
     /// The pointer moved without a button: show the text cursor only over text.
     fn hover(&mut self, ui: &MainWindow, x: f32, y: f32) {
-        if self.sel_pressed || self.touch_selecting {
+        if self.sel_pressed || self.touch_selecting || self.touch_input {
             return;
         }
         let point = self.page_point(ui, x, y);
@@ -1075,6 +1082,7 @@ impl AppState {
         ui.set_note_hover_visible(false);
         ui.set_note_editor_visible(true);
         self.note_edit = Some((page, target));
+        self.keep_editor_above_floor(ui);
     }
 
     /// Save in the note editor: a new note with text is placed, an existing one gets its new text;
@@ -1133,13 +1141,21 @@ impl AppState {
         if kind != 2 {
             self.bench.pointer(kind, x, y, touch);
         }
+        if kind == 0 {
+            self.touch_input = touch;
+            // The move that brought the finger down may have shown a tip.
+            if touch && ui.get_note_hover_visible() {
+                ui.set_note_hover_visible(false);
+            }
+        }
         if self.tool == Tool::Crop && self.editable {
             self.crop_pointer(ui, kind, x, y);
             return;
         }
         let point = self.page_point(ui, x, y);
         // A press on a form field fills it (Plan 0006); any press commits an open field editor.
-        if kind == 0 && !shift && self.field_pressed(ui, point) {
+        // A finger fills it on a tap instead, so a pan that starts on a field only pans.
+        if kind == 0 && !shift && !touch && self.field_pressed(ui, point) {
             return;
         }
         // The Ink tool draws with the mouse, a pen and a finger alike (Plan 0004, §4.2).
@@ -1150,6 +1166,7 @@ impl AppState {
                         self.clear_selection(ui);
                         self.select_annotation(ui, None);
                         self.ink = Some((point.page, Vec::new()));
+                        self.bench.stroke(None);
                         self.ink_point(ui, x, y);
                     }
                 }
@@ -1180,18 +1197,7 @@ impl AppState {
                 let extend = shift && self.sel_anchor.is_some();
                 // The Note tool places a note where it is pressed, or opens the one pressed on.
                 if self.tool == Tool::Note && self.editable {
-                    self.clear_selection(ui);
-                    let target = match self.note_at(point) {
-                        Some(note) => NoteTarget::Existing(note.id),
-                        None => {
-                            let (w, h) = self
-                                .page_sizes
-                                .get(point.page as usize)
-                                .map_or((f32::MAX, f32::MAX), |size| (size.width, size.height));
-                            NoteTarget::New(note_rect(point.x, point.y, w, h))
-                        }
-                    };
-                    self.open_note_editor(ui, point.page, target);
+                    self.place_note(ui, point);
                     return;
                 }
                 // An annotation under the press is selected if the button comes up without a drag
@@ -1323,15 +1329,20 @@ impl AppState {
             }
             // Up or cancel.
             _ => {
-                let was_selecting = self.sel_pressed || self.touch_selecting;
+                // A finger moving a note is not selecting text.
+                let was_selecting =
+                    (self.sel_pressed || self.touch_selecting) && self.note_drag.is_none();
                 // A finger that came up before the long press and without panning is a tap: like a
                 // click, it clears the selection; a second one soon after, near it, zooms
                 // (Plan 0008 Phase 2). Slint 1.18 counts no double-click for touch: a lifted
                 // finger also sends `Exit`, which resets its click count
                 // (`i-slint-core-1.18.1/input.rs:2400-2410`, `window.rs:1087-1090`).
-                if kind == 1 && touch && self.touch_down.is_some() && !self.touch_selecting {
-                    self.clear_selection(ui);
-                    self.select_annotation(ui, None);
+                if kind == 1
+                    && touch
+                    && self.touch_down.is_some()
+                    && !self.touch_selecting
+                    && !self.touch_tap(ui, point)
+                {
                     let double = self.last_tap.is_some_and(|(at, tx, ty)| {
                         at.elapsed().as_millis() < DOUBLE_TAP_MS
                             && (x - tx).abs() <= DOUBLE_TAP_SLOP_LOGICAL_PX
@@ -1343,6 +1354,8 @@ impl AppState {
                     } else {
                         self.last_tap = Some((Instant::now(), x, y));
                     }
+                } else if kind == 1 && touch {
+                    self.last_tap = None;
                 }
                 if let Some(drag) = self.note_drag.take() {
                     match drag.rect {
@@ -1376,6 +1389,93 @@ impl AppState {
                     self.touch_selecting = false;
                     ui.set_touch_selecting(false);
                 }
+            }
+        }
+    }
+
+    /// A finger's tap does what a click does (Plan 0008 Phase 3): it fills a form field, places
+    /// or opens a note with the Note tool, or selects the annotation under it (a second tap on a
+    /// selected note opens it, as a double-click does: a finger's double tap zooms). Anywhere
+    /// else it clears the selection and returns false, so it may be the first of a double tap.
+    fn touch_tap(&mut self, ui: &MainWindow, point: Option<PagePoint>) -> bool {
+        if self.field_pressed(ui, point) {
+            return true;
+        }
+        if let Some(point) = point {
+            if self.tool == Tool::Note && self.editable {
+                self.place_note(ui, point);
+                return true;
+            }
+            if let Some(annot) = self.annot_at(point) {
+                self.clear_selection(ui);
+                if self.selected_annot == Some(annot) && self.note_at(point).is_some() {
+                    self.open_note_editor(ui, annot.0, NoteTarget::Existing(annot.1));
+                } else {
+                    self.select_annotation(ui, Some(annot));
+                }
+                return true;
+            }
+        }
+        self.clear_selection(ui);
+        self.select_annotation(ui, None);
+        false
+    }
+
+    /// The Note tool at a page point: opens the note there, or a new one.
+    fn place_note(&mut self, ui: &MainWindow, point: PagePoint) {
+        self.clear_selection(ui);
+        let target = match self.note_at(point) {
+            Some(note) => NoteTarget::Existing(note.id),
+            None => {
+                let (w, h) = self
+                    .page_sizes
+                    .get(point.page as usize)
+                    .map_or((f32::MAX, f32::MAX), |size| (size.width, size.height));
+                NoteTarget::New(note_rect(point.x, point.y, w, h))
+            }
+        };
+        self.open_note_editor(ui, point.page, target);
+    }
+
+    /// The lowest viewport y an editor on the page may reach: the view's bottom, or on a phone
+    /// the top of the on-screen keyboard or of the shell's bottom islands (Plan 0008 row MI).
+    pub(crate) fn editor_floor(ui: &MainWindow) -> f32 {
+        let floor = ui.get_edit_floor() - ui.get_viewport_abs_y() - EDITOR_FLOOR_GAP_LOGICAL_PX;
+        floor.min(ui.get_view_h())
+    }
+
+    /// Keeps an open field or note editor between the header and the floor (row MI). A field's
+    /// editor moves with its page, so the document scrolls under it, keeping the field's top in
+    /// view first; the note editor stays put in the view, so it moves itself.
+    pub(crate) fn keep_editor_above_floor(&mut self, ui: &MainWindow) {
+        let floor = Self::editor_floor(ui);
+        let top = ui.get_doc_inset_top() - ui.get_viewport_abs_y();
+        if self.field_edit.is_some() {
+            let y = ui.get_field_editor_y();
+            let mut bottom = y + ui.get_field_editor_h();
+            if ui.get_field_choices_visible() && ui.get_field_choices_y() > y {
+                let rows = ui.get_field_choices().row_count().min(8) as f32;
+                bottom += rows * ui.get_choice_row_h() + 4.0;
+            }
+            // Under the floor: up, but not past the header; under the header: down, as far as
+            // the floor allows.
+            let shift = if bottom > floor {
+                (bottom - floor).min(y - top)
+            } else if y < top {
+                (y - top).max(bottom - floor)
+            } else {
+                0.0
+            };
+            if shift != 0.0 {
+                self.scroll_to(ui, (self.pos.0, self.pos.1 + shift as f64 * self.sf()));
+                self.place_field_editor(ui);
+            }
+        }
+        if self.note_edit.is_some() {
+            let y = ui.get_note_editor_y();
+            let lifted = (floor - NOTE_EDITOR_H_LOGICAL_PX).min(y).max(top.max(0.0));
+            if lifted != y {
+                ui.set_note_editor_y(lifted);
             }
         }
     }
@@ -1459,6 +1559,7 @@ impl AppState {
         let Some((page, points)) = self.ink.take() else {
             return;
         };
+        self.bench.stroke(Some(points.len()));
         if !commit || points.is_empty() {
             ui.set_ink_commands(SharedString::new());
             return;
@@ -1490,6 +1591,25 @@ impl AppState {
     /// A finger rested long enough: select the word under it and let the finger extend it.
     fn long_press(&mut self, ui: &MainWindow, x: f32, y: f32) {
         if self.touch_down.is_none() {
+            return;
+        }
+        // A long press on a note picks it up, and the finger moves it (Plan 0008 Phase 3).
+        if self.editable
+            && let Some(point) = self.page_point(ui, x, y)
+            && let Some((id, rect)) = self.note_at(point).map(|note| (note.id, note.rect))
+        {
+            self.note_drag = Some(NoteDrag {
+                page: point.page,
+                id,
+                grab: (point.x - rect.x, point.y - rect.y),
+                rect: None,
+            });
+            let annot = Some((point.page, id));
+            self.press_at = (x, y);
+            self.touch_selecting = true;
+            ui.set_touch_selecting(true);
+            self.clear_selection(ui);
+            self.select_annotation(ui, annot);
             return;
         }
         let Some(point) = self.page_point(ui, x, y).filter(|p| self.on_text(Some(*p))) else {
@@ -4252,6 +4372,12 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
         main_window.on_insets_changed(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.insets_changed(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_edit_floor_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.keep_editor_above_floor(&ui));
             }
         });
     }

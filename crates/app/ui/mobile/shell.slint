@@ -22,18 +22,33 @@ component TouchButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <length> icon-size: 20px;
     in property <color> tint: Theme.text-muted;
+    // A tool's own fill and icon colour when chosen, as the desktop's Edit commands have them.
+    in property <color> checked-fill: Theme.text;
+    in property <color> checked-tint: Theme.surface;
+    // The chosen colour, as a dot in the corner (transparent: none).
+    in property <color> dot: transparent;
     callback clicked();
     width: 44px;
     height: 44px;
     border-radius: 12px;
-    background: root.checked ? Theme.text : touch.pressed && root.enabled ? Theme.active : transparent;
+    background: root.checked ? root.checked-fill : touch.pressed && root.enabled ? Theme.active : transparent;
     animate background { duration: 120ms; }
     Image {
         source: root.icon;
         width: root.icon-size;
         height: root.icon-size;
-        colorize: root.checked ? Theme.surface : root.tint;
+        colorize: root.checked ? root.checked-tint : root.tint;
         opacity: root.enabled ? 1.0 : 0.3;
+    }
+    if root.dot != transparent : Rectangle {
+        x: parent.width - self.width - 6px;
+        y: parent.height - self.height - 6px;
+        width: 9px;
+        height: 9px;
+        border-radius: 4.5px;
+        background: root.dot;
+        border-width: 1px;
+        border-color: Theme.surface;
     }
     touch := TouchArea {
         enabled: root.enabled;
@@ -118,6 +133,31 @@ component Segment inherits Rectangle {
     TouchArea { clicked => { root.clicked(); } }
 }
 
+// A colour in the Edit palette: a 28 px disc in a 44 px target, ringed when chosen.
+component SwatchButton inherits Rectangle {
+    in property <color> colour;
+    in property <bool> chosen;
+    callback clicked();
+    width: 44px;
+    height: 44px;
+    Rectangle {
+        width: 28px;
+        height: 28px;
+        border-radius: 14px;
+        background: root.colour;
+        border-width: root.chosen ? 2px : 1px;
+        border-color: root.chosen ? Theme.text : Theme.line-strong;
+    }
+    if root.chosen : Rectangle {
+        width: 36px;
+        height: 36px;
+        border-radius: 18px;
+        border-width: 2px;
+        border-color: Theme.text;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
 // A dimmed layer over everything under a menu or the sheet; a tap on it closes them.
 component Scrim inherits Rectangle {
     callback dismissed();
@@ -154,10 +194,22 @@ export component MobileShell inherits Rectangle {
     in property <length> safe-top;
     in property <length> safe-bottom;
     in property <length> keyboard-top;
+    // Edit (Plan 0008 Phase 3): the tool (0 select, 1-4 markup, 5 note, 6 ink, 7 crop), the
+    // colour and ink width chosen, and whether the document has form fields.
+    in property <int> tool;
+    in property <int> colour-index;
+    in property <[color]> swatches;
+    in property <int> ink-width-index;
+    in property <bool> form-fields;
+    in property <bool> field-highlight;
+    in property <bool> has-field-focus;
 
     // Where the header ends and the dock begins, for the document's insets.
     out property <length> header-bottom: header.y + header.height;
     out property <length> dock-top: dock.y;
+    // The top of what floats over the bottom of the document: the dock, the edit strip, its
+    // palette, or the on-screen keyboard. An editor on the page is kept above it (row MI).
+    out property <length> floor: min(root.keyboard-top, root.stack-top);
     // While the go-to-page card is open, Rust leaves its text alone.
     out property <bool> page-field-focused: root.card == 1;
 
@@ -191,15 +243,50 @@ export component MobileShell inherits Rectangle {
     callback thumbs-moved();
     callback outline-clicked(int);
     callback outline-toggled(int);
+    callback choose-tool(int);
+    callback choose-colour(int);
+    callback choose-ink-width(int);
+    callback crop-tool();
+    callback page-op(int);
+    callback toggle-field-highlight();
+    callback reset-field();
+    callback reset-form();
+    callback import-form-data();
+    callback export-form-data();
+    callback flatten-form();
 
     property <length> edge: 8px;
     property <bool> docs-menu: false;
     property <bool> more-menu: false;
-    // The card over the dock: 0 none, 1 go to page, 2 zoom.
+    // The card over the dock: 0 none, 1 go to page, 2 zoom, 3 the form.
     property <int> card: 0;
     property <bool> sheet-open: false;
     property <int> sheet-tab: 0;
     property <bool> has-doc: root.total-pages > 0;
+    property <bool> can-edit: root.editable && root.has-doc;
+    // The edit strip over the dock in Edit, and the chosen tool's palette over the strip.
+    property <bool> strip-shown: root.mode == 1 && root.has-doc;
+    property <length> strip-y: dock.y - root.edge - 56px;
+    property <bool> palette-shown: root.strip-shown && root.can-edit
+        && ((root.tool >= 1 && root.tool <= 4) || root.tool == 6);
+    property <length> palette-h: root.tool == 6 ? 104px : 56px;
+    property <length> palette-y: root.strip-y - root.edge - root.palette-h;
+    property <length> stack-top: root.palette-shown ? root.palette-y
+        : root.strip-shown ? root.strip-y : dock.y;
+
+    function set-mode(mode: int) {
+        // Leaving Edit puts the tool back to Select, as the desktop's mode buttons do.
+        if (mode != 1 && root.tool != 0) {
+            root.choose-tool(0);
+        }
+        if (root.card == 3) {
+            root.card = 0;
+        }
+        root.mode = mode;
+    }
+    function pick(tool: int) {
+        root.choose-tool(root.tool == tool ? 0 : tool);
+    }
 
     function open-sheet(tab: int) {
         root.docs-menu = false;
@@ -483,21 +570,21 @@ export component MobileShell inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     icon: @image-url("../icons/book-open.svg");
                     checked: root.mode == 0;
-                    clicked => { root.mode = 0; }
+                    clicked => { root.set-mode(0); }
                 }
                 TouchButton {
                     y: (parent.height - self.height) / 2;
                     icon: @image-url("../icons/pen-tool.svg");
                     checked: root.mode == 1;
                     enabled: root.has-doc;
-                    clicked => { root.mode = 1; }
+                    clicked => { root.set-mode(1); }
                 }
                 TouchButton {
                     y: (parent.height - self.height) / 2;
                     icon: @image-url("../icons/layout-grid.svg");
                     checked: root.mode == 2;
                     enabled: root.has-doc;
-                    clicked => { root.mode = 2; }
+                    clicked => { root.set-mode(2); }
                 }
             }
         }
@@ -524,12 +611,237 @@ export component MobileShell inherits Rectangle {
         }
     }
 
+    // The edit strip (the concept's `MobileEditorToolbar`): the tools, rotation and the form,
+    // in a row that scrolls sideways when the phone is narrower than it.
+    if root.strip-shown : Island {
+        x: root.edge;
+        y: root.strip-y;
+        width: root.width - 2 * root.edge;
+        height: 56px;
+        border-radius: 16px;
+        clip: true;
+        Flickable {
+            x: 4px;
+            width: parent.width - 8px;
+            content-width: max(self.width, tools.preferred-width);
+            content-height: self.height;
+            tools := HorizontalLayout {
+                width: self.preferred-width;
+                height: 56px;
+                spacing: 2px;
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/mouse-pointer-2.svg");
+                    checked: root.tool == 0;
+                    clicked => { root.choose-tool(0); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/highlighter.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 1;
+                    checked-fill: Theme.highlight-fill;
+                    checked-tint: Theme.highlight-ink;
+                    dot: root.tool == 1 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(1); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/underline.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 2;
+                    dot: root.tool == 2 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(2); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/strikethrough.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 3;
+                    checked-fill: Theme.strike-fill;
+                    checked-tint: Theme.strike-ink;
+                    dot: root.tool == 3 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(3); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/spell-check-2.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 4;
+                    dot: root.tool == 4 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(4); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/pen-tool.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 6;
+                    checked-fill: Theme.ink-fill;
+                    checked-tint: #ffffff;
+                    dot: root.tool == 6 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(6); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/sticky-note.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 5;
+                    clicked => { root.pick(5); }
+                }
+                Rectangle {
+                    width: 9px;
+                    Rectangle {
+                        width: 1px;
+                        height: 24px;
+                        background: Theme.line-strong;
+                    }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/crop.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 7;
+                    clicked => { root.crop-tool(); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/rotate-ccw.svg");
+                    enabled: root.can-edit;
+                    clicked => { root.page-op(0); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/rotate-cw.svg");
+                    enabled: root.can-edit;
+                    clicked => { root.page-op(1); }
+                }
+                if root.form-fields : Rectangle {
+                    width: 9px;
+                    Rectangle {
+                        width: 1px;
+                        height: 24px;
+                        background: Theme.line-strong;
+                    }
+                }
+                if root.form-fields : TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/text-cursor-input.svg");
+                    checked: root.field-highlight;
+                    clicked => { root.toggle-field-highlight(); }
+                }
+                if root.form-fields : TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/clipboard-list.svg");
+                    checked: root.card == 3;
+                    clicked => { root.card = root.card == 3 ? 0 : 3; }
+                }
+            }
+        }
+    }
+
+    // The chosen tool's palette, over the strip: the colours, and the Ink tool's line widths.
+    if root.palette-shown : Island {
+        x: root.edge;
+        y: root.palette-y;
+        width: root.width - 2 * root.edge;
+        height: root.palette-h;
+        border-radius: 16px;
+        VerticalLayout {
+            padding-top: 6px;
+            padding-bottom: 6px;
+            HorizontalLayout {
+                alignment: center;
+                for swatch[index] in root.swatches : SwatchButton {
+                    colour: swatch;
+                    chosen: index == root.colour-index;
+                    clicked => { root.choose-colour(index); }
+                }
+            }
+            if root.tool == 6 : HorizontalLayout {
+                alignment: center;
+                spacing: 8px;
+                for line[index] in [1px, 2px, 4px] : Rectangle {
+                    width: 72px;
+                    height: 44px;
+                    border-radius: 12px;
+                    background: index == root.ink-width-index ? Theme.active : width-touch.pressed ? Theme.hover : transparent;
+                    border-width: index == root.ink-width-index ? 1px : 0px;
+                    border-color: Theme.line-strong;
+                    Rectangle {
+                        width: 32px;
+                        height: line * 1.5;
+                        border-radius: line;
+                        background: Theme.text;
+                    }
+                    width-touch := TouchArea { clicked => { root.choose-ink-width(index); } }
+                }
+            }
+        }
+    }
+
+    // The form: Reset Field and Reset Form, its data, and Flatten (the desktop's form menu).
+    if root.card == 3 && root.strip-shown : Island {
+        x: root.edge;
+        width: root.width - 2 * root.edge;
+        height: form-list.preferred-height;
+        y: root.stack-top - root.edge - self.height;
+        border-radius: 16px;
+        form-list := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            SheetRow {
+                icon: @image-url("../icons/eraser.svg");
+                label: "Reset Field";
+                enabled: root.editable && root.has-field-focus;
+                clicked => {
+                    root.card = 0;
+                    root.reset-field();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/eraser.svg");
+                label: "Reset Form";
+                enabled: root.editable;
+                clicked => {
+                    root.card = 0;
+                    root.reset-form();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/file-input.svg");
+                label: "Import Data...";
+                enabled: root.editable;
+                clicked => {
+                    root.card = 0;
+                    root.import-form-data();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/file-output.svg");
+                label: "Export Data...";
+                clicked => {
+                    root.card = 0;
+                    root.export-form-data();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/layers.svg");
+                label: "Flatten Form";
+                enabled: root.editable;
+                clicked => {
+                    root.card = 0;
+                    root.flatten-form();
+                }
+            }
+        }
+    }
+
     // Go to a page: over the dock, and over the on-screen keyboard while it shows.
     if root.card == 1 : Island {
         x: root.edge;
         width: root.width - 2 * root.edge;
         height: 60px;
-        y: min(dock.y - root.edge, root.keyboard-top - root.edge) - self.height;
+        y: min(root.stack-top - root.edge, root.keyboard-top - root.edge) - self.height;
         border-radius: 16px;
         HorizontalLayout {
             padding-left: 14px;
@@ -575,7 +887,7 @@ export component MobileShell inherits Rectangle {
         x: root.edge;
         width: root.width - 2 * root.edge;
         height: 112px;
-        y: dock.y - root.edge - self.height;
+        y: root.stack-top - root.edge - self.height;
         border-radius: 16px;
         VerticalLayout {
             padding: 6px;

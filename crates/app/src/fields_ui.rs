@@ -250,6 +250,7 @@ impl AppState {
             FieldKind::ComboBox | FieldKind::ListBox => self.open_field_choices(ui, page, field),
             _ => {}
         }
+        self.keep_editor_above_floor(ui);
     }
 
     fn fill_field(&mut self, page: u32, name: &str, value: String) {
@@ -578,8 +579,8 @@ impl AppState {
         ui.set_field_editor_font_size(editor_font_size(&edit.field) * k);
         // The options under the field, or above it when the view ends below.
         let rows = ui.get_field_choices().row_count().min(8) as f32;
-        let list_h = rows * 24.0 + 4.0;
-        let below = y + h + list_h <= ui.get_view_h();
+        let list_h = rows * ui.get_choice_row_h() + 4.0;
+        let below = y + h + list_h <= Self::editor_floor(ui);
         ui.set_field_choices_x(x);
         ui.set_field_choices_y(if below { y + h } else { (y - list_h).max(0.0) });
         ui.set_field_choices_w(w.max(120.0));
