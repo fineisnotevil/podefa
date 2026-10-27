@@ -1759,3 +1759,40 @@ per page, 2.4 MB) written for this run; PSS sampled once a second with `dumpsys 
 | MF | `--bench-scroll 10000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000` (Plan 0002 row B1 on the phone; scroll writes, not the Flickable's fling) | 376 pages visited, 0 hole frames while scrolling, `resident_max` 5 pages, 1 re-anchor; PSS 190-196 MiB from the 3rd second to the end (first 5 s against last 5 s of the scroll: flat). PASS |
 | MF | 90 real flings (`adb shell input swipe 540 1900 540 300 60`, back to back for 30 s, through the Flickable's own fling) | reached page 196; after 4 s still, the screen showed the page drawn with no hole (screenshot); PSS rose from 180 to 208 MiB in the first 10 s, then stayed between 208 and 217 MiB; peak 217.1 MiB. PASS (no holes after settle, memory flat after the first 10 s, under row MB's 250 MiB) |
 | MG | `large_200p.pdf --bench-idle 5` | 0 frames in 5014 ms; `t_first_page` 106 ms. PASS |
+
+### 14.6 Phase 3: edit on touch (rows MI, MJ)
+
+**Stroke frames (row MJ).** With a trace on (`FA_PDF_TRACE=1`, or any `--bench-*` run such as
+`--bench-idle 900` on the phone), each ink stroke prints `ink started` at the finger's press and
+`ink ended points=N rebuild_max_us=R frames=F frame_max=M frame_first=A gap_max=G` at its release:
+the frame window of §13 between the two, so `frame_max` is the slowest frame while the stroke was
+drawn and `gap_max` the longest time between two frames; `rebuild_max_us` is the slowest rebuild of
+the live stroke's path (`ink_rebuild_ms`, §10.2). A stroke passes when `frame_max` and `gap_max`
+stay inside 16.7 ms (60 Hz) and the stroke is one undo step.
+
+Phone (§14, the APK of this phase, 2026-10-27), the generated form of `form_test.rs`, the Ink
+tool chosen from the edit strip, strokes drawn with `adb shell input swipe x1 y1 x2 y2 D` (one
+finger, about 120 move events a second):
+
+| Stroke | Points | `frame_max` | `gap_max` | `rebuild_max_us` |
+| :--- | ---: | ---: | ---: | ---: |
+| 1 (2 s, the first stroke after start) | 238 | 30.4 ms | 36.5 ms | 2202 |
+| 2 (4 s) | 476 | 6.0 ms | 16.9 ms | 668 |
+| 3-7 (2 s each) | 239-240 | 4.0-5.0 ms | 14.1-17.9 ms | 95-134 |
+
+So a frame of a stroke takes 4-6 ms, one frame per touch event; the first stroke after the app
+starts pays once for 30.4 ms. `gap_max` follows the touch events (about 8 ms apart), with a few
+gaps of 17-18 ms. One Undo from the More menu removed exactly the last of five strokes
+(screenshots). Row MJ: PASS, with the first stroke's one slow frame noted.
+
+**Keyboard (row MI).** On the phone, with the Samsung keyboard (its top at 1454 of 2340 px):
+
+| Case | Result |
+| :--- | :--- |
+| The text field at the bottom of the view (under the keyboard's place) tapped | the document scrolled; the editor ends just above the keyboard; typed text shows in it. PASS |
+| A multi-line field scrolled under the header island, tapped | the document scrolled down; the editor starts under the header. PASS (after a fix: the first build only kept the bottom clear) |
+| The Note tool on a point under the keyboard's place | the note editor opened above the keyboard. PASS |
+| A combo box tapped | its options open over the page. Once the keyboard came up with them and took typed text that showed nowhere; once it did not. Left to the maintainer's typing by hand |
+
+While the keyboard slides in, each frame changes the document's bottom inset and lays it out
+again: 4-26 us each (`reanchor` lines), about 20 times.

@@ -773,3 +773,21 @@ little later. Row V's figures (`ink_rebuild_ms`) are not affected.
 Wait in step 1 until the edit's answer has arrived (as the pages bench waits on `rebuilds()`),
 with a timeout, instead of checking on the next tick.
 
+## 25. Android's Back key closes the app without the unsaved prompt
+
+**Labels:** `android`, `bug`
+
+### Problem Statement
+
+On the phone (Plan 0008 Phase 3), Back with no on-screen keyboard showing finishes the activity:
+an edited, unsaved document is lost without the unsaved prompt that closing a tab or the window
+asks on the desktop. Back does not close the bottom sheet, a card or an editor first either.
+
+### Proposed Solution
+
+Slint 1.18.1 dispatches Back to the window as `Key.Back` (pressed and released) and finishes the
+activity only when neither is accepted (`i-slint-backend-android-activity-1.18.1/javahelper.rs:788-810`).
+Accept it in the window: close the topmost of the sheet, the menus, the cards, the note or field
+editor, the search bar; else, with unsaved changes, ask as Close does; else leave it unaccepted so
+the app closes.
+

@@ -9,8 +9,8 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 **Phase 0 passed its gate on 2026-10-26; the maintainer approved the mobile shell (the interface
 part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27** (§5, "Phase 1:
-results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); Phase 3 (Edit on
-touch) is under way. By the maintainer's order the shell came before Phase 1's platform work
+results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); **Phase 3 (Edit on
+touch) is implemented and at its gate** (§5, "Phase 3: results"). By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -22,7 +22,10 @@ touch) is under way. By the maintainer's order the shell came before Phase 1's p
   reader left to the maintainer; the desktop rows are unchanged.
 - The rest of Phase 2 (touch): pinch and double tap implemented (§5, "Phase 2, touch"); on the
   phone the scripted pinch (row ME), the fling (MF), idle (MG) and the double tap pass, and the
-  library suite (215 of 215); a pinch by hand is the maintainer's. Phases 3 to 5: not started.
+  library suite (215 of 215); a pinch by hand is the maintainer's. Passed its gate on 2026-10-27.
+- Phase 3 (Edit on touch): implemented and at its gate (2026-10-27): the edit strip and palettes,
+  taps for fields, notes and annotations, a long press to move a note, editors kept above the
+  on-screen keyboard; rows MI and MJ pass on the phone. Phases 4 and 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -340,6 +343,67 @@ ADR 0012 records the design.
 - **Not done:** the Edit strip is Phase 3, so the ink tool was chosen with the `I` key over
   `adb`; the library suite on the phone (see §5's note) was built (26 test binaries link without
   `RUSTFLAGS`) but not run: the phone left USB before it could be pushed.
+
+### Phase 3: results (2026-10-27)
+
+- **The edit strip** (`crates/app/ui/mobile/shell.slint`, the concept's `MobileEditorToolbar`):
+  over the dock in Edit, one 56 px island whose row scrolls sideways: Select, Highlight,
+  Underline, Strike-out, Squiggly, Ink, Note, then Crop and Rotate Left and Right, then, when the
+  document has form fields, the field shading and a Form card (Reset Field, Reset Form, Import
+  Data, Export Data, Flatten Form: the desktop's form menu). Every button is 44 px; the tinted
+  fills are the desktop's (Theme `highlight-fill`, `strike-fill`, `ink-fill`), and the chosen
+  markup or ink tool carries a dot in its colour. Leaving Edit by the dock puts the tool back to
+  Select, as the desktop's mode buttons do. Squiggly and Crop are not in the concept's strip; they
+  are the desktop's Edit commands, and the strip scrolls, so nothing had to go.
+- **Palettes:** over the strip, the chosen markup tool's six colours (28 px discs in 44 px
+  targets), and for Ink the colours and the three widths. The selected annotation's bar
+  (colours and Delete) has 44 px targets on a phone, the go-to-page and zoom cards open over
+  the strip and palette.
+- **Taps** (`AppState::touch_tap`): a finger's tap does what a click does. It fills a form field
+  (on the tap, not on touch down, so a pan that starts on a field only pans), places or opens a
+  note with the Note tool, selects the annotation under it, and a second tap on a selected note
+  opens it (a finger's double tap zooms, so it cannot open a note as a double-click does).
+  Anywhere else it clears the selection and may be the first tap of a double tap.
+- **A long press on a note** picks it up and the finger moves it, one undo step (`MoveNote`), as
+  a mouse drag does. A long press on text still selects a word, and with a markup tool the
+  release marks it (Phase 2's path).
+- **Ink and Crop** draw with one finger: the Flickable does not pan while either tool is chosen.
+- **No hover on touch:** a finger's move shows no note or field tip (the tips stayed on screen
+  after the finger lifted); the floating Reset Field button beside a field is not shown on a
+  phone, where at 44 px it covered the next field (a tap on a radio button reset the field
+  beside it); field options are 44 px rows; the note editor shows no "Ctrl+Enter".
+- **Keyboard (row MI):** the shell's `floor` is the top of the on-screen keyboard or of the
+  dock, strip and palette, whichever is higher; `edit-floor` reaches Rust through a `changed`
+  callback. When a field editor opens and whenever the floor moves, `keep_editor_above_floor`
+  scrolls the document so the field's editor (and its options) end 8 px above the floor, but never
+  past the field's top, and a field under the header comes down below it; the note editor, which
+  does not follow the page, moves itself. The document's bottom inset includes the keyboard, so
+  the last field of a document can scroll above it too.
+- **`FA_PDF_TRACE` / bench:** each ink stroke logs its frames (`ink started`, `ink ended` with
+  points, the slowest rebuild of the live stroke and the frame window), for row MJ by hand
+  (`docs/benchmarks.md` §14.6).
+- **On the phone** (`docs/benchmarks.md` §14.6), the APK of this phase on the generated form of
+  `form_test.rs`: the strip and palettes show and choose; a text field at the bottom of the view
+  scrolls above the keyboard when tapped and takes typed text (row MI); a multi-line field under
+  the header comes down below it; the note editor opens above the keyboard; check box, radio
+  button and combo box fill on a tap; Save writes the file, and the values are there after a
+  restart; strokes follow the finger with frames of 4.0-6.0 ms (once 30.4 ms, the first stroke)
+  and one Undo removes one stroke (row MJ); a long press and drag highlights a word; a note is
+  placed, selected, opened, deleted and moved by touch.
+- **Desktop:** `--bench-forms` 35 of 35, `--bench-note` 5 of 5; `--bench-ink` 3 of 4 with backlog
+  item 24's known failure.
+- **Found, not fixed (needs the maintainer's word):** Android's Back key closes the app when no
+  text field has the keyboard, and an unsaved document is lost without the unsaved prompt. Slint
+  1.18.1 sends Back to the window as `Key.Back` and finishes the activity only when nothing
+  accepts it (`i-slint-backend-android-activity-1.18.1/javahelper.rs:788-810`), so the window can
+  close the sheet, cards and editors first and ask about unsaved changes (backlog item 25).
+- **Not checked by script:** typing with the phone's own keyboard. Through `adb shell input text`,
+  one run lost the word being composed when Enter was pressed in a single-line field, and a word
+  composed for a combo box that takes no text showed up in the next field's editor; with spaces
+  typed between words the text arrived whole. Both are the IME's composing text, which Slint
+  handles; the maintainer's typing by hand decides whether anything is wrong.
+- **Not explained:** one Save did not write the file (the header's Save, after a Reset Field by
+  mistake); two later saves did. Not reproduced.
 
 ### Phase 2, touch: progress (2026-10-27)
 

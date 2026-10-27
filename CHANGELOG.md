@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Editing by touch** (Plan 0008 Phase 3): in Edit, the phone shows an edit strip over the dock
+  with every Edit tool, rotation and the form's commands, and the chosen tool's colours and ink
+  widths over it. A tap fills a form field, places a note with the Note tool, selects an
+  annotation, and opens a selected note; a long press on a note moves it; Ink and Crop draw with
+  one finger. A field or note being edited moves above the on-screen keyboard and below the
+  header. Ink strokes log their frames in the bench trace.
 - **Pinch zoom and double tap** (Plan 0008 Phase 2): two fingers on a touch screen, or a pinch on
   a trackpad, zoom around the fingers; the pages follow them at once and sharpen when they lift. A
   double tap with a finger fits the page's width, and a second one goes back to the zoom before.
