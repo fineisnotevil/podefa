@@ -751,3 +751,22 @@ keep tens of MiB that nothing on screen uses.
 Measure first: row AU with an image-heavy document. If it matters, scavenge the store on park
 (`fz_shrink_store` or `fz_empty_store` through a `fz_try` wrapper in `patches/mupdf/journal/`),
 or give each engine its own store and drop it on park.
+
+## 24. `--bench-ink`: the commit check runs before the engine answers
+
+**Labels:** `bench`, `bug`
+
+### Problem Statement
+
+`--bench-ink` (Plan 0004, row V) checks that the stroke is committed one timer tick after the
+pointer is released. On 2026-10-27 that step failed three times in a row on the §1 machine, also
+on `3b270a4` (before Plan 0008 Phase 2's changes): the release reaches `select_pointer` (the trace
+shows `kind=1`), but the engine has not answered the edit yet, so the live stroke is still shown
+and the page has no ink. The next steps (undo, redo, select) pass, so the stroke is committed a
+little later. Row V's figures (`ink_rebuild_ms`) are not affected.
+
+### Proposed Solution
+
+Wait in step 1 until the edit's answer has arrived (as the pages bench waits on `rebuilds()`),
+with a timeout, instead of checking on the next tick.
+

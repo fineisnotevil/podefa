@@ -1734,4 +1734,28 @@ Desktop (§1 machine, release build, `FA_PDF_TRACE=1`, 2026-10-27):
 | `large_200p.pdf --bench-pinch 4` | tiles 0 in every pinch; `frame_max` 0.5-0.6 ms; `t_cover` 15-16 ms. PASS |
 | `dense_vector.pdf --bench-pinch 4` | tiles 0 in every pinch; `frame_max` 0.5-0.8 ms; `t_cover` 31-54 ms. PASS |
 
-On the phone: not measured yet (the phone was off USB).
+Phone (§14, the APK of `af14fc0` and later, 2026-10-27):
+
+| Run | Result |
+| :--- | :--- |
+| `large_200p.pdf --bench-pinch 4` | tiles 0; `frame_max` 2.0-2.5 ms, once 48.7 ms (the first frame of the second pinch, a zoom-out from 200%); `t_cover` 30-59 ms. FAIL on that one frame |
+| `dense_vector.pdf --bench-pinch 4` | tiles 0; `frame_max` 2.0-4.1 ms; `t_cover` 49-96 ms. PASS |
+| `large_200p.pdf --bench-pinch 8`, twice | tiles 0; `frame_max` at most 3.4 and 3.8 ms; `t_cover` at most 56 and 63 ms. PASS both |
+
+So the 48.7 ms frame came once in 24 pinches on that document and not again; the frames while
+the fingers move are otherwise 2-4 ms, against 30-55 ms for the zoom frames of the trial build
+(§14.2), because only a transform changes. A real two-finger pinch could not be injected: SELinux
+keeps the `adb` shell from writing to `/dev/input/event3` although the device's group allows it,
+so row ME's pinch by hand is the maintainer's (with `FA_PDF_TRACE`'s `pinch ended` line, which
+carries the frames of the pinch).
+
+### 14.5 Phase 2: fling and idle (rows MF, MG)
+
+The 1000-page document is a synthetic Letter document (a title, 20 text lines and 6 filled boxes
+per page, 2.4 MB) written for this run; PSS sampled once a second with `dumpsys meminfo`.
+
+| Row | Run | Result |
+| :--- | :--- | :--- |
+| MF | `--bench-scroll 10000 --bench-scroll-s 30 --bench-step-ms 16 --bench-settle-ms 3000` (Plan 0002 row B1 on the phone; scroll writes, not the Flickable's fling) | 376 pages visited, 0 hole frames while scrolling, `resident_max` 5 pages, 1 re-anchor; PSS 190-196 MiB from the 3rd second to the end (first 5 s against last 5 s of the scroll: flat). PASS |
+| MF | 90 real flings (`adb shell input swipe 540 1900 540 300 60`, back to back for 30 s, through the Flickable's own fling) | reached page 196; after 4 s still, the screen showed the page drawn with no hole (screenshot); PSS rose from 180 to 208 MiB in the first 10 s, then stayed between 208 and 217 MiB; peak 217.1 MiB. PASS (no holes after settle, memory flat after the first 10 s, under row MB's 250 MiB) |
+| MG | `large_200p.pdf --bench-idle 5` | 0 frames in 5014 ms; `t_first_page` 106 ms. PASS |

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pinch zoom and double tap** (Plan 0008 Phase 2): two fingers on a touch screen, or a pinch on
   a trackpad, zoom around the fingers; the pages follow them at once and sharpen when they lift. A
   double tap with a finger fits the page's width, and a second one goes back to the zoom before.
+  The bench trace logs pointer presses and releases and each pinch's frames.
 - **Android app** (Plan 0008 Phase 1, ADR 0012): `scripts/android-build.sh` builds an arm64 APK
   (`org.fineassociation.podefa`) with the mobile interface. Documents come from the system's
   picker or "Open with"; the app works on a copy and writes saves, Save As, tool outputs and

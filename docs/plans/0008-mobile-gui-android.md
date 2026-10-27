@@ -19,8 +19,9 @@ results"); the rest of Phase 2 is under way. By the maintainer's order the shell
 - Phase 1 (platform): passed its gate on 2026-10-27 (ADR 0012). Rows MA, MB, MC pass on the phone;
   row MD passes for the system picker, saving in place and Save As, with Google Drive and another
   reader left to the maintainer; the desktop rows are unchanged.
-- The rest of Phase 2 (touch): pinch and double tap implemented (§5, "Phase 2, touch"); the
-  phone's rows ME, MF, MG wait for the phone on USB. Phases 3 to 5: not started.
+- The rest of Phase 2 (touch): pinch and double tap implemented (§5, "Phase 2, touch"); on the
+  phone the scripted pinch (row ME), the fling (MF) and idle (MG) pass; a pinch by hand is the
+  maintainer's; the double tap waits for the phone on USB. Phases 3 to 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -347,14 +348,22 @@ ADR 0012 records the design.
 - **Fling:** Slint's Flickable already flings a touch release with its own constant deceleration
   (`i-slint-core-1.18.1/items/flickable.rs:645-668`); the canvas window (Plan 0002) is wide
   enough that a fling does not reach its edge before it stops.
-- **Double tap:** a finger's double tap (the TouchArea records whether the press was a finger)
-  zooms to fit width for the page under it, anchored at the tap; a double tap at fit width (within
-  2%) goes back to the zoom before, or to twice fit width. A mouse double-click still selects a
-  word.
+- **Double tap:** two taps of a finger within 300 ms and 24 logical px zoom to fit width for the
+  page under them, anchored at the tap; a double tap at fit width (within 2%) goes back to the zoom
+  before, or to twice fit width. A mouse double-click still selects a word. The first version used
+  the TouchArea's `double-clicked`, which never fired on the phone: Slint 1.18.1 sends `Exit`
+  after a finger lifts (`i-slint-core-1.18.1/input.rs:2400-2410`), and the change of the top item
+  resets the click count (`window.rs:1087-1090`), so Rust now tells a double tap from two taps
+  itself.
 - **`--bench-pinch N`** (`docs/benchmarks.md` §14.4): on the desktop 0 tiles during every pinch,
   `frame_max` under 1 ms, the view covered 15-54 ms after the fingers lift.
-- **Not yet:** rows ME, MF and MG on the phone (the phone left USB); a real two-finger pinch for
-  row ME is prepared as raw touch events for the touch screen's input device.
+- **On the phone** (`docs/benchmarks.md` §14.4-14.5): the scripted pinch keeps every frame at
+  2-4 ms with 0 tiles (one 48.7 ms frame in 24 pinches); 90 real flings through the 1000-page
+  document leave no hole and PSS flat at 208-217 MiB; idle 0 frames.
+- **Not yet:** a pinch by hand (the `adb` shell may not write the touch screen's input device:
+  SELinux), so row ME's last part is the maintainer's; the double tap on the phone (the phone left
+  USB before the APK with the Rust double tap was tried). `--bench-ink`'s commit check fails also
+  before this phase (backlog item 24).
 
 ### Phase 2, interface part: results (2026-10-26)
 
