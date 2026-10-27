@@ -10,7 +10,8 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 **Phase 0 passed its gate on 2026-10-26; the maintainer approved the mobile shell (the interface
 part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27** (§5, "Phase 1:
 results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); **Phase 3 (Edit on
-touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"). By the maintainer's order the shell came before Phase 1's platform work
+touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"); **Phase 4 (Tools on touch) is
+implemented and at its gate** (§5, "Phase 4: results"). By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -27,7 +28,12 @@ touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"). By the maintai
   taps for fields, notes and annotations, a long press to move a note, editors kept above the
   on-screen keyboard; rows MI and MJ pass on the phone; Back closes one level at a time and asks
   about unsaved changes last. Passed its gate on 2026-10-27; the keyboard's composing word
-  (backlog item 26) stays open. Phases 4 and 5: not started.
+  (backlog item 26) stays open.
+- Phase 4 (Tools on touch): implemented and at its gate (2026-10-28): the one-column gallery with
+  each page's buttons and check box, the gaps' Split, blank page and pages from a file, a long
+  press that moves pages, the bar over the dock for the chosen pages, and the tools' dialogs as
+  sheets; Plan 0005's page operations pass on the phone (`--bench-pages` 13 of 14, the miss being
+  a desktop sidebar drag, and every operation by hand). Phase 5: not started.
 
 Started 2026-10-26 on the maintainer's request ("Konsepte mobil GUI eklendi. Geliştirme için
 başlangıcı yap"). Plan 0007 Phase 4 (tabs) was then at its own gate; §9 q1 asked how the
@@ -345,6 +351,57 @@ ADR 0012 records the design.
 - **Not done:** the Edit strip is Phase 3, so the ink tool was chosen with the `I` key over
   `adb`; the library suite on the phone (see §5's note) was built (26 test binaries link without
   `RUSTFLAGS`) but not run: the phone left USB before it could be pushed.
+
+### Phase 4: results (2026-10-28)
+
+- **The gallery column** (`crates/app/ui/mobile/gallery.slint`, `MobileGallery`, the concept's
+  `MobileGalleryView`): in Tools on a phone the pages stand in one column in a Flickable, each in
+  the concept's 230 x 325 px box, with a bar under the header ("200 pages", or "2 of 200 pages
+  chosen", and Choose all). The desktop's gallery is not shown on a phone. Only the pages near the
+  view are built, and Rust draws the pictures of those in view (`AppState::thumb_range` and
+  `reveal_in_column`, `MOBILE_GALLERY_*` in `lib.rs`, which match `MobileGalleryMetrics`).
+- **Each page** has its number at the top left, a check box at the top right and, along its
+  bottom, Rotate Left, Rotate Right, Duplicate, Extract and Delete, always shown (nothing on a
+  phone is only on hover; plan §4): 32 px chips in 44 px targets. A page's own button acts on that
+  page and leaves nothing chosen that was not, since chosen pages turn the column's taps into
+  choosing.
+- **Taps:** a tap makes a page the current one and a second tap opens it in Read (a finger's double
+  tap zooms elsewhere, so the second tap stands in for the desktop's double-click); while pages are
+  chosen, a tap chooses or unchooses.
+- **Gaps:** between two pages, and before the first and after the last, a "+" opens into Split
+  Here (not at the ends), Insert Blank Page, Insert Pages from File and Close, each a 44 px button;
+  they call the desktop gallery's handlers.
+- **Moving pages:** a finger held still on a page for 500 ms picks it up, with the other chosen
+  pages when it is one of them; the pages fade, the gap nearest the finger shows "Move Here", and
+  letting go moves them there (one undo step, the desktop's `PageOp::Move`). Near the top or
+  bottom of the view the column scrolls along. A pick-up that chose its page unchooses it after.
+  Slint's Flickable stops taking a press's moves once it has been held still for 500 ms
+  (`i-slint-core-1.18.1/items/flickable.rs:384, 740-755`), so a quick swipe still flings and a held
+  finger reaches the page.
+- **The chosen pages' bar** over the dock (the concept's bulk actions): the count, Rotate Left and
+  Right, Duplicate, Extract, Delete (not when every page is chosen) and Unchoose.
+- **Back** in Tools closes an open gap, then unchooses the chosen pages, then goes to Read.
+- **The tools' dialogs as sheets:** Merge, Split, Watermark and Page Numbers, Compress and Export
+  as Images, Crop and Document Properties were inside the canvas, which is hidden in Tools, so a
+  dialog opened there did not show (seen on the phone: Watermark from the More menu in Tools).
+  They now stand over the canvas and the gallery (`main.slint`, `dialogs`). On a phone each is a
+  sheet across the width, above the dock, the edit strip or the on-screen keyboard, as tall as
+  its content allows under the header, with 44 px rows; on the desktop their place and size are as
+  before.
+- **On the phone** (`large_200p.pdf` and `pages_bench_200.pdf`, `docs/benchmarks.md` §14.7):
+  rotate by a page's button; a blank page from a gap (201 pages, as large as the page before);
+  Undo; the check box and a tap choosing a second page; Rotate on both from the bar; Choose all
+  (Delete hides); Back unchoosing; a long-press move of page 2 before page 1 (the order changed and
+  nothing stayed chosen); Split Here after page 3 (a new tab of 197 pages, the document kept 3);
+  Extract opening the system's save picker and Back cancelling it; the Watermark sheet in Tools
+  over the keyboard and, once it hid, over the dock, Back closing it. `--bench-pages`: 13 of 14,
+  every page operation and its undo; the miss is the step that drags a thumbnail in the desktop's
+  sidebar, which the phone shell has no place for (the same on the desktop with `--mobile`).
+- **Desktop:** `--bench-pages` 14 of 14, `--bench-forms` 35 of 35.
+- **Found, not fixed:** the first change into Edit and the first into Tools after a start take
+  13.6-26.8 ms and 21.2-34.6 ms for their slowest frame on the phone (`--bench-modes`), over the
+  16.7 ms budget; the same build before this phase took 26.0-28.1 ms into Tools, so the column did
+  not bring it. A second change into Tools takes 3.7-5.1 ms. Backlog item 27.
 
 ### Phase 3: results (2026-10-27)
 

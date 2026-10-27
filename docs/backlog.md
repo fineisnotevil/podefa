@@ -814,3 +814,22 @@ state. Options: report it to Slint with a fix that restarts the input on `InputM
 and `Disable`; meanwhile, have `PodefaActivity` restart the input on the focused view when an
 editor opens or closes (one JNI call from `platform::android`).
 
+## 27. The first change into Edit or Tools on the phone misses the frame budget
+
+**Labels:** `android`, `performance`
+
+### Problem Statement
+
+On the phone (Plan 0008 Phase 4, `docs/benchmarks.md` §14.7), the slowest frame of the first
+change into Tools after a start takes 21-35 ms, and of the first change into Edit 14-27 ms, against
+16.7 ms; a second change into Tools takes 4-5 ms. It was so before the one-column gallery
+(26-28 ms with the desktop's gallery on the phone). The slow frame comes during the motion, not
+first, so it is likely what the mode shows for the first time (its pictures and icons uploaded,
+its items built) rather than the change itself.
+
+### Proposed Solution
+
+Trace one first change frame by frame on the phone; then either widen the warm-up frame after the
+first view (`main.slint` `warm`, Plan 0007 Phase 3) to what the mobile shell shows in Edit and
+Tools, or build those parts while the app is idle after opening.
+

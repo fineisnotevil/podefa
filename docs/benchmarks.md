@@ -1760,6 +1760,35 @@ per page, 2.4 MB) written for this run; PSS sampled once a second with `dumpsys 
 | MF | 90 real flings (`adb shell input swipe 540 1900 540 300 60`, back to back for 30 s, through the Flickable's own fling) | reached page 196; after 4 s still, the screen showed the page drawn with no hole (screenshot); PSS rose from 180 to 208 MiB in the first 10 s, then stayed between 208 and 217 MiB; peak 217.1 MiB. PASS (no holes after settle, memory flat after the first 10 s, under row MB's 250 MiB) |
 | MG | `large_200p.pdf --bench-idle 5` | 0 frames in 5014 ms; `t_first_page` 106 ms. PASS |
 
+### 14.7 Phase 4: tools on touch (2026-10-28)
+
+**Page operations.** `--bench-pages` on `pages_bench_200.pdf` (§11.4), the phone's mobile shell:
+13 of 14 steps pass, every page operation and its undo; the miss is the step that drags a
+thumbnail in the desktop's sidebar with the mouse, which the phone shell does not show (the same
+on the desktop with `--mobile`). `t_restructure` min 9, median 49, max 86 ms (n=5); the desktop's
+run: 14 of 14, median 13 ms. The column's own move (a long press and drag) was checked by hand
+(plan §5, "Phase 4: results").
+
+**Mode changes.** `--bench-modes` on `pages_bench_200.pdf` (§13.4), the screen kept awake with
+`KEYCODE_WAKEUP` (two first runs with the screen off counted no frames and are left out). The
+slowest frame of each change, three runs each, before this phase (HEAD `cd233ad`, Tools showing
+the desktop's gallery) and with the column:
+
+| Change | Before (3 runs) | With the column (3 runs) |
+| :--- | ---: | ---: |
+| 0>1 (first into Edit) | 13.9-18.6 ms | 13.6-26.8 ms |
+| 1>2 (first into Tools) | 26.0-28.1 ms | 21.2-34.6 ms |
+| 2>0 | 5.2-16.1 ms | 5.1-13.1 ms |
+| 0>2 (Tools again) | 4.2-4.6 ms | 3.7-5.1 ms |
+| 2>1 | 11.7-11.9 ms | 11.4-15.5 ms |
+| 1>0 | 4.2-5.5 ms | 3.9-4.1 ms |
+
+Tiles rendered in every change: 0. The first change into Tools misses the 16.7 ms budget before
+and after; its slowest frame is not the first (`frame_first` 4.8-12.8 ms) but one during the
+motion. Backlog item 27. On the desktop (`--mobile`, 3 runs) the column's worst frame was
+16.9-18.6 ms; the desktop shell's own gallery 14.5-17.2 ms in 5 runs (2 over the budget, as in §13.4
+"at the budget").
+
 ### 14.6 Phase 3: edit on touch (rows MI, MJ)
 
 **Stroke frames (row MJ).** With a trace on (`FA_PDF_TRACE=1`, or any `--bench-*` run such as

@@ -13,12 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Tools by touch** (Plan 0008 Phase 4): on a phone, Tools shows the pages in one column, each
+  with its number, a check box and buttons to rotate, duplicate, extract and delete. A tap makes a
+  page current and a second tap opens it; a "+" between pages splits there or inserts a blank page
+  or pages from a file; holding a page for half a second picks it up to move it. With pages
+  chosen, a bar over the dock acts on all of them. On the phone the tools' dialogs open as sheets
+  above the dock or the keyboard.
 - **Editing by touch** (Plan 0008 Phase 3): in Edit, the phone shows an edit strip over the dock
   with every Edit tool, rotation and the form's commands, and the chosen tool's colours and ink
   widths over it. A tap fills a form field, places a note with the Note tool, selects an
   annotation, and opens a selected note; a long press on a note moves it; Ink and Crop draw with
   one finger. A field or note being edited moves above the on-screen keyboard and below the
   header. Ink strokes log their frames in the bench trace.
+- **A tool's dialog opened in Tools shows** (Watermark, Page Numbers, Merge and the others): it
+  was hidden with the pages behind the gallery.
 - **Back on the phone** (Plan 0008 Phase 3) closes one thing at a time: a menu, a card, the
   bottom sheet, a dialog, the search bar, an editor (keeping its text) or a selection, then goes
   from Edit or Tools back to Read, and last asks about unsaved changes before the app closes.
