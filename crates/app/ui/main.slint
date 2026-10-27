@@ -588,9 +588,6 @@ export component MainWindow inherits Window {
                                 TouchArea {
                                     x: -root.scroll-x; y: -root.scroll-y;
                                     width: viewport.width; height: viewport.height;
-                                    // Whether the last press was a finger: a double tap zooms,
-                                    // a double-click selects a word.
-                                    property <bool> touch: false;
                                     scroll-event(event) => {
                                         if (event.modifiers.control) {
                                             root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
@@ -607,7 +604,6 @@ export component MainWindow inherits Window {
                                     pointer-event(event) => {
                                         if (event.kind == PointerEventKind.down) {
                                             viewport-keys.focus();
-                                            self.touch = event.touch-finger-id != 0;
                                         }
                                         if (event.button == PointerEventButton.left || event.touch-finger-id != 0) {
                                             if (event.kind == PointerEventKind.down) {
@@ -625,7 +621,7 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                     double-clicked => {
-                                        root.select_pointer(3, self.mouse-x, self.mouse-y, false, self.touch);
+                                        root.select_pointer(3, self.mouse-x, self.mouse-y, false, false);
                                     }
                                 }
                             }

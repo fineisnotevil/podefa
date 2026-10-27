@@ -101,6 +101,9 @@ const MODE_TOOLS: i32 = 2;
 
 /// How long a finger must rest before a touch starts a selection instead of a pan.
 const LONG_PRESS_MS: u64 = 500;
+/// A second tap this soon after the first, this close to it, is a double tap.
+const DOUBLE_TAP_MS: u128 = 300;
+const DOUBLE_TAP_SLOP_LOGICAL_PX: f32 = 24.0;
 /// A double tap counts a zoom as fit width when it is within one part in this many of it.
 const DOUBLE_TAP_SAME_PER_MILLE: u32 = 50;
 
@@ -360,6 +363,8 @@ struct AppState {
     pinch: Option<(u32, (f32, f32))>,
     /// The zoom a double tap left for fit width, which the next double tap goes back to.
     tap_back: Option<u32>,
+    /// The last tap of a finger, to tell a double tap: when and where (viewport, logical px).
+    last_tap: Option<(Instant, f32, f32)>,
     touch_selecting: bool,
     /// Text line boxes of the pages near the view, to tell text from margins under the pointer
     /// (Plan 0003 Phase 4 review), and the pages asked for and not answered yet.
@@ -511,6 +516,7 @@ impl AppState {
             long_press: slint::Timer::default(),
             pinch: None,
             tap_back: None,
+            last_tap: None,
             touch_selecting: false,
             text_lines: HashMap::new(),
             lines_pending: HashSet::new(),
@@ -1124,6 +1130,9 @@ impl AppState {
         shift: bool,
         touch: bool,
     ) {
+        if kind != 2 {
+            self.bench.pointer(kind, x, y, touch);
+        }
         if self.tool == Tool::Crop && self.editable {
             self.crop_pointer(ui, kind, x, y);
             return;
@@ -1300,11 +1309,6 @@ impl AppState {
                     self.open_note_editor(ui, p.page, NoteTarget::Existing(id));
                     return;
                 }
-                // A double tap zooms; a long press, not a double tap, selects with a finger.
-                if touch {
-                    self.double_tap(ui, x, y);
-                    return;
-                }
                 let Some(point) = point.filter(|p| self.on_text(Some(*p))) else {
                     return;
                 };
@@ -1321,10 +1325,24 @@ impl AppState {
             _ => {
                 let was_selecting = self.sel_pressed || self.touch_selecting;
                 // A finger that came up before the long press and without panning is a tap: like a
-                // click, it clears the selection.
+                // click, it clears the selection; a second one soon after, near it, zooms
+                // (Plan 0008 Phase 2). Slint 1.18 counts no double-click for touch: a lifted
+                // finger also sends `Exit`, which resets its click count
+                // (`i-slint-core-1.18.1/input.rs:2400-2410`, `window.rs:1087-1090`).
                 if kind == 1 && touch && self.touch_down.is_some() && !self.touch_selecting {
                     self.clear_selection(ui);
                     self.select_annotation(ui, None);
+                    let double = self.last_tap.is_some_and(|(at, tx, ty)| {
+                        at.elapsed().as_millis() < DOUBLE_TAP_MS
+                            && (x - tx).abs() <= DOUBLE_TAP_SLOP_LOGICAL_PX
+                            && (y - ty).abs() <= DOUBLE_TAP_SLOP_LOGICAL_PX
+                    });
+                    if double {
+                        self.last_tap = None;
+                        self.double_tap(ui, x, y);
+                    } else {
+                        self.last_tap = Some((Instant::now(), x, y));
+                    }
                 }
                 if let Some(drag) = self.note_drag.take() {
                     match drag.rect {

@@ -1347,18 +1347,37 @@ impl Trace {
         self.max_thumbs = self.max_thumbs.max(n);
     }
 
-    /// The canvas window moved (Plan 0002, §4.2): `us` is how long rewriting the canvas took,
-    /// `pos_y` the document position and `start` the new window start, both in device pixels.
-    /// A pinch began (`phase` 0) at `milli`, or ended (2) and zoomed to it.
+    /// The pointer or a finger went down (`kind` 0), came up (1), double-clicked (3) or was
+    /// cancelled (4) on the page, viewport-relative: taps and double taps can be followed in a
+    /// run on the phone.
+    pub fn pointer(&mut self, kind: i32, x: f32, y: f32, touch: bool) {
+        if !self.on || self.quiet {
+            return;
+        }
+        let t = self.t_ms();
+        self.print(format_args!(
+            "pointer t={t}ms kind={kind} x={x:.0} y={y:.0} touch={touch}"
+        ));
+    }
+
+    /// A pinch began (`phase` 0) at `milli`, or ended (2) and zoomed to it. The frames between the
+    /// two are timed (§14.4), so a pinch by hand is measured like a scripted one.
     pub fn pinch(&mut self, phase: i32, milli: u32) {
         if !self.on || self.quiet {
             return;
         }
         let t = self.t_ms();
-        let what = if phase == 0 { "started" } else { "ended" };
-        self.print(format_args!("pinch {what} t={t}ms scale={milli}"));
+        if phase == 0 {
+            frame_window_reset();
+            self.print(format_args!("pinch started t={t}ms scale={milli}"));
+        } else {
+            let window = frame_window();
+            self.print(format_args!("pinch ended t={t}ms scale={milli} {window}"));
+        }
     }
 
+    /// The canvas window moved (Plan 0002, §4.2): `us` is how long rewriting the canvas took,
+    /// `pos_y` the document position and `start` the new window start, both in device pixels.
     pub fn reanchored(&mut self, us: u128, pos_y: f64, start: f64) {
         if !self.on || self.quiet {
             return;
