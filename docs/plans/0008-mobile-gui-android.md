@@ -9,8 +9,8 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 **Phase 0 passed its gate on 2026-10-26; the maintainer approved the mobile shell (the interface
 part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27** (§5, "Phase 1:
-results"); Phase 2 is implemented and at its gate** (2026-10-27; §5, "Phase 2, touch"), with a
-pinch by hand on the phone left to the maintainer. By the maintainer's order the shell came before Phase 1's platform work
+results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); Phase 3 (Edit on
+touch) is under way. By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -68,6 +68,10 @@ the maintainer chose the app's own activity class compiled into the APK ("APK'ya
 
 **Phase 1 passed its gate on 2026-10-27** ("go"). Google Drive, another reader and "Open with"
 stay the maintainer's checks.
+
+**Phase 2 passed its gate on 2026-10-27** ("Telefonda iki parmakla kıstırmayı denedim, sorun
+yok. Faz 2 onaylandı, Faz 3'e başla"): the pinch by hand on the phone is the maintainer's check
+of row ME.
 
 ## 1. Goal and scope
 
