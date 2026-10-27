@@ -288,6 +288,25 @@ export component MobileShell inherits Rectangle {
         root.choose-tool(root.tool == tool ? 0 : tool);
     }
 
+    // Android's Back (Plan 0008 Phase 3): closes the topmost menu, card or the sheet; false when
+    // none was open.
+    public function back() -> bool {
+        if (root.docs-menu || root.more-menu) {
+            root.docs-menu = false;
+            root.more-menu = false;
+            return true;
+        }
+        if (root.card != 0) {
+            root.card = 0;
+            return true;
+        }
+        if (root.sheet-open) {
+            root.close-sheet();
+            return true;
+        }
+        return false;
+    }
+
     function open-sheet(tab: int) {
         root.docs-menu = false;
         root.more-menu = false;

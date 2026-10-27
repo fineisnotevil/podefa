@@ -101,6 +101,10 @@ pub fn temp_dir() -> PathBuf {
 
 pub fn written(_path: &Path) {}
 
+pub fn close_app() {
+    let _ = slint::quit_event_loop();
+}
+
 pub fn shutdown() {
     let clipboard = CLIPBOARD.with(|cell| cell.borrow_mut().take());
     drop(clipboard);

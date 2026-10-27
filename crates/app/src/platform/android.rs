@@ -17,7 +17,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use jni::objects::{GlobalRef, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::jint;
@@ -36,7 +36,10 @@ struct Java {
     activity: GlobalRef,
 }
 
-static JAVA: OnceLock<Java> = OnceLock::new();
+/// The running activity. Android keeps the process after the activity finishes and a new launch
+/// calls `android_main` again in it, so each launch replaces it (a dialog shown on the finished
+/// activity throws `BadTokenException`).
+static JAVA: Mutex<Option<Arc<Java>>> = Mutex::new(None);
 /// The app's files folder (settings, the document map) and its cache folder.
 static DIRS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
@@ -64,7 +67,7 @@ thread_local! {
     static ON_OPEN: RefCell<Option<Opener>> = const { RefCell::new(None) };
 }
 
-/// Called once from `android_main`, after Slint's backend is up and before the window: keeps the
+/// Called from each launch's `android_main`, after Slint's backend is up and before the window: keeps the
 /// activity, registers its native methods, reads the document map. Returns the document the
 /// activity was started to show, already copied into the cache.
 pub fn init(app: &slint::android::AndroidApp) -> Option<PathBuf> {
@@ -82,7 +85,9 @@ pub fn init(app: &slint::android::AndroidApp) -> Option<PathBuf> {
         }
         activity
     };
-    let _ = JAVA.set(Java { vm, activity });
+    if let Ok(mut java) = JAVA.lock() {
+        *java = Some(Arc::new(Java { vm, activity }));
+    }
     let cache = activity_string("cacheDir").map_or_else(|| files.join("../cache"), PathBuf::from);
     let _ = DIRS.set((files, cache));
     load_documents();
@@ -152,7 +157,7 @@ fn register(env: &mut JNIEnv, activity: &JObject) -> jni::errors::Result<()> {
 /// Runs `f` with a JNI environment for this thread and the activity; `None` when there is no
 /// activity or the call threw (the exception is cleared).
 fn with_env<T>(f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<T>) -> Option<T> {
-    let java = JAVA.get()?;
+    let java = JAVA.lock().ok()?.clone()?;
     let mut env = java.vm.attach_current_thread().ok()?;
     match f(&mut env, java.activity.as_obj()) {
         Ok(value) => Some(value),
@@ -430,6 +435,18 @@ pub fn written(path: &Path) {
         }
         Ok(())
     });
+}
+
+/// `Activity.finish()`, the way Slint's backend closes the app on an unhandled Back
+/// (`i-slint-backend-android-activity-1.18.1/javahelper.rs:569-575`).
+pub fn close_app() {
+    let finished = with_env(|env, activity| {
+        env.call_method(activity, "finish", "()V", &[])?;
+        Ok(())
+    });
+    if finished.is_none() {
+        let _ = slint::quit_event_loop();
+    }
 }
 
 pub fn shutdown() {}

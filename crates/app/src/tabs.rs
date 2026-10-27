@@ -461,9 +461,7 @@ pub(crate) fn quit(ui: &MainWindow) {
             switch(ui, index);
             proceed(ui, AfterSave::Quit);
         }
-        None => {
-            let _ = slint::quit_event_loop();
-        }
+        None => crate::platform::close_app(),
     }
 }
 

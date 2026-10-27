@@ -199,6 +199,12 @@ pub fn written(path: &Path) {
     imp::written(path);
 }
 
+/// Closes the app once nothing is left unsaved: the desktop ends the event loop; Android finishes
+/// the activity, as its Back key does when the window does not take it.
+pub fn close_app() {
+    imp::close_app();
+}
+
 /// After the event loop: lets go of what the platform held (the desktop's clipboard).
 pub fn shutdown() {
     imp::shutdown();

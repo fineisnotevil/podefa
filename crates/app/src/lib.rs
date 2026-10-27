@@ -1437,6 +1437,25 @@ impl AppState {
         self.open_note_editor(ui, point.page, target);
     }
 
+    /// Android's Back on the page (Plan 0008 Phase 3): commits an open field or note editor, as a
+    /// tap elsewhere does, or clears a text or annotation selection. False when none was there.
+    fn back_close(&mut self, ui: &MainWindow) -> bool {
+        if self.field_edit.is_some() {
+            self.field_commit(ui);
+            return true;
+        }
+        if self.note_edit.is_some() {
+            self.note_save(ui);
+            return true;
+        }
+        if !self.sel_pages.is_empty() || self.selected_annot.is_some() {
+            self.clear_selection(ui);
+            self.select_annotation(ui, None);
+            return true;
+        }
+        false
+    }
+
     /// The lowest viewport y an editor on the page may reach: the view's bottom, or on a phone
     /// the top of the on-screen keyboard or of the shell's bottom islands (Plan 0008 row MI).
     pub(crate) fn editor_floor(ui: &MainWindow) -> f32 {
@@ -4375,6 +4394,26 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
             }
         });
         let weak = main_window.as_weak();
+        main_window.on_back_close(move || {
+            weak.upgrade()
+                .and_then(|ui| with_state_ret(|state| state.back_close(&ui)))
+                .unwrap_or(false)
+        });
+        let weak = main_window.as_weak();
+        main_window.on_back_quit(move || {
+            if !tabs::any_unsaved() {
+                return false;
+            }
+            // Asked from the event loop, after this key event, as closing the window does.
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                if let Some(ui) = weak.upgrade() {
+                    tabs::quit(&ui);
+                }
+            });
+            true
+        });
+        let weak = main_window.as_weak();
         main_window.on_edit_floor_changed(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.keep_editor_above_floor(&ui));
@@ -4784,10 +4823,13 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
         main_window.on_cancel_tool(|| with_state(|state| state.cancel_tool()));
         let weak = main_window.as_weak();
         // When the editor or the options close, the keys go back to the page (Ctrl+Z, arrows).
+        // First: on Android the editor adds the word the keyboard is still composing to its text
+        // when it loses the focus (`i-slint-core-1.18.1/items/text.rs:1258-1278`), and only then
+        // is the text read.
         main_window.on_field_commit(move || {
             if let Some(ui) = weak.upgrade() {
-                with_state(|state| state.field_commit(&ui));
                 ui.invoke_focus_viewport();
+                with_state(|state| state.field_commit(&ui));
             }
         });
         let weak = main_window.as_weak();
@@ -5202,10 +5244,11 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
     main_window.on_undo(|| with_state(|state| state.undo()));
     {
         let weak = main_window.as_weak();
+        // The focus first, so the word being composed is in the text (as for `field_commit`).
         main_window.on_note_save(move || {
             if let Some(ui) = weak.upgrade() {
-                with_state(|state| state.note_save(&ui));
                 ui.invoke_focus_viewport();
+                with_state(|state| state.note_save(&ui));
             }
         });
     }

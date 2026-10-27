@@ -423,6 +423,11 @@ export component MainWindow inherits Window {
     callback open_drop(data-transfer);
     // The mode changed (Rust waits for the motion to end before it draws anything new).
     callback mode_changed();
+    // Android's Back on the page: commits an open field or note editor or clears a selection.
+    callback back_close() -> bool;
+    // Android's Back with nothing left open: asks about unsaved changes and closes after; false
+    // when nothing is unsaved, so the system closes the app.
+    callback back_quit() -> bool;
     callback edit_floor_changed();
     // The gallery: it scrolled; a page was ticked, double-clicked (back to Read on it), or one
     // of its actions or a gap's was pressed; pages were dropped in a gap; the chosen pages' bar.
@@ -443,12 +448,67 @@ export component MainWindow inherits Window {
     }
     changed theme => { root.apply-theme(); }
 
+    // Android's Back (Plan 0008 Phase 3), one level at a time: the shell's menus, cards and sheet,
+    // a dialog, the search bar, an editor or selection on the page, Edit or Tools back to Read,
+    // and last the unsaved question. Slint finishes the activity when Back is not accepted
+    // (`i-slint-backend-android-activity-1.18.1/javahelper.rs:788-810`).
+    function back() -> bool {
+        // The page takes the keys back first: an editor that loses them keeps the word the
+        // keyboard was composing, and a Back after it closes still reaches this scope.
+        viewport-keys.focus();
+        if (root.mobile && mshell.back()) {
+            return true;
+        }
+        if (root.merge-visible) {
+            root.merge_close();
+            return true;
+        }
+        if (root.split-visible) {
+            root.split_close();
+            return true;
+        }
+        if (root.convert-visible) {
+            root.convert_close();
+            return true;
+        }
+        if (root.stamp-visible) {
+            root.stamp_close();
+            return true;
+        }
+        if (root.crop-visible) {
+            root.crop_cancel();
+            return true;
+        }
+        if (root.props-visible) {
+            root.props_close();
+            return true;
+        }
+        if (root.find-visible) {
+            root.find_close();
+            return true;
+        }
+        if (root.back_close()) {
+            return true;
+        }
+        if (root.mode != 0) {
+            if (root.tool != 0) {
+                root.choose_tool(0);
+            }
+            root.mode = 0;
+            return true;
+        }
+        return root.back_quit();
+    }
+
     global-keys := FocusScope {
         width: 100%;
         height: 100%;
         focus-on-click: false;
         focus-on-tab-navigation: false;
         capture-key-pressed(event) => {
+            if (event.text == Key.Back) {
+                return root.back() ? accept : reject;
+            }
             if (root.global_key(event.text, event.modifiers.control, event.modifiers.shift)) {
                 return accept;
             }
