@@ -26,6 +26,11 @@ extern "C" {
     );
     fn fa_pdf_undo(ctx: *mut fz_context, doc: *mut pdf_document, errptr: *mut *mut mupdf_error_t);
     fn fa_pdf_redo(ctx: *mut fz_context, doc: *mut pdf_document, errptr: *mut *mut mupdf_error_t);
+    fn fa_pdf_begin_implicit_operation(
+        ctx: *mut fz_context,
+        doc: *mut pdf_document,
+        errptr: *mut *mut mupdf_error_t,
+    );
     fn fa_pdf_undoredo_state(
         ctx: *mut fz_context,
         doc: *mut pdf_document,
@@ -66,6 +71,13 @@ impl PdfDocument {
     /// Redoes the last undone operation; fails at the end of the history or during an operation.
     pub fn redo(&mut self) -> Result<(), Error> {
         unsafe { ffi_try!(fa_pdf_redo(context(), self.as_raw())) }
+    }
+
+    /// Starts an operation that joins the last applied one: what changes in it is undone and
+    /// redone with that step, not as a step of its own (with no step before it, it is not
+    /// recorded). Ended with [`end_operation`](Self::end_operation) like any other.
+    pub fn begin_implicit_operation(&mut self) -> Result<(), Error> {
+        unsafe { ffi_try!(fa_pdf_begin_implicit_operation(context(), self.as_raw())) }
     }
 
     /// `(position, steps)`: how many operations of the history are applied, and how many it has.

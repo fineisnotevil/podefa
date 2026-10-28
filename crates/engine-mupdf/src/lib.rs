@@ -999,6 +999,7 @@ impl MupdfEngine {
             .is_none_or(|target| same_file(target, &current));
         let startxref = self.startxref;
         let pdf = self.pdf_mut().map_err(|_| SaveError::NotEditable)?;
+        stamp_producer(pdf);
         if in_place {
             if !pdf.can_be_saved_incrementally() {
                 return Err(SaveError::NeedsSaveAs);
@@ -1075,6 +1076,24 @@ impl MupdfEngine {
         self.display_lists.push((page_index, Arc::clone(&list)));
         Ok(list)
     }
+}
+
+/// Names this app as the document's `/Producer` before a save, as part of the last applied edit:
+/// its undo puts the old one back, and the stamp makes no undo step of its own. Left out when
+/// it is there already, and when steps are undone (writing now would drop their redo); a failure
+/// leaves the document as it was and the save goes on.
+fn stamp_producer(pdf: &mut PdfDocument) {
+    if edit::has_producer(pdf) || pdf.can_redo().unwrap_or(true) {
+        return;
+    }
+    if pdf.begin_implicit_operation().is_err() {
+        return;
+    }
+    if edit::set_producer(pdf).is_err() {
+        let _ = pdf.abandon_operation();
+        return;
+    }
+    let _ = pdf.end_operation();
 }
 
 /// How many steps of the undo journal are applied (0 without a journal).

@@ -309,8 +309,14 @@ fn a_highlight_across_two_pages_survives_an_in_place_save() {
     );
 
     // Reopened by another reader, each page has one highlight whose quads are the selection's
-    // line boxes.
+    // line boxes, and the app is named as the producer.
     let reopened = PdfDocument::open(path.to_str().expect("utf-8")).expect("reopen");
+    assert_eq!(
+        reopened
+            .metadata(mupdf::MetadataName::Producer)
+            .expect("producer"),
+        pdf_core::tools::PRODUCER
+    );
     for part in &pages {
         let page = PdfPage::try_from(reopened.load_page(part.page as i32).expect("page"))
             .expect("pdf page");

@@ -357,11 +357,13 @@ fn saving_in_place_again_and_again_keeps_the_file_readable() {
             "save {round}: not a repaired file"
         );
     }
-    // Undo still reaches the document as opened, across the saves.
+    // Undo still reaches the document as opened, across the saves, in as many steps as there
+    // were edits: the `/Producer` each save writes joins the first edit, not a step of its own.
     for _ in 0..3 {
         engine.undo().expect("undo");
     }
     assert_eq!(shape(&snapshot(&engine)), shape(&before));
+    assert_eq!(engine.undo().expect("nothing left"), None);
 }
 
 /// The page an undo reported changing.

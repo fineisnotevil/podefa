@@ -59,6 +59,17 @@ void fa_pdf_redo(fz_context *ctx, pdf_document *doc, mupdf_error_t **errptr)
         mupdf_save_error(ctx, errptr);
 }
 
+/* An operation that joins the one before it (the last applied step): changes made in it are undone
+ * and redone with that step instead of making one of their own. With no step before it, they are
+ * not recorded at all. */
+void fa_pdf_begin_implicit_operation(fz_context *ctx, pdf_document *doc, mupdf_error_t **errptr)
+{
+    fz_try(ctx)
+        pdf_begin_implicit_operation(ctx, doc);
+    fz_catch(ctx)
+        mupdf_save_error(ctx, errptr);
+}
+
 /* The position in the history (0 = the document as opened) and the number of steps. */
 int fa_pdf_undoredo_state(fz_context *ctx, pdf_document *doc, int *steps, mupdf_error_t **errptr)
 {

@@ -136,8 +136,10 @@ pub(crate) fn write_replacing(output: &Path, bytes: &[u8]) -> std::io::Result<()
         })
 }
 
-/// Writes a document to the `.part` file of `output`, which it returns.
-fn write_part(doc: &PdfDocument, output: &Path) -> Result<PathBuf, String> {
+/// Writes a document to the `.part` file of `output`, which it returns, with this app as its
+/// `/Producer`.
+fn write_part(doc: &mut PdfDocument, output: &Path) -> Result<PathBuf, String> {
+    crate::edit::set_producer(doc).map_err(|e| format!("{}: {e}", output.display()))?;
     let part = part_path(output);
     let name = part
         .to_str()
@@ -338,7 +340,7 @@ fn execute(
                 if stop() {
                     return Err("cancelled".to_owned());
                 }
-                written.push((write_part(&merged, output)?, output.clone()));
+                written.push((write_part(&mut merged, output)?, output.clone()));
                 progress(total, total);
             }
             ToolJob::Extract { parts } => {
@@ -366,7 +368,7 @@ fn execute(
                         pages.iter().position(|&q| q as i32 == p).map(|i| i as i32)
                     })
                     .map_err(|e| e.to_string())?;
-                    written.push((write_part(&part, output)?, output.clone()));
+                    written.push((write_part(&mut part, output)?, output.clone()));
                     progress(done + 1, parts.len());
                 }
             }
@@ -399,7 +401,7 @@ fn execute(
                 if stop() {
                     return Err("cancelled".to_owned());
                 }
-                written.push((write_part(&doc, output)?, output.clone()));
+                written.push((write_part(&mut doc, output)?, output.clone()));
                 progress(total, total);
             }
             ToolJob::Compress {
@@ -430,7 +432,7 @@ fn execute(
                     return Err("cancelled".to_owned());
                 }
                 progress(1, 2);
-                let part = write_part(&doc, output)?;
+                let part = write_part(&mut doc, output)?;
                 let after = std::fs::metadata(&part).map_or(u64::MAX, |m| m.len());
                 let before = bytes.len() as u64;
                 // Never a larger file: the input itself is the better copy then.

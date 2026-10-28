@@ -20,7 +20,7 @@ use pdf_core::Rect;
 use pdf_core::annot::{AnnotInfo, AnnotKind, Colour, EditOp, MarkupKind, cut};
 use pdf_core::pages::{self, PageOp, PageOpError};
 use pdf_core::stamp::{self, Stamp};
-use pdf_core::tools::{DocumentInfo, Metadata, pdf_date};
+use pdf_core::tools::{DocumentInfo, Metadata, PRODUCER, pdf_date};
 use std::path::Path;
 
 fn to_rect(r: MuRect) -> Rect {
@@ -635,25 +635,7 @@ pub(crate) fn source_page_count(path: &Path) -> Result<u32, MupdfError> {
 /// leaves an XMP metadata stream as it is (Plan 0005 §3.2).
 pub(crate) fn set_metadata(doc: &mut PdfDocument, fields: &Metadata) -> Result<(), MupdfError> {
     let fail = |source| MupdfError::EditFailed { page: 0, source };
-    let existing = doc
-        .trailer()
-        .map_err(fail)?
-        .get_dict("Info")
-        .map_err(fail)?
-        .filter(|info| info.is_dict().unwrap_or(false));
-    let mut info = match existing {
-        Some(info) => info,
-        None => {
-            let dict = doc.new_dict().map_err(fail)?;
-            let info = doc.add_object(&dict).map_err(fail)?;
-            // The trailer is fetched after the new object: on a document with no change yet,
-            // adding it starts the section of changes, which has a trailer of its own, and a key
-            // put into the trailer fetched before would be lost.
-            let mut trailer = doc.trailer().map_err(fail)?;
-            trailer.dict_put("Info", info.clone()).map_err(fail)?;
-            info
-        }
-    };
+    let mut info = info_dict(doc)?;
     for (key, value) in [
         ("Title", &fields.title),
         ("Author", &fields.author),
@@ -675,6 +657,44 @@ pub(crate) fn set_metadata(doc: &mut PdfDocument, fields: &Metadata) -> Result<(
     let date = doc.new_string(&pdf_date(now)).map_err(fail)?;
     info.dict_put("ModDate", date).map_err(fail)?;
     Ok(())
+}
+
+/// Whether `/Producer` already names this app's version.
+pub(crate) fn has_producer(doc: &PdfDocument) -> bool {
+    field(doc, MetadataName::Producer) == PRODUCER
+}
+
+/// Writes [`PRODUCER`] as the document's `/Producer`, before a save (Plan 0008 Phase 5 review).
+pub(crate) fn set_producer(doc: &mut PdfDocument) -> Result<(), MupdfError> {
+    let fail = |source| MupdfError::EditFailed { page: 0, source };
+    let mut info = info_dict(doc)?;
+    let producer = doc.new_string(PRODUCER).map_err(fail)?;
+    info.dict_put("Producer", producer).map_err(fail)
+}
+
+/// The trailer's `/Info` dictionary, created when the document has none.
+fn info_dict(doc: &mut PdfDocument) -> Result<PdfObject, MupdfError> {
+    let fail = |source| MupdfError::EditFailed { page: 0, source };
+    let existing = doc
+        .trailer()
+        .map_err(fail)?
+        .get_dict("Info")
+        .map_err(fail)?
+        .filter(|info| info.is_dict().unwrap_or(false));
+    let info = match existing {
+        Some(info) => info,
+        None => {
+            let dict = doc.new_dict().map_err(fail)?;
+            let info = doc.add_object(&dict).map_err(fail)?;
+            // The trailer is fetched after the new object: on a document with no change yet,
+            // adding it starts the section of changes, which has a trailer of its own, and a key
+            // put into the trailer fetched before would be lost.
+            let mut trailer = doc.trailer().map_err(fail)?;
+            trailer.dict_put("Info", info.clone()).map_err(fail)?;
+            info
+        }
+    };
+    Ok(info)
 }
 
 fn field(doc: &Document, name: MetadataName) -> String {

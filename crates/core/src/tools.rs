@@ -218,6 +218,9 @@ pub fn part_name(stem: &str, pages: &[u32]) -> String {
     }
 }
 
+/// What the app writes as `/Producer` in every PDF it saves (Plan 0008 Phase 5 review).
+pub const PRODUCER: &str = concat!("FINE Association | PODEFA ", env!("CARGO_PKG_VERSION"));
+
 /// The document information a reader sees and the app edits (Plan 0005 Phase 2): the `/Info`
 /// entries people fill in. `None` leaves an entry as it is; an empty string removes it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
