@@ -7,7 +7,9 @@
 // tap opens it in Read; while pages are chosen (by their check boxes), a tap chooses or unchooses.
 // A finger held still on a page for half a second picks it up (with the other chosen pages when
 // it is one of them), and the gap nearest the finger is where they go when it lifts; near the
-// top or bottom the column scrolls along. The bar over the dock acts on the chosen pages.
+// top or bottom the column scrolls along, and the pages held follow the finger as a faded stack.
+// The bar over the dock acts on the chosen pages; only the page in the middle of the view shows
+// its own buttons.
 //
 // It only lays out: every command calls the handler the desktop gallery calls. The rows are the
 // thumbnails' rows; only the pages near the view are built, and Rust draws the pictures of the
@@ -65,6 +67,8 @@ component MobileCard inherits Rectangle {
     in property <bool> can-delete;
     // Picked up with the finger: shown faded where it was.
     in property <bool> lifted;
+    // Its own buttons: on the page in the middle of the view only.
+    in property <bool> buttons;
     callback tapped();
     callback toggled();
     callback action(int);
@@ -178,7 +182,7 @@ component MobileCard inherits Rectangle {
     }
 
     // The page's buttons, along the bottom of its picture.
-    if root.editable : HorizontalLayout {
+    if root.editable && root.buttons : HorizontalLayout {
         x: (parent.width - MobileGalleryMetrics.card-w) / 2;
         y: paper.y + paper.height - 48px;
         width: MobileGalleryMetrics.card-w;
@@ -253,27 +257,31 @@ component Gap inherits Rectangle {
         height: self.preferred-height;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        border-radius: 22px;
+        border-radius: 26px;
         HorizontalLayout {
             padding: 4px;
             spacing: 2px;
             // The pages from here on move to a new tab (Plan 0007 Phase 4).
             if root.index > 0 && root.index < root.count : TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/scissors.svg");
                 tint: Theme.text;
                 clicked => { root.action(0); }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/plus.svg");
                 tint: Theme.text;
                 clicked => { root.action(1); }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/folder-input.svg");
                 tint: Theme.text;
                 clicked => { root.action(2); }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/x.svg");
                 clicked => { root.closed(); }
             }
@@ -320,6 +328,8 @@ export component MobileGallery inherits Rectangle {
     in-out property <length> offset: 0px;
     // The gap a lifted page would land in, or -1.
     in-out property <int> drop-index: -1;
+    // The pages held, the one under the finger first (at most 3; Rust's `thumb_drag_started`).
+    in property <[ThumbRow]> stack;
     callback scrolled();
     // A tap: makes the page current (`tapped`) or opens it in Read (`opened`).
     callback card-tapped(int);
@@ -341,14 +351,21 @@ export component MobileGallery inherits Rectangle {
 
     // The gap whose actions are open, or -1.
     property <int> open-gap: -1;
-    // The page the finger picked up, or -1, and the finger's y in the view.
+    // The page the finger picked up, or -1 (-2: another open document, `held-doc`), and the
+    // finger's y in the view.
     property <int> lift-index: -1;
+    property <bool> holding: root.lift-index != -1;
+    property <string> held-doc;
     property <length> finger-y;
     // The gap nearest the finger: the line between gap i and page i lies at `lead + i * pitch`
     // plus half a gap.
     property <int> nearest-gap: max(0, min(root.total-pages, round(
         (root.finger-y - root.offset - root.inset-top - MobileGalleryMetrics.lead
             - MobileGalleryMetrics.gap / 2) / MobileGalleryMetrics.pitch)));
+    // The page nearest the middle of the room between the bars: it alone shows its buttons.
+    property <int> middle: round((root.inset-top + (root.height - root.inset-top - root.inset-bottom) / 2
+        - root.offset - root.inset-top - MobileGalleryMetrics.lead - MobileGalleryMetrics.gap
+        - MobileGalleryMetrics.card-h / 2) / MobileGalleryMetrics.pitch);
     property <length> content-h: root.inset-top + MobileGalleryMetrics.lead
         + root.total-pages * MobileGalleryMetrics.pitch + MobileGalleryMetrics.gap
         + root.inset-bottom + 64px;
@@ -367,6 +384,29 @@ export component MobileGallery inherits Rectangle {
         root.drop-index = root.nearest-gap;
     }
 
+    // Another open document held over the column (from the header's documents menu, Plan 0008
+    // Phase 5 review): `y` in the column's view.
+    public function hold-doc(name: string, y: length) {
+        root.open-gap = -1;
+        root.held-doc = name;
+        root.lift-index = -2;
+        root.finger-at(y);
+    }
+    public function move-doc(y: length) {
+        if (root.lift-index == -2) {
+            root.finger-at(y);
+            scroller.running = true;
+        }
+    }
+    // Let go: the gap it landed in, or -1.
+    public function drop-doc() -> int {
+        let at = root.lift-index == -2 ? root.drop-index : -1;
+        scroller.running = false;
+        root.lift-index = -1;
+        root.drop-index = -1;
+        return at;
+    }
+
     background: Theme.desk;
 
     Image {
@@ -382,7 +422,7 @@ export component MobileGallery inherits Rectangle {
         content-width: self.width;
         content-height: root.content-h;
         content-y <=> root.offset;
-        interactive: root.lift-index < 0;
+        interactive: !root.holding;
         changed content-y => { root.scrolled(); }
 
         Gap {
@@ -392,7 +432,7 @@ export component MobileGallery inherits Rectangle {
             index: 0;
             count: root.total-pages;
             open: root.open-gap == 0 && root.editable;
-            target: root.lift-index >= 0 && root.drop-index == 0;
+            target: root.holding && root.drop-index == 0;
             opened => { root.open-gap = root.editable ? 0 : -1; }
             closed => { root.open-gap = -1; }
             action(which) => {
@@ -419,6 +459,7 @@ export component MobileGallery inherits Rectangle {
                 editable: root.editable;
                 can-delete: root.total-pages > 1;
                 lifted: root.lift-index >= 0 && (index == root.lift-index || (row.selected && root.pages-chosen > 0));
+                buttons: index == root.middle && !root.holding;
                 tapped => {
                     root.open-gap = -1;
                     if (root.pages-chosen > 0 && root.editable) {
@@ -435,6 +476,7 @@ export component MobileGallery inherits Rectangle {
                     root.open-gap = -1;
                     root.lift-index = index;
                     root.drag-started(index);
+                    root.finger-at(slot.y + self.y + self.height / 2 + root.offset);
                 }
                 lift-moved(y) => {
                     root.finger-at(slot.y + self.y + y + root.offset);
@@ -457,7 +499,7 @@ export component MobileGallery inherits Rectangle {
                 index: index + 1;
                 count: root.total-pages;
                 open: root.open-gap == index + 1 && root.editable;
-                target: root.lift-index >= 0 && root.drop-index == index + 1;
+                target: root.holding && root.drop-index == index + 1;
                 opened => { root.open-gap = root.editable ? index + 1 : -1; }
                 closed => { root.open-gap = -1; }
                 action(which) => {
@@ -474,7 +516,7 @@ export component MobileGallery inherits Rectangle {
         interval: 16ms;
         running: false;
         triggered => {
-            if (root.lift-index < 0) {
+            if (!root.holding) {
                 self.running = false;
                 return;
             }
@@ -490,18 +532,88 @@ export component MobileGallery inherits Rectangle {
         }
     }
 
-    // The number of pages, and choosing them all, under the header.
+    // The pages held follow the finger, faded, so it is clear what is being moved: more than one
+    // as a loose stack, the page under the finger on top.
+    if root.lift-index >= 0 : Rectangle {
+        x: (parent.width - MobileGalleryMetrics.card-w * 0.6) / 2;
+        y: root.finger-y - MobileGalleryMetrics.card-h * 0.3;
+        width: MobileGalleryMetrics.card-w * 0.6;
+        height: MobileGalleryMetrics.card-h * 0.6;
+        opacity: 0.7;
+        for held[i] in root.stack : Rectangle {
+            // The first is in front: the others are drawn first, behind it, a little askew.
+            property <int> depth: root.stack.length - 1 - i;
+            property <float> ratio: root.stack[self.depth].ratio > 0 ? root.stack[self.depth].ratio : 0.7071;
+            width: min(parent.width, parent.height * self.ratio);
+            height: self.width / self.ratio;
+            x: (parent.width - self.width) / 2 + self.depth * 10px;
+            y: (parent.height - self.height) / 2 + self.depth * 8px;
+            transform-rotation: self.depth == 0 ? 0deg : self.depth == 1 ? 4deg : -5deg;
+            background: #ffffff;
+            border-radius: 4px;
+            border-width: 2px;
+            border-color: Theme.card-ring;
+            drop-shadow-blur: 14px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: Theme.island-shadow;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.stack[parent.depth].image;
+                image-fit: fill;
+            }
+        }
+    }
+
+    // Another open document held: a page with its name.
+    if root.lift-index == -2 : Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.finger-y - self.height / 2;
+        width: MobileGalleryMetrics.card-w * 0.6;
+        height: MobileGalleryMetrics.card-h * 0.6;
+        opacity: 0.8;
+        background: #ffffff;
+        border-radius: 4px;
+        border-width: 2px;
+        border-color: Theme.card-ring;
+        drop-shadow-blur: 14px;
+        drop-shadow-offset-y: 6px;
+        drop-shadow-color: Theme.island-shadow;
+        VerticalLayout {
+            alignment: center;
+            padding: 12px;
+            spacing: 8px;
+            Image {
+                source: @image-url("../icons/file-text.svg");
+                width: 32px;
+                height: 32px;
+                x: (parent.width - self.width) / 2;
+                colorize: #57534e;
+            }
+            Text {
+                text: root.held-doc;
+                font-size: 13px;
+                font-weight: 600;
+                color: #1c1917;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // The number of pages, with choosing them all and unchoosing them, under the header.
     if root.total-pages > 0 : Island {
         x: (parent.width - self.width) / 2;
         y: root.inset-top;
-        width: min(parent.width - 16px, 360px);
-        height: 44px;
-        border-radius: 22px;
+        width: min(parent.width - 16px, 420px);
+        height: 52px;
+        border-radius: 26px;
         HorizontalLayout {
-            padding-left: 16px;
-            padding-right: 4px;
+            padding: 4px;
+            padding-left: 18px;
+            spacing: 2px;
             Text {
-                text: root.pages-chosen > 0 ? root.pages-chosen + " of " + root.total-pages + " pages chosen"
+                text: root.pages-chosen > 0 ? root.pages-chosen + " of " + root.total-pages + " chosen"
                     : root.total-pages + (root.total-pages == 1 ? " page" : " pages");
                 font-size: 13px;
                 font-weight: 600;
@@ -511,9 +623,9 @@ export component MobileGallery inherits Rectangle {
                 overflow: elide;
             }
             if root.editable && root.pages-chosen < root.total-pages : Rectangle {
-                width: all-text.preferred-width + 24px;
+                width: all-text.preferred-width + 28px;
                 height: 44px;
-                border-radius: 18px;
+                border-radius: 22px;
                 background: all-touch.pressed ? Theme.active : transparent;
                 all-text := Text {
                     text: "Choose all";
@@ -521,6 +633,18 @@ export component MobileGallery inherits Rectangle {
                     color: Theme.text-muted;
                 }
                 all-touch := TouchArea { clicked => { root.choose-all(); } }
+            }
+            if root.editable && root.pages-chosen > 0 : Rectangle {
+                width: none-text.preferred-width + 28px;
+                height: 44px;
+                border-radius: 22px;
+                background: none-touch.pressed ? Theme.active : Theme.hover;
+                none-text := Text {
+                    text: "Unchoose";
+                    font-size: 13px;
+                    color: Theme.text;
+                }
+                none-touch := TouchArea { clicked => { root.clear-chosen(); } }
             }
         }
     }
@@ -552,31 +676,37 @@ export component MobileGallery inherits Rectangle {
                 }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/rotate-ccw.svg");
                 tint: Theme.text;
                 clicked => { root.chosen-action(0); }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/rotate-cw.svg");
                 tint: Theme.text;
                 clicked => { root.chosen-action(1); }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/copy.svg");
                 tint: Theme.text;
                 clicked => { root.chosen-action(2); }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/external-link.svg");
                 tint: Theme.text;
                 clicked => { root.chosen-action(7); }
             }
             if root.pages-chosen < root.total-pages : TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/trash-2.svg");
                 tint: Theme.danger;
                 clicked => { root.chosen-action(3); }
             }
             TouchButton {
+                border-radius: 22px;
                 icon: @image-url("../icons/x.svg");
                 clicked => { root.clear-chosen(); }
             }

@@ -55,6 +55,15 @@ pub(crate) enum TabAction {
         title: String,
         dir: Option<PathBuf>,
     },
+    /// A tab dragged into the shown document's gallery (Plan 0008 Phase 5 review): its document,
+    /// as it is now, written by its own engine, goes into tab `tab`'s document before page `at`.
+    InsertInto {
+        file: PathBuf,
+        tab: u64,
+        at: u32,
+        count: usize,
+        name: String,
+    },
 }
 
 struct Tab {
@@ -78,6 +87,8 @@ struct Tabs {
     next_temp: u64,
     /// Files whose pages went into another tab's document: deleted when the app ends.
     leftovers: Vec<PathBuf>,
+    /// The tab being dragged, by its id.
+    dragged: Option<u64>,
 }
 
 thread_local! {
@@ -112,6 +123,7 @@ pub(crate) fn init(ui: &MainWindow) -> Sender<EngineCmd> {
             model,
             next_temp: 0,
             leftovers: Vec::new(),
+            dragged: None,
         });
     });
     cmd_tx
@@ -189,6 +201,19 @@ fn is_pixels(event: &EngineEvent) -> bool {
 }
 
 fn deliver(ui: &MainWindow, id: u64, event: EngineEvent) {
+    // A parked tab's document written for the shown one is used now, not when it is shown.
+    if let EngineEvent::ToolDone { job_id, result, .. } = &event
+        && let Some(action) = with_tabs(|tabs| parked_tab_job(tabs, id, *job_id)).flatten()
+    {
+        match result {
+            Ok(_) => pages_written(ui, action),
+            Err(err) => {
+                discard(action);
+                ui.set_status_text(SharedString::from(format!("Copying the tab failed: {err}")));
+            }
+        }
+        return;
+    }
     let event = with_tabs(|tabs| {
         if tabs.list.get(tabs.active).map(|tab| tab.id) == Some(id) {
             return Some(event);
@@ -205,6 +230,87 @@ fn deliver(ui: &MainWindow, id: u64, event: EngineEvent) {
         apply_event(ui, event);
         sync(ui);
     }
+}
+
+/// The job `job_id` of the parked tab `id`, when it wrote a document for another tab.
+fn parked_tab_job(tabs: &mut Tabs, id: u64, job_id: u64) -> Option<TabAction> {
+    let active = tabs.list.get(tabs.active).map(|tab| tab.id);
+    let tab = tabs
+        .list
+        .iter_mut()
+        .find(|tab| tab.id == id && Some(id) != active)?;
+    let state = tab.parked.as_mut()?;
+    state
+        .running_tool
+        .take_if(|tool| {
+            tool.job_id == job_id && matches!(tool.tab, Some(TabAction::InsertInto { .. }))
+        })?
+        .tab
+}
+
+/// A tab's drag started (`index`), or ended (-1).
+pub(crate) fn tab_drag(index: i32) {
+    with_tabs(|tabs| {
+        tabs.dragged = usize::try_from(index)
+            .ok()
+            .and_then(|index| tabs.list.get(index))
+            .map(|tab| tab.id);
+    });
+}
+
+/// Something was dropped before page `at` of the shown document's gallery or page list: when it
+/// is a tab, that tab's whole document goes in there and this returns true.
+pub(crate) fn tab_dropped(ui: &MainWindow, at: u32) -> bool {
+    let Some(source) = with_tabs(|tabs| tabs.dragged.take()).flatten() else {
+        return false;
+    };
+    let target = with_tabs(|tabs| tabs.list.get(tabs.active).map(|tab| tab.id)).flatten();
+    let Some(target) = target.filter(|&target| target != source) else {
+        return true;
+    };
+    let takes = with_state_ret(|state| state.editable && !state.page_sizes.is_empty());
+    if takes != Some(true) {
+        ui.set_status_text(SharedString::from("This document cannot take pages"));
+        return true;
+    }
+    let Some(file) = temp_file() else {
+        return true;
+    };
+    let started = with_tabs(|tabs| {
+        let state = tabs
+            .list
+            .iter_mut()
+            .find(|tab| tab.id == source)?
+            .parked
+            .as_mut()?;
+        let name = state.doc_name();
+        let count = state.page_sizes.len();
+        if count == 0 {
+            return Some(Err(format!("\"{name}\" has no pages yet")));
+        }
+        let job = ToolJob::Extract {
+            parts: vec![((0..count as u32).collect(), file.clone())],
+        };
+        let action = TabAction::InsertInto {
+            file: file.clone(),
+            tab: target,
+            at,
+            count,
+            name: name.clone(),
+        };
+        Some(if state.start_tab_tool(job, action) {
+            Ok(format!("Copying \"{name}\"..."))
+        } else {
+            Err(format!(
+                "\"{name}\" is running a tool; try again when it ends"
+            ))
+        })
+    })
+    .flatten();
+    if let Some(Ok(message) | Err(message)) = started {
+        ui.set_status_text(SharedString::from(message));
+    }
+    true
 }
 
 /// The active tab's name and unsaved mark follow the window's.
@@ -516,6 +622,10 @@ fn extract(ui: &MainWindow, pages: Vec<u32>, file: PathBuf, action: TabAction) {
 
 /// Pages dropped on the new-tab button: they open as a new document in a new tab.
 fn pages_to_new_tab(ui: &MainWindow) {
+    // A tab dropped here stays as it is.
+    if with_tabs(|tabs| tabs.dragged.take()).flatten().is_some() {
+        return;
+    }
     let Some((pages, title, dir)) = dragged_pages(ui) else {
         return;
     };
@@ -532,6 +642,9 @@ fn pages_to_new_tab(ui: &MainWindow) {
 
 /// Pages dropped on a tab: copied to the end of its document. The shown tab gets nothing.
 fn pages_to_tab(ui: &MainWindow, index: usize) {
+    if with_tabs(|tabs| tabs.dragged.take()).flatten().is_some() {
+        return;
+    }
     let target = with_tabs(|tabs| (index != tabs.active).then(|| tabs.list[index].id)).flatten();
     let Some(tab) = target else {
         with_state(|state| state.drag_pages.clear());
@@ -588,8 +701,23 @@ pub(crate) fn pages_written(ui: &MainWindow, action: TabAction) {
             title,
             dir,
         } => {
-            // Out of this document as one undo step, then in a tab of their own.
-            with_state(|state| state.send_edit(EditOp::Pages(PageOp::Delete { pages })));
+            // Out of this document as one undo step, then in a tab of their own. What stays is
+            // the first part and is named like one, so Save asks where the part goes and the
+            // whole file is not cut short in place.
+            with_state(|state| {
+                let first: Vec<u32> = (0..pages.first().copied().unwrap_or(0)).collect();
+                let name = part_name(&state.doc_stem(), &first)
+                    .trim_end_matches(".pdf")
+                    .to_owned();
+                if state.untitled.is_none() {
+                    state.origin_dir = state.doc_dir();
+                }
+                state.untitled = Some(name);
+                ui.set_doc_title(SharedString::from(state.doc_name()));
+                ui.set_dirty(true);
+                state.send_edit(EditOp::Pages(PageOp::Delete { pages }));
+            });
+            sync(ui);
             open_written(ui, file, title, dir);
         }
         TabAction::CopyTo { file, tab, count } => {
@@ -622,6 +750,54 @@ pub(crate) fn pages_written(ui: &MainWindow, action: TabAction) {
             };
             ui.set_status_text(SharedString::from(message));
         }
+        TabAction::InsertInto {
+            file,
+            tab,
+            at,
+            count,
+            name,
+        } => {
+            let shown = with_tabs(|tabs| {
+                tabs.leftovers.push(file.clone());
+                tabs.list.get(tabs.active).map(|t| t.id) == Some(tab)
+            });
+            let insert = |state: &mut AppState| {
+                if !state.editable || state.page_sizes.is_empty() {
+                    return false;
+                }
+                state.send_edit(EditOp::Pages(PageOp::InsertFrom {
+                    path: file.clone(),
+                    at: at.min(state.page_sizes.len() as u32),
+                    source_pages: 0,
+                }));
+                true
+            };
+            // The shown tab, or (switched away meanwhile) a parked one.
+            let done = if shown == Some(true) {
+                with_state_ret(insert)
+            } else {
+                with_tabs(|tabs| {
+                    let index = tabs.list.iter().position(|t| t.id == tab)?;
+                    let done = insert(tabs.list[index].parked.as_mut()?);
+                    if done {
+                        let mut row = tabs.model.row_data(index).unwrap_or_default();
+                        row.dirty = true;
+                        tabs.model.set_row_data(index, row);
+                    }
+                    Some(done)
+                })
+                .flatten()
+            };
+            let message = match done {
+                Some(true) => format!(
+                    "Inserted {count} page{} from \"{name}\"",
+                    if count == 1 { "" } else { "s" }
+                ),
+                Some(false) => "The document cannot take pages".to_owned(),
+                None => "The tab was closed".to_owned(),
+            };
+            ui.set_status_text(SharedString::from(message));
+        }
     }
 }
 
@@ -630,7 +806,8 @@ pub(crate) fn discard(action: TabAction) {
     let file = match action {
         TabAction::NewTab { file, .. }
         | TabAction::CopyTo { file, .. }
-        | TabAction::Split { file, .. } => file,
+        | TabAction::Split { file, .. }
+        | TabAction::InsertInto { file, .. } => file,
     };
     let _ = std::fs::remove_file(file);
 }
@@ -652,7 +829,7 @@ impl AppState {
     /// A state for a new tab: no document, the window's models and epoch counters, and `cmd_tx`
     /// to its own engine. What belongs to the window comes with [`AppState::adopt_window`].
     pub(crate) fn sibling(&self, cmd_tx: Sender<EngineCmd>) -> AppState {
-        AppState::new(
+        let mut state = AppState::new(
             cmd_tx,
             self.parts(),
             TileScheduler::new(1, 1),
@@ -660,7 +837,10 @@ impl AppState {
             self.settings_path.clone(),
             self.scale_factor,
             bench::Trace::new(false),
-        )
+        );
+        // A new tab reads the way the window does.
+        state.book = self.book;
+        state
     }
 
     fn parts(&self) -> crate::WindowParts {
@@ -773,6 +953,8 @@ impl AppState {
         ui.set_is_loading(self.opening.is_some());
         ui.set_pages_chosen(0);
         ui.set_zoom_percent(self.scale_milli as f32 / 10.0);
+        ui.set_book_mode(self.book);
+        ui.set_book_shift(0.0);
         ui.set_gallery_scroll(0.0);
         if !self.editable {
             self.tool = Tool::Select;

@@ -41,8 +41,8 @@ precedence = "override"
 SPDX-FileCopyrightText = "2004-2025 Artifex Software, Inc."
 SPDX-License-Identifier = "AGPL-3.0-or-later"
 
-# Lucide icons (lucide-react 0.460.0), turned into SVG files for the window's islands (Plan 0007
-# Phase 2). Lucide is ISC; the parts that come from Feather are MIT.
+# Lucide icons (lucide-react 0.460.0; save-pen from Lucide 1.19.0), turned into SVG files for the
+# window's islands (Plan 0007 Phase 2). Lucide is ISC; the parts that come from Feather are MIT.
 [[annotations]]
 path = "crates/app/ui/icons/**"
 precedence = "override"

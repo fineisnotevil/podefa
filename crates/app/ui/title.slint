@@ -19,14 +19,18 @@ global TabMetrics {
 }
 
 // One tab: a click shows it, a middle click or its close button closes it, and pages dragged
-// onto it are copied into its document.
+// onto it are copied into its document. Another tab than the shown one can be dragged into the
+// shown document's pages (Plan 0008 Phase 5 review).
 component Tab inherits Rectangle {
     in property <TabItem> item;
     in property <bool> active;
     in property <bool> closable;
+    in property <data-transfer> drag-data;
     callback select();
     callback close();
     callback pages-dropped();
+    callback drag-started();
+    callback drag-ended();
 
     property <string> name: root.item.title == "" ? "New Tab" : root.item.title;
     property <bool> over: touch.has-hover || drop.has-drag;
@@ -41,58 +45,69 @@ component Tab inherits Rectangle {
     animate background { duration: 120ms; }
     clip: true;
 
-    // Outside the drop area, which does not keep what is under it in the hover chain.
+    // Outside the drag and drop areas, which do not keep what is under them in the hover chain.
     touch := TouchArea {
-        clicked => { root.select(); }
-        pointer-event(event) => {
-            if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.up
-                && root.closable) {
-                root.close();
+        DragArea {
+            enabled: !root.active;
+            allow-copy: true;
+            data: root.drag-data;
+            changed dragging => {
+                if (self.dragging) { root.drag-started(); }
             }
-        }
-        drop := DropArea {
-            can-drop(event) => { return DragAction.copy; }
-            dropped(event) => {
-                root.pages-dropped();
-                return DragAction.copy;
-            }
-            HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 8px;
-                spacing: 6px;
-                Text {
-                    text: root.name;
-                    color: root.active || root.over ? Theme.text : Theme.text-muted;
-                    font-size: 12px;
-                    font-weight: root.active ? 600 : 500;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    horizontal-stretch: 1;
+            drag-finished(action) => { root.drag-ended(); }
+            drop := DropArea {
+                can-drop(event) => { return DragAction.copy; }
+                dropped(event) => {
+                    root.pages-dropped();
+                    return DragAction.copy;
                 }
-                if root.item.dirty && !(root.closable && root.over) : VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        width: 6px;
-                        height: 6px;
-                        border-radius: 3px;
-                        background: Theme.text-muted;
+                TouchArea {
+                    clicked => { root.select(); }
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.middle
+                            && event.kind == PointerEventKind.up && root.closable) {
+                            root.close();
+                        }
                     }
-                }
-            }
-            // The close button lies over the end of the title on hover, the title fading out
-            // under it, so it takes no room from the name (DESIGN.md step 20).
-            if root.closable && root.over : Rectangle {
-                x: parent.width - self.width;
-                width: 40px;
-                background: @linear-gradient(90deg, root.fill.transparentize(100%) 0%, root.fill 45%);
-                IconButton {
-                    x: parent.width - self.width - 3px;
-                    width: 22px;
-                    height: 22px;
-                    icon-size: 12px;
-                    icon: @image-url("icons/x.svg");
-                    tip: "Close Tab (Ctrl+W)";
-                    clicked => { root.close(); }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        Text {
+                            text: root.name;
+                            color: root.active || root.over ? Theme.text : Theme.text-muted;
+                            font-size: 12px;
+                            font-weight: root.active ? 600 : 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        if root.item.dirty && !(root.closable && root.over) : VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 6px;
+                                height: 6px;
+                                border-radius: 3px;
+                                background: Theme.text-muted;
+                            }
+                        }
+                    }
+                    // The close button lies over the end of the title on hover, the title fading out
+                    // under it, so it takes no room from the name (DESIGN.md step 20).
+                    if root.closable && root.over : Rectangle {
+                        x: parent.width - self.width;
+                        width: 40px;
+                        background: @linear-gradient(90deg, root.fill.transparentize(100%) 0%, root.fill 45%);
+                        IconButton {
+                            x: parent.width - self.width - 3px;
+                            width: 22px;
+                            height: 22px;
+                            icon-size: 12px;
+                            icon: @image-url("icons/x.svg");
+                            tip: "Close Tab (Ctrl+W)";
+                            clicked => { root.close(); }
+                        }
+                    }
                 }
             }
         }
@@ -110,6 +125,8 @@ component TabStrip inherits Rectangle {
     callback new-tab();
     callback pages-to-tab(int);
     callback pages-to-new-tab();
+    in property <data-transfer> drag-data;
+    callback tab-drag(int);
 
     property <length> room: max(0px, root.width - TabMetrics.plus-w - TabMetrics.gap);
     property <length> tab-w: root.tabs.length == 0 ? TabMetrics.max-w
@@ -155,6 +172,9 @@ component TabStrip inherits Rectangle {
                 select => { root.select(index); }
                 close => { root.close(index); }
                 pages-dropped => { root.pages-to-tab(index); }
+                drag-data: root.drag-data;
+                drag-started => { root.tab-drag(index); }
+                drag-ended => { root.tab-drag(-1); }
             }
         }
     }
@@ -207,6 +227,8 @@ export component TitleRow inherits Rectangle {
     callback new-tab();
     callback pages-to-tab(int);
     callback pages-to-new-tab();
+    in property <data-transfer> drag-data;
+    callback tab-drag(int);
 
     // Whether the menu being opened was opened from the keyboard: its first row takes the focus.
     property <bool> menu-from-keyboard: false;
@@ -447,6 +469,8 @@ export component TitleRow inherits Rectangle {
                     new-tab => { root.new-tab(); }
                     pages-to-tab(index) => { root.pages-to-tab(index); }
                     pages-to-new-tab => { root.pages-to-new-tab(); }
+                    drag-data: root.drag-data;
+                    tab-drag(index) => { root.tab-drag(index); }
                 }
                 WindowMoveArea {
                     horizontal-stretch: 1;

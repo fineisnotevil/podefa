@@ -9,16 +9,17 @@
 // camera back to the gallery. A mode change only fades and scales what is drawn already: the
 // canvas keeps its size and place, so no tile is rendered while it moves (plan row AT).
 
-import { Button, ComboBox, LineEdit, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
+import { Button, ComboBox, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
 import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem } from "types.slint";
 import { Theme } from "theme.slint";
-import { Island, IconButton } from "widgets.slint";
+import { Field, Island, IconButton } from "widgets.slint";
 import { TitleRow } from "title.slint";
 import { SidebarColumn, Drawer } from "sidebar.slint";
 import { StatusIsland, MessageIsland } from "statusbar.slint";
 import { SearchIsland } from "search.slint";
 import { Gallery } from "gallery.slint";
-import { MobileShell } from "mobile/shell.slint";
+import { MobileShell, ShellActivity } from "mobile/shell.slint";
+export { ShellActivity }
 import { MobileGallery } from "mobile/gallery.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
@@ -124,7 +125,13 @@ export component MainWindow inherits Window {
     // page would land in, and its height.
     in-out property <length> mgallery-offset: 0px;
     in-out property <int> mgallery-drop: -1;
+    // The pages a finger holds in the column, the one under it first (at most 3).
+    in property <[ThumbRow]> mgallery-stack;
     out property <length> mgallery-view-h: mgallery.height;
+    // Where the column's room starts: under the header's search bar and history capsule.
+    out property <length> mgallery-inset-top: mshell.chrome-bottom + root.island-gap;
+    // A menu, a card or the sheet is open on the phone: the islands stay in sight.
+    out property <bool> mobile-busy: mshell.busy;
     out property <bool> mobile-in-safe-area: mshell.in-safe-area;
     out property <length> safe-inset-left: root.safe-area-insets.left;
     out property <length> safe-inset-top: root.safe-area-insets.top;
@@ -178,6 +185,9 @@ export component MainWindow inherits Window {
     // Pages dragged from the gallery or the thumbnails onto a tab, or onto the new-tab button.
     callback pages-to-tab(int);
     callback pages-to-new-tab();
+    // A tab dragged (its index), or the drag over (-1): dropped in the shown document's pages,
+    // its document goes in there (Plan 0008 Phase 5 review).
+    callback tab_drag(int);
     in-out property <int> drop-row: -1;
     in-out property <bool> drop-after: false;
     in-out property <int> pages-chosen: 0;
@@ -271,6 +281,12 @@ export component MainWindow inherits Window {
 
     // The find bar (Plan 0003, §4.4).
     in-out property <bool> find-visible: false;
+    // Book mode (Plan 0008 Phase 5 review): one page at a time, turned sideways; Rust keeps it.
+    in property <bool> book-mode: false;
+    // While the page follows a finger turning it, or slides to the next one: its offset.
+    in property <length> book-shift: 0px;
+    // Read on a phone hides its islands after a while without a touch (Rust's timer).
+    in property <bool> chrome-hidden: false;
     in-out property <string> find-text: "";
     in-out property <string> find-counter: "";
     in-out property <[HitView]> hit-rects;
@@ -351,6 +367,9 @@ export component MainWindow inherits Window {
     callback insets_changed();
     callback fit_width();
     callback fit_page();
+    callback book_mode_chosen(bool);
+    // The mouse wheel in book mode: within the page, and a turn at its end.
+    callback book_wheel(length);
     // A key on the viewport: text as Slint reports it, plus ctrl and shift; true when handled.
     callback nav_key(string, bool, bool) -> bool;
     // A key anywhere in the window, before the focused element sees it: the shortcuts that work
@@ -609,7 +628,7 @@ export component MainWindow inherits Window {
                         cancelled => { root.pinch(3, self.scale, self.center.x, self.center.y); }
 
                         Rectangle {
-                            x: root.pinch-dx;
+                            x: root.pinch-dx + root.book-shift;
                             y: root.pinch-dy;
                             width: parent.width;
                             height: parent.height;
@@ -626,7 +645,9 @@ export component MainWindow inherits Window {
                                 // except while a long press is selecting (or moving a note) or the Ink
                                 // or Crop tool draws.
                                 mouse-drag-pan-enabled: false;
-                                interactive: !root.touch-selecting && root.tool != 6 && root.tool != 7;
+                                // In book mode a finger moves the page through Rust (`book.rs`).
+                                interactive: !root.touch-selecting && root.tool != 6 && root.tool != 7
+                                    && !root.book-mode;
 
                                 // These fire on every change, user or programmatic, including each tick of
                                 // the 180 ms wheel animation, which makes them the viewport source of truth.
@@ -694,6 +715,10 @@ export component MainWindow inherits Window {
                                     scroll-event(event) => {
                                         if (event.modifiers.control) {
                                             root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
+                                            return accept;
+                                        }
+                                        if (root.book-mode) {
+                                            root.book_wheel(event.delta-y);
                                             return accept;
                                         }
                                         return reject;
@@ -1173,7 +1198,7 @@ export component MainWindow inherits Window {
             visible: root.mobile && (root.tools-t > 0 || root.warm) && root.total_pages > 0;
             opacity: root.tools-t;
             transform-scale: 0.88 + 0.12 * root.tools-t;
-            inset-top: root.canvas-top;
+            inset-top: root.mgallery-inset-top;
             inset-bottom: root.doc-inset-bottom;
             thumbs: root.thumbs;
             total-pages: root.total_pages;
@@ -1181,6 +1206,7 @@ export component MainWindow inherits Window {
             editable: root.editable;
             offset <=> root.mgallery-offset;
             drop-index <=> root.mgallery-drop;
+            stack: root.mgallery-stack;
             scrolled => { root.gallery_scrolled(); }
             card-tapped(index) => { root.gallery_current(index); }
             card-toggled(index) => { root.gallery_toggled(index); }
@@ -1345,7 +1371,7 @@ export component MainWindow inherits Window {
                                     checked: root.split-mode == 0;
                                     clicked => { root.split-mode = 0; }
                                 }
-                                LineEdit {
+                                Field {
                                     width: 60px;
                                     text <=> root.split-every;
                                     enabled: root.split-mode == 0;
@@ -1366,7 +1392,7 @@ export component MainWindow inherits Window {
                                     checked: root.split-mode == 1;
                                     clicked => { root.split-mode = 1; }
                                 }
-                                LineEdit {
+                                Field {
                                     placeholder-text: "1-3, 4, 5-";
                                     text <=> root.split-ranges;
                                     enabled: root.split-mode == 1;
@@ -1435,7 +1461,7 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit { text <=> root.stamp-text; init => { self.focus(); } }
+                                Field { text <=> root.stamp-text; init => { self.focus(); } }
                             }
                             if root.stamp-mode == 0 : HorizontalLayout {
                                 spacing: 6px;
@@ -1475,7 +1501,7 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit {
+                                Field {
                                     text <=> root.stamp-format;
                                     placeholder-text: "{n} / {total}";
                                     init => { self.focus(); }
@@ -1485,9 +1511,9 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit { width: 70px; text <=> root.stamp-first; }
+                                Field { width: 70px; text <=> root.stamp-first; }
                                 Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit { width: 70px; text <=> root.stamp-size; }
+                                Field { width: 70px; text <=> root.stamp-size; }
                                 Rectangle { horizontal-stretch: 1; }
                             }
                             if root.stamp-mode == 1 : HorizontalLayout {
@@ -1512,7 +1538,7 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit {
+                                Field {
                                     text <=> root.stamp-pages;
                                     placeholder-text: "All, or 1-3, 5, 8-";
                                 }
@@ -1594,15 +1620,21 @@ export component MainWindow inherits Window {
                                     model: ["PNG", "JPEG"];
                                     current-index <=> root.convert-format;
                                 }
-                                Text { text: "Resolution"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit { width: 70px; text <=> root.convert-dpi; }
+                            }
+                            // A row of its own: beside the format it ran out of a phone's sheet.
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Resolution"; vertical-alignment: center; color: Theme.text; }
+                                Field { width: 70px; text <=> root.convert-dpi; }
                                 Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
+                                Rectangle { horizontal-stretch: 1; }
                             }
                             if root.convert-mode == 1 : HorizontalLayout {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit {
+                                Field {
                                     text <=> root.convert-pages;
                                     placeholder-text: "All, or 1-3, 5, 8-";
                                 }
@@ -1726,7 +1758,7 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit {
+                                Field {
                                     text <=> root.props-title;
                                     read-only: !root.editable;
                                     init => { self.focus(); }
@@ -1736,19 +1768,19 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit { text <=> root.props-author; read-only: !root.editable; }
+                                Field { text <=> root.props-author; read-only: !root.editable; }
                             }
                             HorizontalLayout {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit { text <=> root.props-subject; read-only: !root.editable; }
+                                Field { text <=> root.props-subject; read-only: !root.editable; }
                             }
                             HorizontalLayout {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
-                                LineEdit { text <=> root.props-keywords; read-only: !root.editable; }
+                                Field { text <=> root.props-keywords; read-only: !root.editable; }
                             }
                             Text {
                                 vertical-stretch: 1;
@@ -1805,6 +1837,8 @@ export component MainWindow inherits Window {
             new-tab => { root.open_file(); }
             pages-to-tab(index) => { root.pages-to-tab(index); }
             pages-to-new-tab => { root.pages-to-new-tab(); }
+            drag-data: root.page-drag-data;
+            tab-drag(index) => { root.tab_drag(index); }
         }
 
         sidebar := SidebarColumn {
@@ -1954,6 +1988,8 @@ export component MainWindow inherits Window {
             zoom-reset => { root.zoom_reset(); }
             fit-width => { root.fit_width(); }
             fit-page => { root.fit_page(); }
+            book: root.book-mode;
+            book-changed(on) => { root.book_mode_chosen(on); }
         }
 
         if (root.status_text != "" || root.tool-running) && !root.mobile : MessageIsland {
@@ -2035,6 +2071,10 @@ export component MainWindow inherits Window {
             redo => { root.redo(); }
             open-file => { root.open_file(); }
             images-to-pdf => { root.images_to_pdf(); }
+            merge-open => { root.merge_open(); }
+            book: root.book-mode;
+            book-changed(on) => { root.book_mode_chosen(on); }
+            chrome-hidden: root.chrome-hidden && root.mode == 0;
             choose-theme(index) => { root.choose_theme(index); }
             props-open => { root.props_open(); }
             stamp-open(mode) => { root.stamp_open(mode); }
@@ -2052,6 +2092,18 @@ export component MainWindow inherits Window {
             fit-width => { root.fit_width(); }
             fit-page => { root.fit_page(); }
             select-tab(index) => { root.select-tab(index); }
+            doc-held(index, y) => {
+                root.tab_drag(index);
+                mgallery.hold-doc(root.tabs[index].title, y - mgallery.absolute-position.y);
+            }
+            doc-moved(y) => { mgallery.move-doc(y - mgallery.absolute-position.y); }
+            doc-let-go => {
+                let at = mgallery.drop-doc();
+                if (at >= 0) {
+                    root.gallery_dropped(at);
+                }
+                root.tab_drag(-1);
+            }
             close-tab(index) => { root.close-tab(index); }
             thumb-clicked(index) => { root.thumb_clicked(index, false, false); }
             thumbs-moved => { root.thumbs_moved(); }

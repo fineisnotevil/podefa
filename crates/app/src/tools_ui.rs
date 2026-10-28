@@ -34,8 +34,12 @@ pub(crate) struct RunningTool {
 }
 
 impl AppState {
-    /// The open document's file name without its extension, for naming outputs.
+    /// The open document's file name without its extension, for naming outputs; a document made
+    /// from pages goes by its tab's name.
     pub(crate) fn doc_stem(&self) -> String {
+        if let Some(title) = &self.untitled {
+            return title.clone();
+        }
         self.doc_path
             .as_deref()
             .and_then(Path::file_stem)
@@ -71,6 +75,33 @@ impl AppState {
         ui.set_tool_running(true);
         ui.set_status_text(SharedString::from(format!("{title}...")));
         let _ = self.cmd_tx.send(EngineCmd::RunTool { job_id, job });
+        true
+    }
+
+    /// Starts a job while this tab is parked, for another tab's use (`action`): the window shows
+    /// no progress for it, and the job's end goes to `action` at once ([`crate::tabs`]).
+    pub(crate) fn start_tab_tool(&mut self, job: ToolJob, action: crate::tabs::TabAction) -> bool {
+        if self.running_tool.is_some() {
+            return false;
+        }
+        self.next_job_id += 1;
+        let job_id = self.next_job_id;
+        let tool = RunningTool {
+            job_id,
+            title: job.title(),
+            started: Instant::now(),
+            offer_open: false,
+            tab: Some(action),
+            outputs: job.outputs(),
+        };
+        if self
+            .cmd_tx
+            .send(EngineCmd::RunTool { job_id, job })
+            .is_err()
+        {
+            return false;
+        }
+        self.running_tool = Some(tool);
         true
     }
 

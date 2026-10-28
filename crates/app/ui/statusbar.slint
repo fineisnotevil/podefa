@@ -49,6 +49,9 @@ export component StatusIsland inherits Island {
     callback zoom-reset();
     callback fit-width();
     callback fit-page();
+    // Book mode (Plan 0008 Phase 5 review): one page at a time.
+    in property <bool> book;
+    callback book-changed(bool);
 
     property <bool> ready: root.total-pages > 0 && !root.is-loading;
 
@@ -122,6 +125,15 @@ export component StatusIsland inherits Island {
                     tip: "Fit Page";
                     enabled: root.ready;
                     clicked => { root.fit-page(); }
+                }
+                IconButton {
+                    width: 28px;
+                    icon: @image-url("icons/gallery-horizontal.svg");
+                    icon-size: 14px;
+                    tip: root.book ? "Book Mode: on (one page at a time)" : "Book Mode: one page at a time";
+                    enabled: root.ready;
+                    checked: root.book;
+                    clicked => { root.book-changed(!root.book); }
                 }
                 actual := IconButton {
                     width: 34px;

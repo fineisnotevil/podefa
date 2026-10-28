@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 
 /// The `--bench-*` / `FA_PDF_TRACE` diagnostic harness (Plan 0001 Phase 2, Plan 0002 Phase 1).
 mod bench;
+mod book;
 mod convert_ui;
 mod fields_ui;
 pub mod platform;
@@ -383,6 +384,16 @@ struct AppState {
     /// The last tap of a finger, to tell a double tap: when and where (viewport, logical px).
     last_tap: Option<(Instant, f32, f32)>,
     touch_selecting: bool,
+    /// Book mode (Plan 0008 Phase 5 review, `book.rs`): one page at a time, the page shown, a
+    /// finger moving it, the slide of a turned page, and the wheel's last turn.
+    book: bool,
+    book_page: usize,
+    book_drag: Option<book::BookDrag>,
+    book_slide: Option<(f32, Instant)>,
+    book_timer: slint::Timer,
+    last_book_wheel: Option<Instant>,
+    /// The wait before Read on a phone hides its islands.
+    chrome_timer: slint::Timer,
     /// Text line boxes of the pages near the view, to tell text from margins under the pointer
     /// (Plan 0003 Phase 4 review), and the pages asked for and not answered yet.
     text_lines: HashMap<u32, Vec<pdf_core::Rect>>,
@@ -423,6 +434,9 @@ struct AppState {
     /// page and its points in page space as the pointer gave them (Plan 0004 Phase 4).
     ink_width: usize,
     ink: Option<(u32, Vec<(f32, f32)>)>,
+    /// A second finger came down while one drew, or two fingers pinch: no finger draws until one
+    /// lifts (Plan 0008 Phase 5 review).
+    ink_blocked: bool,
     /// The live stroke's path commands, rebuilt in place on every pointer move.
     ink_commands: String,
     /// The page whose committed stroke is still drawn live, until its new tiles are all in.
@@ -539,6 +553,13 @@ impl AppState {
             tap_back: None,
             last_tap: None,
             touch_selecting: false,
+            book: false,
+            book_page: 0,
+            book_drag: None,
+            book_slide: None,
+            book_timer: slint::Timer::default(),
+            last_book_wheel: None,
+            chrome_timer: slint::Timer::default(),
             text_lines: HashMap::new(),
             lines_pending: HashSet::new(),
             editable: false,
@@ -563,6 +584,7 @@ impl AppState {
             note_drag: None,
             ink_width: 1,
             ink: None,
+            ink_blocked: false,
             ink_commands: String::new(),
             ink_shown: None,
             crop: None,
@@ -614,7 +636,11 @@ impl AppState {
     /// The document laid out at `milli`, with the islands' current margins.
     fn layout_for(&mut self, ui: &MainWindow, milli: u32) -> DocLayout {
         self.margins = self.read_margins(ui);
-        DocLayout::with_margins(&self.page_sizes, milli, self.gap_px(), self.margins)
+        // In book mode any page may sit in the middle of the view, the first and the last too.
+        let mut margins = self.margins;
+        margins.top += self.book_pad();
+        margins.bottom += self.book_pad();
+        DocLayout::with_margins(&self.page_sizes, milli, self.gap_px(), margins)
     }
 
     /// The viewport less the islands' margins, in device pixels: the room the pages are seen in.
@@ -685,6 +711,11 @@ impl AppState {
             self.pos.0.clamp(0.0, (doc_w - view_w).max(0.0))
         };
         self.pos.1 = self.pos.1.clamp(0.0, (doc_h - view_h).max(0.0));
+        if self.book
+            && let Some((first, last)) = self.book_range(ui)
+        {
+            self.pos.1 = self.pos.1.clamp(first, last.max(first));
+        }
     }
 
     /// A document x in canvas logical pixels.
@@ -748,7 +779,16 @@ impl AppState {
     /// diffs against, and what the trace counts holes over.
     fn visible(&self, ui: &MainWindow) -> Vec<TileKey> {
         let (w, h) = self.view_size(ui);
-        self.layout.visible_cells(self.pos.0, self.pos.1, w, h)
+        let mut keys = self.layout.visible_cells(self.pos.0, self.pos.1, w, h);
+        self.keep_book_page(&mut keys);
+        keys
+    }
+
+    /// Book mode draws the shown page only: the next one's top may be in the view too.
+    fn keep_book_page(&self, keys: &mut Vec<TileKey>) {
+        if self.book {
+            keys.retain(|key| key.page as usize == self.book_page);
+        }
     }
 
     /// The prefetch ring: the same viewport grown by one tile on every side, across pages.
@@ -771,12 +811,14 @@ impl AppState {
             return Vec::new();
         }
         let tile = TILE_SIZE_PX as f64;
-        self.layout.visible_cells(
+        let mut keys = self.layout.visible_cells(
             self.pos.0 - tile,
             self.pos.1 - tile,
             w + 2.0 * tile,
             h + 2.0 * tile,
-        )
+        );
+        self.keep_book_page(&mut keys);
+        keys
     }
 
     /// Diffs the live viewport against the cache and applies the result.
@@ -921,6 +963,10 @@ impl AppState {
         let Some(slot) = self.layout.slot(page as usize).copied() else {
             return;
         };
+        if self.book && self.book_page != page as usize {
+            self.book_page = page as usize;
+            self.begin_epoch();
+        }
         let s = self.scale_milli as f64 / 1000.0;
         let (x, y) = (
             slot.x as f64 + rect.x as f64 * s,
@@ -1158,6 +1204,9 @@ impl AppState {
         }
         if kind == 0 {
             self.touch_input = touch;
+            if touch {
+                self.chrome_touched(ui, false);
+            }
             // The move that brought the finger down may have shown a tip.
             if touch && ui.get_note_hover_visible() {
                 ui.set_note_hover_visible(false);
@@ -1176,6 +1225,12 @@ impl AppState {
         // The Ink tool draws with the mouse, a pen and a finger alike (Plan 0004, §4.2).
         if self.tool == Tool::Ink && self.editable {
             match kind {
+                // Another finger while one draws: two fingers zoom, so neither draws.
+                0 if touch && (self.ink.is_some() || self.pinch.is_some()) => {
+                    self.finish_ink(ui, false);
+                    self.ink_blocked = true;
+                }
+                0 if self.ink_blocked => {}
                 0 => {
                     if let Some(point) = point {
                         self.clear_selection(ui);
@@ -1186,10 +1241,15 @@ impl AppState {
                     }
                 }
                 2 => self.ink_point(ui, x, y),
-                1 => self.finish_ink(ui, true),
-                4 => self.finish_ink(ui, false),
+                1 | 4 => {
+                    self.finish_ink(ui, kind == 1 && !self.ink_blocked);
+                    self.ink_blocked = false;
+                }
                 _ => {}
             }
+            return;
+        }
+        if self.book && touch && self.book_pointer(ui, kind, x, y) {
             return;
         }
         match kind {
@@ -1358,6 +1418,7 @@ impl AppState {
                     && !self.touch_selecting
                     && !self.touch_tap(ui, point)
                 {
+                    self.chrome_touched(ui, true);
                     let double = self.last_tap.is_some_and(|(at, tx, ty)| {
                         at.elapsed().as_millis() < DOUBLE_TAP_MS
                             && (x - tx).abs() <= DOUBLE_TAP_SLOP_LOGICAL_PX
@@ -2021,6 +2082,16 @@ impl AppState {
             self.show_page_sel(ui);
         }
         self.drag_pages = self.page_sel.iter().copied().collect();
+        // The phone's column shows what the finger holds: this page on top, then the other
+        // chosen ones, three at most.
+        if self.mobile {
+            let held: Vec<ThumbRow> = std::iter::once(row)
+                .chain(self.drag_pages.iter().copied().filter(|&page| page != row))
+                .take(3)
+                .filter_map(|page| self.thumbs_model.row_data(page as usize))
+                .collect();
+            ui.set_mgallery_stack(ModelRc::new(VecModel::from(held)));
+        }
     }
 
     /// The gallery's gap before page `before` got the dragged pages (Plan 0007 Phase 3).
@@ -2571,6 +2642,8 @@ impl AppState {
         }
         self.mode = mode;
         self.mobile = ui.get_mobile();
+        ui.set_chrome_hidden(false);
+        self.chrome_touched(ui, false);
         let motion = Duration::from_millis(MODE_MOTION_MS + MODE_SETTLE_MS);
         self.motion_until = Some(Instant::now() + motion);
         if self.in_gallery() {
@@ -2624,7 +2697,7 @@ impl AppState {
     /// The phone's column (Plan 0008 Phase 4): scrolls so `page` is between the header and the
     /// dock, in the middle when it was not.
     fn reveal_in_column(&mut self, ui: &MainWindow, page: usize) {
-        let (top_inset, bottom_inset) = (ui.get_doc_inset_top(), ui.get_doc_inset_bottom());
+        let (top_inset, bottom_inset) = (ui.get_mgallery_inset_top(), ui.get_doc_inset_bottom());
         let view = ui.get_mgallery_view_h();
         let count = self.page_sizes.len() as f32;
         let content = top_inset
@@ -2667,7 +2740,8 @@ impl AppState {
         }
         if self.in_gallery() && self.mobile {
             let scroll = (-ui.get_mgallery_offset()).max(0.0);
-            let start = ui.get_doc_inset_top() + MOBILE_GALLERY_LEAD_PX + MOBILE_GALLERY_GAP_PX;
+            let start =
+                ui.get_mgallery_inset_top() + MOBILE_GALLERY_LEAD_PX + MOBILE_GALLERY_GAP_PX;
             let view = ui.get_mgallery_view_h().max(0.0);
             let first = ((scroll - start) / MOBILE_GALLERY_PITCH_PX)
                 .floor()
@@ -2884,6 +2958,7 @@ impl AppState {
         let Some(slot) = self.layout.slot(page).copied() else {
             return;
         };
+        self.book_page = page;
         let y = match top {
             // The destination lands just under the title row, as a page's top does.
             Some(top) => {
@@ -2948,6 +3023,10 @@ impl AppState {
 
     /// One keyboard navigation action.
     fn nav(&mut self, ui: &MainWindow, action: NavAction) {
+        if self.book {
+            self.book_nav(ui, action);
+            return;
+        }
         // A page step is the room the pages are seen in, so nothing passes under the islands
         // unseen; `scroll_to` clamps to the whole viewport.
         let (_, free_h) = self.free_view(ui);
@@ -2986,9 +3065,11 @@ impl AppState {
                 if self.layout.is_empty() {
                     return;
                 }
-                // Two fingers are no long press and no tap.
+                // Two fingers are no long press and no tap, and draw no ink.
                 self.long_press.stop();
                 self.touch_down = None;
+                self.finish_ink(ui, false);
+                self.ink_blocked = true;
                 self.pinch = Some((self.scale_milli, (x, y)));
                 ui.set_pinch_ox(x);
                 ui.set_pinch_oy(y);
@@ -3028,10 +3109,13 @@ impl AppState {
     /// and back to the zoom before when it is already there (Plan 0008, §4).
     fn double_tap(&mut self, ui: &MainWindow, x: f32, y: f32) {
         let sf = self.sf();
-        let page = self
-            .layout
-            .page_near(self.pos.1 + y as f64 * sf)
-            .unwrap_or_else(|| self.current_page(ui));
+        let page = if self.book {
+            self.book_page
+        } else {
+            self.layout
+                .page_near(self.pos.1 + y as f64 * sf)
+                .unwrap_or_else(|| self.current_page(ui))
+        };
         let Some(size) = self.page_sizes.get(page).copied() else {
             return;
         };
@@ -3070,6 +3154,7 @@ impl AppState {
     /// Zooms to `milli` with `page`'s top at the viewport top.
     fn zoom_to_page(&mut self, ui: &MainWindow, milli: u32, page: usize) {
         let milli = milli.clamp(ZOOM_MIN_MILLI, ZOOM_MAX_MILLI);
+        self.book_page = page;
         if milli != self.scale_milli {
             self.layout = self.layout_for(ui, milli);
             self.scale_milli = milli;
@@ -3086,6 +3171,9 @@ impl AppState {
     /// Pages that hold a page row and, when tiled, a base layer: the ones in view plus one page
     /// either side, so the paper and the base layer are already there when a scroll reaches them.
     fn near_pages(&self, ui: &MainWindow) -> std::ops::Range<usize> {
+        if self.book {
+            return self.book_page..(self.book_page + 1).min(self.layout.len());
+        }
         let (_, view_h) = self.view_size(ui);
         let range = self.layout.pages_in(self.pos.1, self.pos.1 + view_h);
         let start = range.start.saturating_sub(1);
@@ -3439,6 +3527,8 @@ impl AppState {
             self.update_recent();
         }
         ui.set_dirty(self.has_unsaved_changes());
+        ui.set_chrome_hidden(false);
+        self.chrome_touched(ui, false);
     }
 
     /// The engine could not open the document: the one that was showing is still open there, so
@@ -3518,6 +3608,7 @@ impl AppState {
             ui.set_tool(self.tool.index());
         }
         self.scale_milli = ZOOM_DEFAULT_MILLI;
+        self.book_page = 0;
         self.layout = self.layout_for(ui, self.scale_milli);
         self.reset_thumbs(self.page_sizes.len());
         ui.set_thumb_scroll_y(0.0);
@@ -3567,6 +3658,7 @@ impl AppState {
         let Some(top) = page_top(&self.layout, page) else {
             return;
         };
+        self.book_page = page;
         self.begin_epoch();
         self.pos.1 = top;
         self.clamp_pos(ui);
@@ -3577,6 +3669,9 @@ impl AppState {
 
     /// The page the viewport's vertical centre is on.
     fn current_page(&self, ui: &MainWindow) -> usize {
+        if self.book {
+            return self.book_page;
+        }
         let (_, view_h) = self.view_size(ui);
         self.layout
             .page_near(self.pos.1 + view_h / 2.0)
@@ -4193,6 +4288,8 @@ fn expand_on_click(items: &[OutlineItem], expanded: &mut [bool], index: usize) -
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyCommand {
     Scroll(NavAction),
+    /// Left and Right: the page before or the next one (in book mode, a turn).
+    Turn(bool),
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -4316,6 +4413,8 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
         c if c == char::from(Key::PageDown) => NavAction::PageDown,
         c if c == char::from(Key::Home) => NavAction::Home,
         c if c == char::from(Key::End) => NavAction::End,
+        c if c == char::from(Key::LeftArrow) => return Some(KeyCommand::Turn(false)),
+        c if c == char::from(Key::RightArrow) => return Some(KeyCommand::Turn(true)),
         _ => return None,
     };
     Some(KeyCommand::Scroll(action))
@@ -4620,6 +4719,16 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
             }
             with_state(|state| match command {
                 KeyCommand::Scroll(action) => state.nav(&ui, action),
+                KeyCommand::Turn(forward) => {
+                    if state.book {
+                        state.turn(&ui, forward);
+                    } else if let Some(page) = state
+                        .current_page(&ui)
+                        .checked_add_signed(if forward { 1 } else { -1 })
+                    {
+                        state.go_to_page(&ui, page);
+                    }
+                }
                 KeyCommand::ZoomIn => {
                     let next = zoom_in_milli(state.scale_milli);
                     state.zoom(&ui, next, ax, ay);
@@ -4734,6 +4843,34 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
         main_window.on_fit_page(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.fit(&ui, true));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_book_mode_chosen(move |on| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.set_book(&ui, on));
+            }
+        });
+    }
+
+    {
+        let weak = main_window.as_weak();
+        main_window.on_book_wheel(move |delta| {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.book_wheel(&ui, delta));
+            }
+        });
+    }
+
+    {
+        // A tap on the phone's islands keeps them in sight a while longer.
+        let weak = main_window.as_weak();
+        main_window.global::<ShellActivity>().on_touched(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.chrome_touched(&ui, false));
             }
         });
     }
@@ -5158,6 +5295,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
         let weak = main_window.as_weak();
         main_window.on_gallery_drag_ended(move || {
             if let Some(ui) = weak.upgrade() {
+                ui.set_mgallery_stack(ModelRc::default());
                 with_state(|state| {
                     if std::mem::take(&mut state.drag_chose) {
                         state.page_sel.clear();
@@ -5167,17 +5305,25 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
                 });
             }
         });
+        let weak = main_window.as_weak();
         main_window.on_gallery_dropped(move |at| {
-            if let Ok(at) = u32::try_from(at) {
+            if let (Some(ui), Ok(at)) = (weak.upgrade(), u32::try_from(at))
+                && !tabs::tab_dropped(&ui, at)
+            {
                 with_state(|state| state.gallery_dropped(at));
             }
         });
     }
+    let weak = main_window.as_weak();
     main_window.on_thumb_dropped(move |row, after| {
-        if let Ok(row) = u32::try_from(row) {
+        if let (Some(ui), Ok(row)) = (weak.upgrade(), u32::try_from(row))
+            && !tabs::tab_dropped(&ui, if after { row + 1 } else { row })
+        {
             with_state(|state| state.thumb_dropped(row, after));
         }
     });
+    // A tab's drag (Plan 0008 Phase 5 review): dropped in a gap, its document goes in there.
+    main_window.on_tab_drag(tabs::tab_drag);
     // The drag's payload: application data only, since the app itself knows which pages move. A
     // payload with text would be handed to the platform's drag and drop, whose drops the winit
     // backend never delivers back (Plan 0003 §3.2); with none, Slint runs the drag in the window.

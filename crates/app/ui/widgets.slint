@@ -162,3 +162,70 @@ export component MenuHeading inherits Text {
     height: 22px;
     vertical-alignment: center;
 }
+
+// A one-line text box (in place of the style's LineEdit). On Android the keyboard's word in
+// progress (its composition) reaches Slint 1.18.1 as wholly selected
+// (i-slint-backend-android-activity `javahelper.rs:616`), so the word being typed showed as a
+// selection; here a composition is drawn as plain text.
+export component Field inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder-text;
+    in property <bool> enabled <=> input.enabled;
+    in property <bool> read-only <=> input.read-only;
+    in property <InputType> input-type <=> input.input-type;
+    in property <length> font-size: 13px;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback accepted(string);
+
+    public function select-all() {
+        input.select-all();
+    }
+
+    property <bool> composing: input.preedit-text != "";
+    // The text slides left so the cursor stays in the box.
+    property <length> scroll: 0px;
+
+    min-width: 40px;
+    min-height: 32px;
+    border-radius: 6px;
+    background: root.enabled && !root.read-only ? Theme.surface : Theme.hover;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.focus : Theme.line-strong;
+    forward-focus: input;
+
+    clip-area := Rectangle {
+        x: 8px;
+        width: parent.width - 16px;
+        clip: true;
+        if root.text == "" && !root.composing : Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.placeholder-text;
+            font-size: root.font-size;
+            color: Theme.text-faint;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        input := TextInput {
+            x: min(0px, max(parent.width - self.width, root.scroll));
+            width: max(parent.width, self.preferred-width + self.text-cursor-width);
+            height: parent.height;
+            single-line: true;
+            vertical-alignment: center;
+            font-size: root.font-size;
+            color: root.enabled ? Theme.text : Theme.text-faint;
+            selection-background-color: root.composing ? transparent : Theme.selection;
+            selection-foreground-color: root.composing ? Theme.text : Theme.selection-text;
+            cursor-position-changed(position) => {
+                if (position.x + root.scroll < 0px) {
+                    root.scroll = -position.x;
+                } else if (position.x + root.scroll > clip-area.width - self.text-cursor-width) {
+                    root.scroll = clip-area.width - self.text-cursor-width - position.x;
+                }
+            }
+            edited => { root.edited(self.text); }
+            accepted => { root.accepted(self.text); }
+        }
+    }
+}
