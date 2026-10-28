@@ -12,9 +12,9 @@ part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27*
 results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); **Phase 3 (Edit on
 touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"); **Phase 4 (Tools on touch) passed
 its gate on 2026-10-28** (§5, "Phase 4: results"); **Phase 5 (landscape, "Open with" and
-"Share", icon, release signing) is implemented and at its gate** (§5, "Phase 5: results"); the
-maintainer's review asked for fixes and improvements, done and waiting for a second look on the
-phone (§5, "Phase 5: the maintainer's review"). By the maintainer's order the shell came before Phase 1's platform work
+"Share", icon, release signing) passed its gate on 2026-10-29** after the maintainer's review and
+its fixes (§5, "Phase 5: results" and "Phase 5: the maintainer's review"). **Plan 0008 is
+closed.** By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -37,7 +37,8 @@ phone (§5, "Phase 5: the maintainer's review"). By the maintainer's order the s
   press that moves pages, the bar over the dock for the chosen pages, and the tools' dialogs as
   sheets; Plan 0005's page operations pass on the phone (`--bench-pages` 13 of 14, the miss being
   a desktop sidebar drag, and every operation by hand).
-- Phase 5: implemented and at its gate (2026-10-28): landscape (row MK passes on the phone), the
+- Phase 5: passed its gate on 2026-10-29 (the maintainer checked the review's fixes and
+  improvements on the phone: "Kontrol ettim. Problem yok."): landscape (row MK passes on the phone), the
   menus and the tools' sheets scroll when a phone on its side leaves them too little room, "Share"
   next to "Open with", the app's icon, a release key of the maintainer's own whose password
   apksigner asks for (`docs/android-release.md`). The review in both themes is the
@@ -402,9 +403,7 @@ was done:
 - **Checks.** Workspace tests, clippy and fmt pass. Desktop, release build: `--bench-pages`
   14 of 14, `--bench-tabs 3` PASS, `--bench-modes` PASS (worst frame 16.0 ms),
   `--mobile --bench-rotate 2` PASS. The APK builds (12 MiB) and installs on the phone.
-- **Not checked yet:** on the phone the screen was locked when the APK was ready, so none of the
-  above was seen on it; the desktop's tab drag was not tried by hand. Both are the maintainer's
-  next review.
+- **Checked by the maintainer** on 2026-10-29: no problems found.
 
 ### Phase 5: results (2026-10-28)
 
