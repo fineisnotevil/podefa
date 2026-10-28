@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Book mode** (Plan 0008 Phase 5 review), on the desktop and the phone: one page at a time,
+  turned sideways. On the phone a finger pulls the page left or right to turn it; on the desktop
+  the wheel and Page Up/Down scroll within the page and turn at its ends, and Left/Right turn.
+  Its button is in the status bar's zoom group on the desktop and in the zoom card on the phone.
+- **A tab dragged into a document** (Plan 0008 Phase 5 review): on the desktop another tab
+  dragged onto a gap in Tools' gallery or onto the sidebar's pages puts its whole document, as it
+  is now, in there. On the phone in Tools, holding a document in the header's documents menu and
+  letting it go in a gap does the same.
+- **Producer:** saved and written PDFs carry "FINE Association | PODEFA {version}" as their
+  Producer.
+- **The phone in Read** hides its islands after 4 s without a touch; a tap brings them back.
+- **The phone's history capsule** under the header: Undo, Save, Save As and Redo (Save left the
+  header); Search sits next to the zoom in the dock; a Tools card in Tools holds Merge, Compress,
+  Export as Images and Images to PDF; Tools' bar has "Unchoose"; only the page in the middle of
+  the column shows its buttons; held pages follow the finger as a faded stack.
 - **Landscape on a phone** (Plan 0008 Phase 5): turning the phone keeps the page and the zoom; the
   header, the dock, the menus and the sheets stay clear of the camera cutout and the system bars,
   and menus and sheets that do not fit scroll. With the keyboard up, a sheet may cover the header
@@ -106,6 +121,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Quit and Ctrl+Q:** the close button and Ctrl+W do the same.
 
 ### Fixed
+- **Text fields on the phone** (Search, Watermark, Document Properties and the other sheets): the
+  word being composed on the keyboard showed as a selection, so typing and deleting seemed to
+  select and break the text. The app's own `Field` draws no selection while a word is composed.
+- **Drawing on the phone:** a second finger (to pinch) no longer paints.
+- **The phone's dock is centred** on the window, not beside the pager; Edit's divider follows Crop;
+  the islands' side padding matches their top, with nested radii that follow it; Export as
+  Images' Resolution no longer runs out of its sheet.
+- **Split names both parts:** what stays after a split is named "name_1-N" like the part that
+  leaves.
 - **A list box shows its chosen options:** MuPDF 1.27.2 draws a list box without marking its value.
 - **Field text with Turkish letters fills in about 2 ms instead of 2.4-3.5 s**, and sits inside a single-line field instead of being clipped (MuPDF asked for a `serif` font through the system font search; MuPDF 1.27.2 placed single-line rich text below the field). Radio groups show the chosen button.
 - **Copied pages kept their annotations and links:** duplicating a page lost its markup, notes, ink and links, because MuPDF's page copy leaves `/Annots` out. They are copied now, with page links pointing at the copied pages.

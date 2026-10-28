@@ -833,3 +833,23 @@ Trace one first change frame by frame on the phone; then either widen the warm-u
 first view (`main.slint` `warm`, Plan 0007 Phase 3) to what the mobile shell shows in Edit and
 Tools, or build those parts while the app is idle after opening.
 
+
+## 28. Slint draws the keyboard's composing word as a selection on Android
+
+**Labels:** `android`, `bug`, `upstream`
+
+### Problem Statement
+
+On the phone (Plan 0008 Phase 5 review), typing in a text field showed the word being composed
+as selected text, so typing and deleting looked as if they selected and broke the text. Slint
+1.18.1's Android backend hands the composing region over as a preedit selection covering the
+whole word (`i-slint-backend-android-activity-1.18.1/javahelper.rs:616`, `0..len`), and
+`TextInput` draws a preedit selection with the selection colours
+(`i-slint-core-1.18.1/items/text.rs:2153`).
+
+### Proposed Solution
+
+The app's own `Field` (`crates/app/ui/widgets.slint`) makes its selection colours transparent
+while `preedit-text` is not empty, and every line field uses it. The note editor's `TextEdit`
+still shows it. Report it to Slint (a composing word is usually underlined, not selected) and
+drop the workaround once a release fixes it.

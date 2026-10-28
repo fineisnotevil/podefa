@@ -12,7 +12,9 @@ part of Phase 2) the same day; Phase 1 (platform) passed its gate on 2026-10-27*
 results"); Phase 2 passed its gate on 2026-10-27** (§5, "Phase 2, touch"); **Phase 3 (Edit on
 touch) passed its gate on 2026-10-27** (§5, "Phase 3: results"); **Phase 4 (Tools on touch) passed
 its gate on 2026-10-28** (§5, "Phase 4: results"); **Phase 5 (landscape, "Open with" and
-"Share", icon, release signing) is implemented and at its gate** (§5, "Phase 5: results"). By the maintainer's order the shell came before Phase 1's platform work
+"Share", icon, release signing) is implemented and at its gate** (§5, "Phase 5: results"); the
+maintainer's review asked for fixes and improvements, done and waiting for a second look on the
+phone (§5, "Phase 5: the maintainer's review"). By the maintainer's order the shell came before Phase 1's platform work
 (§0).
 
 - Phase 0: passed its gate on 2026-10-26 (§0). The trial build (§3.3): an 11.3 MiB APK, the first
@@ -357,6 +359,52 @@ ADR 0012 records the design.
 - **Not done:** the Edit strip is Phase 3, so the ink tool was chosen with the `I` key over
   `adb`; the library suite on the phone (see §5's note) was built (26 test binaries link without
   `RUSTFLAGS`) but not run: the phone left USB before it could be pushed.
+
+### Phase 5: the maintainer's review (2026-10-28)
+
+The maintainer's review on the phone found eight faults and asked for eight improvements. What
+was done:
+
+- **Faults.** (1) The dock's mode island is centred on the window, moved aside only when the
+  pager or the right group would touch it. (2) A second finger while drawing (a pinch) cancels
+  the stroke instead of painting (`ink_blocked`). (3) Text fields: Slint 1.18.1 on Android draws
+  the keyboard's composing word as a selection (backlog item 28), so typing and deleting looked
+  as if they selected and broke the text; every line field is now the app's `Field`
+  (`widgets.slint`), which draws no selection while a word is composed. (4) Edit's divider
+  follows Crop. (5) The islands' side padding matches their top (6 px, or 4 px around 44 px
+  circles), and the inner radii follow the outer ones (outer minus padding). (6) Tools' bar has
+  "Unchoose" next to "Choose all". (7) Export as Images' Resolution has a row of its own; Export
+  as Images, Compress, Merge and Images to PDF moved from More to a Tools card (the wrench at the
+  dock's right in Tools). (8) After a split, what stays is named like a part ("name_1-N").
+- **Improvements.** (1) Only the page in the middle of the column shows its buttons. (2) The
+  concept's history capsule under the header's right end: Undo, Save, Save As (Lucide
+  `save-pen`), Redo; Save left the header. (3) Book mode on the desktop and the phone (`book.rs`;
+  below). (4) Search sits next to the zoom in the dock. (5) Read on the phone hides its islands
+  after 4 s without a touch (`CHROME_HIDE_MS`) unless a menu, card, sheet, editor or selection is
+  open; a tap brings them back. (6) Held pages follow the finger as a faded stack of up to 3, the
+  page under the finger in front. (7) Saved and written PDFs carry "FINE Association | PODEFA
+  {version}" as Producer (`pdf_core::tools::PRODUCER`); a save stamps it as part of the last undo
+  step through `pdf_begin_implicit_operation` (an `fz_try` wrapper in the journal shim), so it
+  adds no step of its own. (8) A tab dragged into the shown document: on the desktop another tab
+  dragged onto a gap in Tools' gallery or onto the sidebar's pages; on the phone, in Tools, a
+  document held for half a second in the header's documents menu (the menu fades while it is
+  held, a page with its name follows the finger) and let go in a gap. The dragged tab's own
+  engine writes its document as it is now (unsaved edits included) while it stays parked
+  (`AppState::start_tab_tool`), and the shown document inserts it as one undo step.
+- **Book mode.** The layout stays the continuous column with 4096 logical px added above the
+  first page and below the last, so any page can sit in the middle of the view; the scroll is
+  held to the shown page and only that page is drawn. On the phone a finger pans the page and,
+  past its edge, pulls it sideways: let go beyond 18% of the width it turns, and the next page
+  slides in. On the desktop the wheel and Page Up/Down scroll within the page and turn at its
+  ends; Left/Right turn. The button is in the status bar's zoom group and in the phone's zoom card
+  (Scroll / Book). It does not clash with Tools' "Choose all": book mode applies to Read and Edit's
+  canvas, and Tools keeps its gallery.
+- **Checks.** Workspace tests, clippy and fmt pass. Desktop, release build: `--bench-pages`
+  14 of 14, `--bench-tabs 3` PASS, `--bench-modes` PASS (worst frame 16.0 ms),
+  `--mobile --bench-rotate 2` PASS. The APK builds (12 MiB) and installs on the phone.
+- **Not checked yet:** on the phone the screen was locked when the APK was ready, so none of the
+  above was seen on it; the desktop's tab drag was not tried by hand. Both are the maintainer's
+  next review.
 
 ### Phase 5: results (2026-10-28)
 
