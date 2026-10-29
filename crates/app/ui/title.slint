@@ -42,7 +42,7 @@ component Tab inherits Rectangle {
     background: drop.has-drag || root.active || touch.has-hover ? root.fill : transparent;
     border-width: drop.has-drag ? 2px : 1px;
     border-color: drop.has-drag ? Theme.focus : root.active ? Theme.line-strong : Theme.line;
-    animate background { duration: 120ms; }
+    animate background { duration: Theme.fade; }
     clip: true;
 
     // Outside the drag and drop areas, which do not keep what is under them in the hover chain.
@@ -212,6 +212,7 @@ export component TitleRow inherits Rectangle {
     in property <bool> can-redo;
     in property <[string]> recent-files;
     in property <int> theme;
+    in property <bool> reduce-motion;
     callback open-file();
     callback open-recent(int);
     callback save();
@@ -219,6 +220,8 @@ export component TitleRow inherits Rectangle {
     callback undo();
     callback redo();
     callback choose-theme(int);
+    callback reduce-motion-changed(bool);
+    callback about();
     callback minimize();
     callback toggle-maximize();
     callback close();
@@ -381,6 +384,27 @@ export component TitleRow inherits Rectangle {
                                         }
                                     }
                                 }
+                            }
+                        }
+                        MenuRow {
+                            label: "Reduce Motion";
+                            checkable: true;
+                            checked: root.reduce-motion;
+                            activated => {
+                                root.reduce-motion-changed(!root.reduce-motion);
+                                brand-menu.close();
+                            }
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.line;
+                        }
+                        MenuRow {
+                            icon: @image-url("icons/info.svg");
+                            label: "About PODEFA";
+                            activated => {
+                                brand-menu.close();
+                                root.about();
                             }
                         }
                     }

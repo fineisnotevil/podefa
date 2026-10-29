@@ -38,7 +38,7 @@ export component TouchButton inherits Rectangle {
     // The island's 16 px radius less its 6 px padding, so the corners run parallel.
     border-radius: 10px;
     background: root.checked ? root.checked-fill : touch.pressed && root.enabled ? Theme.active : transparent;
-    animate background { duration: 120ms; }
+    animate background { duration: Theme.fade; }
     Image {
         source: root.icon;
         width: root.icon-size;
@@ -227,6 +227,7 @@ export component MobileShell inherits Rectangle {
     in property <int> total-pages;
     in property <float> zoom-percent;
     in property <int> theme;
+    in property <bool> reduce-motion;
     in property <[TabItem]> tabs;
     in property <int> active-tab;
     in property <[ThumbRow]> thumbs;
@@ -298,6 +299,8 @@ export component MobileShell inherits Rectangle {
     callback merge-open();
     callback book-changed(bool);
     callback choose-theme(int);
+    callback reduce-motion-changed(bool);
+    callback about();
     callback props-open();
     callback stamp-open(int);
     callback convert-open(int);
@@ -1306,6 +1309,20 @@ export component MobileShell inherits Rectangle {
                             checked: root.theme == 0;
                             clicked => { root.choose-theme(0); }
                         }
+                    }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/gallery-vertical.svg");
+                    label: "Reduce motion";
+                    detail: root.reduce-motion ? "On" : "Off";
+                    clicked => { root.reduce-motion-changed(!root.reduce-motion); }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/circle-alert.svg");
+                    label: "About PODEFA";
+                    clicked => {
+                        root.more-menu = false;
+                        root.about();
                     }
                 }
                 Rectangle { height: 1px; background: Theme.line; }

@@ -441,3 +441,67 @@ fn a_duplicated_page_keeps_its_annotations_and_links() {
     assert_eq!(original.len(), copy.len());
     assert!(original.iter().all(|a| copy.iter().all(|b| a.id != b.id)));
 }
+
+/// A password-protected document (Plan 0007 Phase 5): the engine asks for the password, says
+/// when it is wrong, opens with the right one, and its tools read it, unsaved changes included.
+#[test]
+fn a_protected_document_asks_for_its_password_and_its_tools_read_it() {
+    use mupdf::pdf::document::{Encryption, PdfWriteOptions};
+    let plain = write("tools_locked_plain.pdf", &tagged_pdf("L", 2, false));
+    let locked = scratch("tools_locked.pdf");
+    let mut options = PdfWriteOptions::default();
+    options
+        .set_encryption(Encryption::Aes256)
+        .set_user_password("fine")
+        .set_owner_password("owner");
+    PdfDocument::open(plain.to_str().expect("utf-8"))
+        .expect("open")
+        .save_with_options(locked.to_str().expect("utf-8"), options)
+        .expect("save locked");
+    assert!(
+        Document::open(locked.to_str().expect("utf-8"))
+            .expect("open")
+            .needs_password()
+            .expect("needs_password")
+    );
+
+    let (handle, rx) = EngineHandle::spawn();
+    let open = |password: Option<&str>| {
+        handle
+            .send(EngineCmd::Open {
+                path: locked.clone(),
+                password: password.map(str::to_owned),
+            })
+            .expect("actor");
+        loop {
+            match next(&rx) {
+                EngineEvent::NeedsPassword { wrong } => return Some(wrong),
+                EngineEvent::Opened { page_count, .. } => {
+                    assert_eq!(page_count, 2);
+                    return None;
+                }
+                EngineEvent::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+    };
+    assert_eq!(open(None), Some(false));
+    assert_eq!(open(Some("nope")), Some(true));
+    assert_eq!(open(Some("fine")), None);
+    while !matches!(next(&rx), EngineEvent::History { .. }) {}
+
+    // From the file, and from the document with an unsaved change.
+    let out = scratch("tools_locked_out.pdf");
+    let _ = std::fs::remove_file(&out);
+    let job = || ToolJob::Extract {
+        parts: vec![(vec![1], out.clone())],
+    };
+    let (result, _) = run(&handle, &rx, 30, job());
+    assert_eq!(result, Ok(vec![out.clone()]));
+    assert_eq!(texts(&out), ["L 1"]);
+    mark(&handle, &rx);
+    let _ = std::fs::remove_file(&out);
+    let (result, _) = run(&handle, &rx, 31, job());
+    assert_eq!(result, Ok(vec![out.clone()]));
+    assert_eq!(texts(&out), ["L 1"]);
+}

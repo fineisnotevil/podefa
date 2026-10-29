@@ -120,6 +120,12 @@ impl AppState {
 
     /// Slides the page from `from` logical pixels sideways back to its place.
     fn slide(&mut self, ui: &MainWindow, from: f32) {
+        // With reduced motion the page is in its place at once.
+        let from = if self.settings.reduce_motion {
+            0.0
+        } else {
+            from
+        };
         ui.set_book_shift(from);
         if from == 0.0 {
             return;

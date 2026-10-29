@@ -56,7 +56,7 @@ export component IconButton inherits FocusScope {
             : touch.has-hover && root.enabled ? Theme.hover : transparent;
         border-width: root.keyboard-focus ? 2px : 0px;
         border-color: Theme.focus;
-        animate background { duration: 120ms; }
+        animate background { duration: Theme.fade; }
         Image {
             source: root.icon;
             width: root.icon-size;
@@ -226,6 +226,138 @@ export component Field inherits Rectangle {
             }
             edited => { root.edited(self.text); }
             accepted => { root.accepted(self.text); }
+        }
+    }
+}
+
+// A dialog's button (Plan 0007 Phase 5, the concept's dialogs): an outlined one, a filled
+// `primary` one for the dialog's action, or a choice (`checkable`) whose checked state is filled
+// like the primary. Clicks do not take the keyboard; Tab reaches it, Enter or Space presses it.
+export component DialogButton inherits FocusScope {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> checkable: false;
+    in property <bool> checked: false;
+    in property <image> icon;
+    callback clicked();
+
+    property <bool> keyboard-focus: false;
+    property <bool> filled: root.primary || (root.checkable && root.checked);
+    min-height: 30px;
+    min-width: label.preferred-width + 24px + (root.icon.width > 0 ? 20px : 0px);
+    preferred-width: self.min-width;
+    focus-on-click: false;
+    focus-gained(reason) => { self.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { self.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == " ") {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        border-radius: Theme.radius-control;
+        background: root.filled ? (touch.pressed ? Theme.text-muted : Theme.text)
+            : touch.pressed && root.enabled ? Theme.active
+            : touch.has-hover && root.enabled ? Theme.hover : transparent;
+        border-width: root.keyboard-focus ? 2px : root.filled ? 0px : 1px;
+        border-color: root.keyboard-focus ? Theme.focus : Theme.line-strong;
+        opacity: root.enabled ? 1.0 : 0.4;
+        animate background { duration: Theme.fade; }
+        HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+            label := Text {
+                text: root.text;
+                font-size: 12px;
+                font-weight: root.filled ? 600 : 500;
+                color: root.filled ? Theme.surface : Theme.text;
+                vertical-alignment: center;
+            }
+            if root.icon.width > 0 : Image {
+                y: (parent.height - self.height) / 2;
+                source: root.icon;
+                width: 14px;
+                height: 14px;
+                colorize: root.filled ? Theme.surface : Theme.text;
+            }
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// The surface of a dialog or a tool's sheet: an island card a little raised over the window.
+export component DialogSurface inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius-island;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    drop-shadow-blur: 24px;
+    drop-shadow-offset-y: 8px;
+    drop-shadow-color: Theme.shadow;
+}
+
+// A modal dialog (Plan 0007 Phase 5): the window dimmed under a scrim, and in its middle a card
+// with a title row and its close button; what the dialog holds goes under the title. Escape or
+// the close button send `closed`; a click on the scrim does nothing, so a half-typed answer is
+// not lost by a stray click.
+export component Dialog inherits Rectangle {
+    in property <string> title;
+    in property <length> card-width: 360px;
+    callback closed();
+
+    background: Theme.scrim;
+    TouchArea {}
+    FocusScope {
+        capture-key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.closed();
+                return accept;
+            }
+            return reject;
+        }
+        card := DialogSurface {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(root.width - 32px, root.card-width);
+            height: min(root.height - 32px, column.preferred-height);
+            clip: true;
+            TouchArea {}
+            column := VerticalLayout {
+                HorizontalLayout {
+                    height: 36px;
+                    padding-left: 14px;
+                    padding-right: 4px;
+                    Text {
+                        text: root.title;
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    IconButton {
+                        y: (parent.height - self.height) / 2;
+                        width: 28px;
+                        height: 28px;
+                        icon: @image-url("icons/x.svg");
+                        icon-size: 14px;
+                        tip: "Close (Esc)";
+                        clicked => { root.closed(); }
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+                @children
+            }
         }
     }
 }

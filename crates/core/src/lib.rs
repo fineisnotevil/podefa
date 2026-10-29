@@ -426,6 +426,9 @@ pub enum EngineEvent {
     /// reports this from its own abort registry, because a display list stopped by the cancel cookie
     /// returns as normally as one that ran to the end.
     TileAborted { request_id: RequestId, ms: u64 },
+    /// The document asked to open is password-protected: [`EngineCmd::Open`] again with its
+    /// password. `wrong` when the password given was not right (Plan 0007 Phase 5).
+    NeedsPassword { wrong: bool },
     /// An error occurred.
     Error { message: String },
 }

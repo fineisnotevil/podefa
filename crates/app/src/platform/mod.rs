@@ -13,7 +13,9 @@
 //! folder, and whatever the app writes to a path a dialog gave it is written back to the URI it
 //! stands for (`written`).
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 #[cfg(not(target_os = "android"))]
 mod desktop;
@@ -169,13 +171,42 @@ impl MessageDialog {
     }
 
     pub fn show(self, then: impl FnOnce(Answer) + 'static) {
-        imp::message(self, Box::new(then));
+        let presenter = PRESENTER.with(|cell| cell.borrow().clone());
+        match presenter {
+            Some(present) => present(self, Box::new(then)),
+            None => imp::message(self, Box::new(then)),
+        }
+    }
+
+    pub fn level_of(&self) -> Level {
+        self.level
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn buttons_of(&self) -> Buttons {
+        self.buttons
     }
 
     /// A box with OK alone, for an error; nothing waits for it.
     pub fn error(description: impl Into<String>) {
         Self::new(description).level(Level::Error).show(|_| {});
     }
+}
+
+/// Shows a message box and passes the answer on.
+pub type Presenter = Rc<dyn Fn(MessageDialog, Box<dyn FnOnce(Answer)>)>;
+
+thread_local! {
+    static PRESENTER: RefCell<Option<Presenter>> = const { RefCell::new(None) };
+}
+
+/// Message boxes go to `present` from now on instead of the platform's own (Plan 0007 Phase 5:
+/// the desktop shows them in the window's style).
+pub fn set_message_presenter(present: Presenter) {
+    PRESENTER.with(|cell| *cell.borrow_mut() = Some(present));
 }
 
 /// Puts `text` on the system clipboard; false when that failed.

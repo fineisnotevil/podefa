@@ -1277,6 +1277,16 @@ impl EngineHandle {
                                     });
                                     Self::history(&event_tx, &engine, 0, HistoryChange::None);
                                 }
+                                // A protected document asks for its password (again, when the
+                                // one given was wrong); the document open before stays.
+                                Err(MupdfError::PasswordRequired) => {
+                                    let _ = event_tx
+                                        .send(EngineEvent::NeedsPassword { wrong: false });
+                                }
+                                Err(MupdfError::InvalidPassword) => {
+                                    let _ =
+                                        event_tx.send(EngineEvent::NeedsPassword { wrong: true });
+                                }
                                 Err(err) => {
                                     let _ = event_tx.send(EngineEvent::Error {
                                         message: err.to_string(),
@@ -1525,7 +1535,9 @@ impl EngineHandle {
                                         sizes: None,
                                     });
                                 }
-                                (false, Ok(current)) => tools.run(job_id, job, current),
+                                (false, Ok(current)) => {
+                                    tools.run(job_id, job, current, engine.password.clone())
+                                }
                             }
                         }
                         EngineCmd::CancelTool { job_id } => tools.cancel(job_id),

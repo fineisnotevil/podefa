@@ -65,7 +65,7 @@ component PageCard inherits Rectangle {
     border-width: root.chosen ? 2px : root.hovered ? 1px : 0px;
     border-color: root.chosen ? Theme.card-ring : Theme.card-hover-ring;
     transform-scale: root.chosen ? 1.02 : 1.0;
-    animate transform-scale, background { duration: 150ms; easing: ease-out; }
+    animate transform-scale, background { duration: Theme.quick; easing: ease-out; }
 
     // The pointer over the page, its buttons included. Drag and drop areas pass a move on without
     // keeping the items under them in the hover chain, so this sits outside them.
@@ -235,7 +235,7 @@ component Divider inherits Rectangle {
     property <bool> open: hover.has-hover && root.editable;
     // Half the room the middle takes: the "+" when closed, the buttons when open.
     property <length> gap: root.open ? pill.preferred-height / 2 + 6px : 9px;
-    animate gap { duration: 150ms; easing: ease-out; }
+    animate gap { duration: Theme.quick; easing: ease-out; }
 
     hover := TouchArea {
         DropArea {
@@ -556,7 +556,7 @@ export component Gallery inherits Rectangle {
             source: @image-url("textures/crown.svg");
             colorize: Theme.crown;
             opacity: crown-touch.has-hover || crown-touch.pressed ? 1 : 0.7;
-            animate opacity { duration: 150ms; }
+            animate opacity { duration: Theme.quick; }
         }
         crown-touch := TouchArea {
             property <length> from;

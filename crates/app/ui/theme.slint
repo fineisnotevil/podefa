@@ -33,10 +33,13 @@ export global Theme {
     out property <color> line: dark ? #ffffff14 : #00000014;
     out property <color> line-strong: dark ? #36363b : #d4d4d8;
 
-    // Text.
+    // Text. Each at least 4.5:1 (WCAG AA) on the shell, the canvas, the surface and the hover
+    // fill of its theme, and `text` on the active fill too (Phase 5, row AW;
+    // `crates/app/tests/theme_test.rs`): `text-faint` was #71717a / #a1a1aa before, and dark
+    // `danger` #f87171.
     out property <color> text: dark ? #f4f4f5 : #18181b;
     out property <color> text-muted: dark ? #a1a1aa : #52525b;
-    out property <color> text-faint: dark ? #71717a : #a1a1aa;
+    out property <color> text-faint: dark ? #9e9ea6 : #6b6b73;
 
     // The accent: selection, the current item, focus. The concept is neutral; the app keeps the
     // style's accent so focus stays visible against both themes.
@@ -45,10 +48,13 @@ export global Theme {
     out property <brush> selection-text: Palette.selection-foreground;
 
     // States.
-    out property <color> danger: dark ? #f87171 : #b42318;
+    out property <color> danger: dark ? #f97a7a : #b42318;
     out property <color> danger-surface: dark ? #3b1d1d : #fde8e8;
     out property <color> danger-line: dark ? #7f2d2d : #f8b4b4;
     out property <color> danger-text: dark ? #fecaca : #9b1c1c;
+
+    // Behind a modal dialog (Plan 0007 Phase 5): the window dimmed, so the dialog stands out.
+    out property <color> scrim: dark ? #0000008c : #18181b4d;
 
     // Popup shadow; the software renderer draws none, so a popup also keeps its line-strong edge.
     out property <color> shadow: dark ? #00000080 : #00000040;
@@ -89,10 +95,15 @@ export global Theme {
     out property <color> ink-fill: dark ? #52525b : #18181b;
 
     // Motion (plan §1: at most 250 ms). A mode change and pages sliding aside take `motion`; a
-    // palette pours out its swatches over `pour`, one `pour-step` after another.
-    out property <duration> motion: 250ms;
-    out property <duration> pour: 220ms;
-    out property <duration> pour-step: 40ms;
+    // palette pours out its swatches over `pour`, one `pour-step` after another; a control's
+    // state changes over `quick` (a scale or a gap) or `fade` (a fill). Every animation takes one
+    // of these, so "Reduce motion" (Phase 5, row AX) sets them all to 0.
+    in property <bool> reduce-motion: false;
+    out property <duration> motion: reduce-motion ? 0ms : 250ms;
+    out property <duration> pour: reduce-motion ? 0ms : 220ms;
+    out property <duration> pour-step: reduce-motion ? 0ms : 40ms;
+    out property <duration> quick: reduce-motion ? 0ms : 150ms;
+    out property <duration> fade: reduce-motion ? 0ms : 120ms;
 
     // Radii and the islands' distance from the window's edge.
     out property <length> radius-island: 8px;

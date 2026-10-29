@@ -61,6 +61,8 @@ pub struct Settings {
     /// The author written into new annotations. `None` writes none: nothing personal goes into a
     /// shared file unless the user typed it here (Plan 0004 §0, question 5).
     pub author: Option<String>,
+    /// Whether animations are switched off (Plan 0007 Phase 5, row AX).
+    pub reduce_motion: bool,
 }
 
 impl Settings {
@@ -80,6 +82,11 @@ impl Settings {
                 "sidebar" => match value.trim() {
                     "1" | "true" => settings.sidebar = true,
                     "0" | "false" => settings.sidebar = false,
+                    _ => {}
+                },
+                "reduce_motion" => match value.trim() {
+                    "1" | "true" => settings.reduce_motion = true,
+                    "0" | "false" => settings.reduce_motion = false,
                     _ => {}
                 },
                 "field_highlight" => match value.trim() {
@@ -126,6 +133,9 @@ impl Settings {
         } else {
             "field_highlight=1\n"
         });
+        if self.reduce_motion {
+            out.push_str("reduce_motion=1\n");
+        }
         if let Some(author) = self.author.as_deref().filter(|a| !a.contains(['\n', '\r'])) {
             out.push_str("author=");
             out.push_str(author);
@@ -171,6 +181,24 @@ mod tests {
         let text = settings.serialize();
         assert_eq!(Settings::parse(&text), settings);
         assert_eq!(settings.recent[0], PathBuf::from("/home/user/b c.pdf"));
+    }
+
+    #[test]
+    fn reduce_motion_is_kept_and_off_by_default() {
+        assert!(!Settings::default().reduce_motion);
+        assert!(!Settings::default().serialize().contains("reduce_motion"));
+        let reduced = Settings {
+            reduce_motion: true,
+            ..Settings::default()
+        };
+        assert_eq!(Settings::parse(&reduced.serialize()), reduced);
+        assert!(
+            !Settings::parse(
+                "reduce_motion=0
+"
+            )
+            .reduce_motion
+        );
     }
 
     #[test]

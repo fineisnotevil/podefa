@@ -32,6 +32,8 @@ struct Run {
     job_id: u64,
     job: ToolJob,
     current: Option<Arc<Vec<u8>>>,
+    /// The open document's password, for a protected one (Plan 0007 Phase 5).
+    password: Option<String>,
 }
 
 /// The handle the actor keeps. Dropping it stops and joins the thread.
@@ -70,13 +72,21 @@ impl ToolThread {
         }
     }
 
-    /// Queues a job; `current` is the open document as bytes, for jobs that read it.
-    pub(crate) fn run(&self, job_id: u64, job: ToolJob, current: Option<Vec<u8>>) {
+    /// Queues a job; `current` is the open document as bytes, for jobs that read it, and
+    /// `password` the one it was opened with.
+    pub(crate) fn run(
+        &self,
+        job_id: u64,
+        job: ToolJob,
+        current: Option<Vec<u8>>,
+        password: Option<String>,
+    ) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Run {
                 job_id,
                 job,
                 current: current.map(Arc::new),
+                password,
             });
         }
     }
@@ -266,8 +276,12 @@ fn export_word(
     }
 }
 
-fn open(input: &MergeInput, current: Option<&Arc<Vec<u8>>>) -> Result<PdfDocument, String> {
-    let doc = match input {
+fn open(
+    input: &MergeInput,
+    current: Option<&Arc<Vec<u8>>>,
+    password: Option<&str>,
+) -> Result<PdfDocument, String> {
+    let mut doc = match input {
         MergeInput::Current => {
             let bytes = current.ok_or("the open document is not available")?;
             PdfDocument::from_bytes(bytes).map_err(|e| e.to_string())?
@@ -279,14 +293,26 @@ fn open(input: &MergeInput, current: Option<&Arc<Vec<u8>>>) -> Result<PdfDocumen
             PdfDocument::open(name).map_err(|e| format!("{}: {e}", path.display()))?
         }
     };
-    if doc.needs_password().unwrap_or(false) {
-        let name = match input {
-            MergeInput::Current => "the open document".to_owned(),
-            MergeInput::File(path) => path.display().to_string(),
-        };
-        return Err(format!("{name} is password-protected"));
-    }
+    let name = match input {
+        MergeInput::Current => "the open document".to_owned(),
+        MergeInput::File(path) => path.display().to_string(),
+    };
+    unlock(&mut doc, password, &name)?;
     Ok(doc)
+}
+
+/// A protected document is read with the open document's password (the open document itself, as
+/// bytes or as its file); any other protected one is refused.
+fn unlock(doc: &mut PdfDocument, password: Option<&str>, name: &str) -> Result<(), String> {
+    if !doc.needs_password().unwrap_or(false) {
+        return Ok(());
+    }
+    if let Some(password) = password
+        && doc.authenticate(password).unwrap_or(false)
+    {
+        return Ok(());
+    }
+    Err(format!("{name} is password-protected"))
 }
 
 /// Runs a job; returns the files it wrote and, for Compress, the sizes.
@@ -322,7 +348,7 @@ fn execute(
                     if stop() {
                         return Err("cancelled".to_owned());
                     }
-                    let source = open(input, run.current.as_ref())?;
+                    let source = open(input, run.current.as_ref(), run.password.as_deref())?;
                     let offset = merged.page_count().map_err(|e| e.to_string())?;
                     merged
                         .insert_pdf(&source, InsertPdfOptions::default())
@@ -344,7 +370,11 @@ fn execute(
                 progress(total, total);
             }
             ToolJob::Extract { parts } => {
-                let source = open(&MergeInput::Current, run.current.as_ref())?;
+                let source = open(
+                    &MergeInput::Current,
+                    run.current.as_ref(),
+                    run.password.as_deref(),
+                )?;
                 for (done, (pages, output)) in parts.iter().enumerate() {
                     if stop() {
                         return Err("cancelled".to_owned());
@@ -373,7 +403,11 @@ fn execute(
                 }
             }
             ToolJob::ExportImages { pages, format, dpi } => {
-                let source = open(&MergeInput::Current, run.current.as_ref())?;
+                let source = open(
+                    &MergeInput::Current,
+                    run.current.as_ref(),
+                    run.password.as_deref(),
+                )?;
                 for (done, (page, output)) in pages.iter().enumerate() {
                     if stop() {
                         return Err("cancelled".to_owned());
@@ -421,9 +455,7 @@ fn execute(
                 };
                 progress(0, 2);
                 let mut doc = PdfDocument::from_bytes(&bytes).map_err(|e| e.to_string())?;
-                if doc.needs_password().unwrap_or(false) {
-                    return Err("the document is password-protected".to_owned());
-                }
+                unlock(&mut doc, run.password.as_deref(), "the document")?;
                 if let Some((above, to, quality)) = preset.images() {
                     doc.rewrite_images(above, to, quality)
                         .map_err(|e| e.to_string())?;
@@ -457,7 +489,11 @@ fn execute(
             }
             #[cfg(feature = "docx")]
             ToolJob::ExportWord { output } => {
-                let source = open(&MergeInput::Current, run.current.as_ref())?;
+                let source = open(
+                    &MergeInput::Current,
+                    run.current.as_ref(),
+                    run.password.as_deref(),
+                )?;
                 let part =
                     export_word(&source, output, &stop, &|done, total| progress(done, total))?;
                 written.push((part, output.clone()));

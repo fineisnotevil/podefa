@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 mod bench;
 mod book;
 mod convert_ui;
+mod dialogs;
 mod fields_ui;
 pub mod platform;
 mod stamps_ui;
@@ -2644,7 +2645,13 @@ impl AppState {
         self.mobile = ui.get_mobile();
         ui.set_chrome_hidden(false);
         self.chrome_touched(ui, false);
-        let motion = Duration::from_millis(MODE_MOTION_MS + MODE_SETTLE_MS);
+        let motion = Duration::from_millis(
+            if self.settings.reduce_motion {
+                0
+            } else {
+                MODE_MOTION_MS
+            } + MODE_SETTLE_MS,
+        );
         self.motion_until = Some(Instant::now() + motion);
         if self.in_gallery() {
             // The gallery opens on the current page.
@@ -3794,6 +3801,7 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
             repaired,
             form,
         } => {
+            dialogs::password_done(ui);
             ui.set_has_error(false);
             ui.set_error_text(SharedString::from(""));
             ui.set_total_pages(page_count as i32);
@@ -4021,7 +4029,9 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
         EngineEvent::TileAborted { ms, .. } => {
             with_state(|state| state.bench.aborted(ms));
         }
+        EngineEvent::NeedsPassword { wrong } => dialogs::needs_password(ui, wrong),
         EngineEvent::Error { message } => {
+            dialogs::password_done(ui);
             ui.set_has_error(true);
             ui.set_error_text(SharedString::from(message.clone()));
             ui.set_status_text(SharedString::from(format!("Error: {message}")));
@@ -4511,6 +4521,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
     main_window.set_theme(theme_index(settings.theme));
     main_window.set_sidebar_visible(settings.sidebar && !mobile);
     main_window.set_field_highlight(!settings.plain_fields);
+    dialogs::wire(&main_window, settings.reduce_motion);
     let thumbs_model = Rc::new(VecModel::<ThumbRow>::default());
     main_window.set_thumbs(ModelRc::from(thumbs_model.clone()));
     let outline_model = Rc::new(VecModel::<OutlineRow>::default());

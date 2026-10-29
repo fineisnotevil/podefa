@@ -9,10 +9,10 @@
 // camera back to the gallery. A mode change only fades and scales what is drawn already: the
 // canvas keeps its size and place, so no tile is rendered while it moves (plan row AT).
 
-import { Button, ComboBox, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
+import { ComboBox, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
 import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem } from "types.slint";
 import { Theme } from "theme.slint";
-import { Field, Island, IconButton } from "widgets.slint";
+import { Field, Island, IconButton, DialogButton, DialogSurface, Dialog } from "widgets.slint";
 import { TitleRow } from "title.slint";
 import { SidebarColumn, Drawer } from "sidebar.slint";
 import { StatusIsland, MessageIsland } from "statusbar.slint";
@@ -20,6 +20,7 @@ import { SearchIsland } from "search.slint";
 import { Gallery } from "gallery.slint";
 import { MobileShell, ShellActivity } from "mobile/shell.slint";
 export { ShellActivity }
+export { Theme as UiTheme }
 import { MobileGallery } from "mobile/gallery.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
@@ -461,6 +462,24 @@ export component MainWindow inherits Window {
     callback open_file();
     callback open_recent(int);
     callback choose_theme(int);
+    // Plan 0007 Phase 5: reduce motion, About, the message box and the password dialog.
+    in-out property <bool> reduce-motion: false;
+    callback set_reduce_motion(bool);
+    in-out property <bool> about-visible: false;
+    in property <string> app-version;
+    in-out property <bool> message-visible: false;
+    in property <string> message-text;
+    in property <int> message-level;
+    in property <int> message-buttons;
+    callback message_answered(int);
+    in-out property <bool> password-visible: false;
+    in property <string> password-file;
+    in property <bool> password-wrong;
+    in property <bool> password-busy;
+    // Counts the wrong tries: each one shakes the lock.
+    in property <int> password-tries;
+    callback password_submit(string);
+    callback password_cancel();
     callback quit();
     // A drag over the window: whether it carries a document we can open.
     callback can_open_drop(data-transfer) -> bool;
@@ -1066,8 +1085,8 @@ export component MainWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
-                                    Button { text: "Cancel"; clicked => { root.note_cancel(); } }
-                                    Button { text: "Save"; primary: true; clicked => { root.note_save(); } }
+                                    DialogButton { text: "Cancel"; clicked => { root.note_cancel(); } }
+                                    DialogButton { text: "Save"; primary: true; clicked => { root.note_save(); } }
                                 }
                             }
                         }
@@ -1141,7 +1160,7 @@ export component MainWindow inherits Window {
                         }
                         HorizontalLayout {
                             alignment: center;
-                            Button {
+                            DialogButton {
                                 text: "Open a File...";
                                 clicked => { root.open_file(); }
                             }
@@ -1230,14 +1249,24 @@ export component MainWindow inherits Window {
             width: root.width;
             height: root.height;
             // Over the mobile shell, whose header a sheet covers when the keyboard leaves it too
-            // little room (Plan 0008 Phase 5); the desktop keeps the order of the children.
-            z: root.mobile ? 1 : 0;
+            // little room (Plan 0008 Phase 5). On the desktop a dialog with its scrim stands over the
+            // islands too (Plan 0007 Phase 5); Crop stays under them, beside the page.
+            z: root.mobile || root.merge-visible || root.split-visible || root.stamp-visible
+                || root.convert-visible || root.props-visible ? 1 : 0;
+
+            // On the desktop a tool's dialog stands in the middle of the window over a scrim
+            // (Plan 0007 Phase 5); Crop stays at the top, beside the page being cropped.
+            if !root.mobile && (root.merge-visible || root.split-visible || root.stamp-visible
+                || root.convert-visible || root.props-visible) : Rectangle {
+                background: Theme.scrim;
+                TouchArea {}
+            }
 
             // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
             // document; the open one can be among them, as it is now.
             if root.merge-visible : FocusScope {
                 x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
-                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
                 width: root.mobile ? root.sheet-w : min(parent.width - 32px, 460px);
                 height: root.mobile ? min(root.sheet-room, 420px) : min(parent.height - 32px, 360px);
                 init => { self.focus(); }
@@ -1248,13 +1277,8 @@ export component MainWindow inherits Window {
                     }
                     return reject;
                 }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: root.mobile ? 20px : 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
                     sheet-merge := VerticalLayout {
                         padding: root.mobile ? 16px : 10px;
                         spacing: 8px;
@@ -1284,11 +1308,11 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             spacing: 6px;
                             height: root.button-h;
-                            Button {
+                            DialogButton {
                                 text: root.merge-images ? "Add images..." : "Add files...";
                                 clicked => { root.merge_add(); }
                             }
-                            if !root.merge-images : Button {
+                            if !root.merge-images : DialogButton {
                                 text: "Add open document";
                                 enabled: root.total_pages > 0;
                                 clicked => { root.merge_add_current(); }
@@ -1298,25 +1322,25 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             spacing: 6px;
                             height: root.button-h;
-                            Button {
+                            DialogButton {
                                 text: "Up";
                                 enabled: root.merge-selected > 0;
                                 clicked => { root.merge_move(-1); }
                             }
-                            Button {
+                            DialogButton {
                                 text: "Down";
                                 enabled: root.merge-selected >= 0
                                     && root.merge-selected + 1 < root.merge-files.length;
                                 clicked => { root.merge_move(1); }
                             }
-                            Button {
+                            DialogButton {
                                 text: "Remove";
                                 enabled: root.merge-selected >= 0;
                                 clicked => { root.merge_remove(); }
                             }
                             Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Cancel"; clicked => { root.merge_close(); } }
-                            Button {
+                            DialogButton { text: "Cancel"; clicked => { root.merge_close(); } }
+                            DialogButton {
                                 text: root.merge-images ? "Make PDF..." : "Merge...";
                                 primary: true;
                                 enabled: root.merge-files.length >= 1 && !root.tool-running;
@@ -1330,9 +1354,10 @@ export component MainWindow inherits Window {
             // Split: the open document, as it is now, into files of N pages or by ranges.
             if root.split-visible : FocusScope {
                 x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
-                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
                 width: root.mobile ? root.sheet-w : min(parent.width - 32px, 420px);
-                height: root.mobile ? min(root.sheet-room, sheet-split.preferred-height) : 220px;
+                height: root.mobile ? min(root.sheet-room, sheet-split.preferred-height)
+                    : min(parent.height - 32px, sheet-split.preferred-height);
                 capture-key-pressed(event) => {
                     if (event.text == Key.Escape) {
                         root.split_close();
@@ -1340,13 +1365,8 @@ export component MainWindow inherits Window {
                     }
                     return reject;
                 }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: root.mobile ? 20px : 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
                     // Its rows scroll when the sheet has less room than they need (a phone on its side).
                     sheet-split-scroll := Flickable {
                         interactive: root.mobile;
@@ -1365,7 +1385,7 @@ export component MainWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 6px;
                                 height: root.row-h;
-                                Button {
+                                DialogButton {
                                     text: "Every";
                                     checkable: true;
                                     checked: root.split-mode == 0;
@@ -1386,7 +1406,7 @@ export component MainWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 6px;
                                 height: root.row-h;
-                                Button {
+                                DialogButton {
                                     text: "Ranges";
                                     checkable: true;
                                     checked: root.split-mode == 1;
@@ -1408,8 +1428,8 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.button-h;
                                 Rectangle { horizontal-stretch: 1; }
-                                Button { text: "Cancel"; clicked => { root.split_close(); } }
-                                Button {
+                                DialogButton { text: "Cancel"; clicked => { root.split_close(); } }
+                                DialogButton {
                                     text: "Split...";
                                     primary: true;
                                     enabled: !root.tool-running;
@@ -1425,9 +1445,10 @@ export component MainWindow inherits Window {
             // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
             if root.stamp-visible : FocusScope {
                 x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
-                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
                 width: root.mobile ? root.sheet-w : min(parent.width - 32px, 440px);
-                height: root.mobile ? min(root.sheet-room, sheet-stamp.preferred-height) : root.stamp-mode == 0 ? 300px : 330px;
+                height: root.mobile ? min(root.sheet-room, sheet-stamp.preferred-height)
+                    : min(parent.height - 32px, sheet-stamp.preferred-height);
                 capture-key-pressed(event) => {
                     if (event.text == Key.Escape) {
                         root.stamp_close();
@@ -1435,13 +1456,8 @@ export component MainWindow inherits Window {
                     }
                     return reject;
                 }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: root.mobile ? 20px : 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
                     // Its rows scroll when the sheet has less room than they need (a phone on its side).
                     sheet-stamp-scroll := Flickable {
                         interactive: root.mobile;
@@ -1467,13 +1483,13 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.row-h;
                                 Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
-                                Button {
+                                DialogButton {
                                     text: "Diagonal";
                                     checkable: true;
                                     checked: root.stamp-diagonal;
                                     clicked => { root.stamp-diagonal = true; }
                                 }
-                                Button {
+                                DialogButton {
                                     text: "Horizontal";
                                     checkable: true;
                                     checked: !root.stamp-diagonal;
@@ -1554,8 +1570,8 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.button-h;
                                 Rectangle { horizontal-stretch: 1; }
-                                Button { text: "Cancel"; clicked => { root.stamp_close(); } }
-                                Button {
+                                DialogButton { text: "Cancel"; clicked => { root.stamp_close(); } }
+                                DialogButton {
                                     text: "Apply";
                                     primary: true;
                                     clicked => { root.stamp_apply(); }
@@ -1570,9 +1586,10 @@ export component MainWindow inherits Window {
             // it is now.
             if root.convert-visible : FocusScope {
                 x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
-                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
                 width: root.mobile ? root.sheet-w : min(parent.width - 32px, 420px);
-                height: root.mobile ? min(root.sheet-room, sheet-convert.preferred-height) : root.convert-mode == 0 ? 170px : 230px;
+                height: root.mobile ? min(root.sheet-room, sheet-convert.preferred-height)
+                    : min(parent.height - 32px, sheet-convert.preferred-height);
                 init => { self.focus(); }
                 capture-key-pressed(event) => {
                     if (event.text == Key.Escape) {
@@ -1581,13 +1598,8 @@ export component MainWindow inherits Window {
                     }
                     return reject;
                 }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: root.mobile ? 20px : 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
                     // Its rows scroll when the sheet has less room than they need (a phone on its side).
                     sheet-convert-scroll := Flickable {
                         interactive: root.mobile;
@@ -1650,8 +1662,8 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.button-h;
                                 Rectangle { horizontal-stretch: 1; }
-                                Button { text: "Cancel"; clicked => { root.convert_close(); } }
-                                Button {
+                                DialogButton { text: "Cancel"; clicked => { root.convert_close(); } }
+                                DialogButton {
                                     text: root.convert-mode == 0 ? "Compress..." : "Export...";
                                     primary: true;
                                     enabled: !root.tool-running;
@@ -1681,13 +1693,8 @@ export component MainWindow inherits Window {
                     }
                     return reject;
                 }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: root.mobile ? 20px : 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
                     // Its rows scroll when the sheet has less room than they need (a phone on its side).
                     sheet-crop-scroll := Flickable {
                         interactive: root.mobile;
@@ -1707,9 +1714,9 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.button-h;
                                 Rectangle { horizontal-stretch: 1; }
-                                Button { text: "Cancel"; clicked => { root.crop_cancel(); } }
-                                Button { text: "All pages"; clicked => { root.crop_apply(true); } }
-                                Button {
+                                DialogButton { text: "Cancel"; clicked => { root.crop_cancel(); } }
+                                DialogButton { text: "All pages"; clicked => { root.crop_apply(true); } }
+                                DialogButton {
                                     text: "This page";
                                     primary: true;
                                     clicked => { root.crop_apply(false); }
@@ -1722,7 +1729,7 @@ export component MainWindow inherits Window {
 
             if root.props-visible : FocusScope {
                 x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
-                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
                 width: root.mobile ? root.sheet-w : min(parent.width - 32px, 460px);
                 height: root.mobile ? min(root.sheet-room, sheet-props.preferred-height) : min(parent.height - 32px, 380px);
                 capture-key-pressed(event) => {
@@ -1732,13 +1739,8 @@ export component MainWindow inherits Window {
                     }
                     return reject;
                 }
-                Rectangle {
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    border-radius: root.mobile ? 20px : 4px;
-                    drop-shadow-blur: 8px;
-                    drop-shadow-color: Theme.shadow;
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
                     // Its rows scroll when the sheet has less room than they need (a phone on its side).
                     sheet-props-scroll := Flickable {
                         interactive: root.mobile;
@@ -1794,8 +1796,8 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 height: root.button-h;
                                 Rectangle { horizontal-stretch: 1; }
-                                Button { text: "Close"; clicked => { root.props_close(); } }
-                                if root.editable : Button {
+                                DialogButton { text: "Close"; clicked => { root.props_close(); } }
+                                if root.editable : DialogButton {
                                     text: "Save";
                                     primary: true;
                                     clicked => { root.props_save(); }
@@ -1829,6 +1831,9 @@ export component MainWindow inherits Window {
             undo => { root.undo(); }
             redo => { root.redo(); }
             choose-theme(index) => { root.choose_theme(index); }
+            reduce-motion: root.reduce-motion;
+            reduce-motion-changed(on) => { root.set_reduce_motion(on); }
+            about => { root.about-visible = true; }
             minimize => { root.minimized = true; }
             toggle-maximize => { root.maximized = !root.maximized; }
             close => { root.quit(); }
@@ -2076,6 +2081,9 @@ export component MainWindow inherits Window {
             book-changed(on) => { root.book_mode_chosen(on); }
             chrome-hidden: root.chrome-hidden && root.mode == 0;
             choose-theme(index) => { root.choose_theme(index); }
+            reduce-motion: root.reduce-motion;
+            reduce-motion-changed(on) => { root.set_reduce_motion(on); }
+            about => { root.about-visible = true; }
             props-open => { root.props_open(); }
             stamp-open(mode) => { root.stamp_open(mode); }
             convert-open(mode) => { root.convert_open(mode); }
@@ -2109,6 +2117,255 @@ export component MainWindow inherits Window {
             thumbs-moved => { root.thumbs_moved(); }
             outline-clicked(index) => { root.outline_clicked(index); }
             outline-toggled(index) => { root.outline_toggled(index); }
+        }
+
+
+        // A message (Plan 0007 Phase 5): what `platform::MessageDialog` shows on the desktop, in
+        // the window's own style. Its level (0 information, 1 warning, 2 error), its buttons
+        // (0 OK, 1 Yes and No, 2 Yes, No and Cancel); the answer is 0 yes or OK, 1 no, 2 cancel.
+        if root.message-visible : Dialog {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            z: 2;
+            title: root.message-level == 2 ? "Error" : root.message-level == 1 ? "Warning" : "PODEFA";
+            card-width: 400px;
+            closed => { root.message_answered(root.message-buttons == 0 ? 0 : 2); }
+            VerticalLayout {
+                padding: 16px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        alignment: start;
+                        Image {
+                            width: 20px;
+                            height: 20px;
+                            source: root.message-level == 2 ? @image-url("icons/circle-x.svg")
+                                : root.message-level == 1 ? @image-url("icons/triangle-alert.svg")
+                                : @image-url("icons/circle-alert.svg");
+                            colorize: root.message-level == 2 ? Theme.danger
+                                : root.message-level == 1 ? Theme.highlight-ink : Theme.text-muted;
+                        }
+                    }
+                    Text {
+                        text: root.message-text;
+                        wrap: word-wrap;
+                        font-size: 13px;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    if root.message-buttons == 2 : DialogButton {
+                        text: "Cancel";
+                        clicked => { root.message_answered(2); }
+                    }
+                    if root.message-buttons >= 1 : DialogButton {
+                        text: "No";
+                        clicked => { root.message_answered(1); }
+                    }
+                    DialogButton {
+                        text: root.message-buttons == 0 ? "OK" : "Yes";
+                        primary: true;
+                        min-width: 72px;
+                        init => { self.focus(); }
+                        clicked => { root.message_answered(0); }
+                    }
+                }
+            }
+        }
+
+        // About PODEFA (the brand menu).
+        if root.about-visible : Dialog {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            z: 2;
+            title: "About";
+            card-width: 340px;
+            closed => { root.about-visible = false; }
+            VerticalLayout {
+                padding: 20px;
+                padding-bottom: 16px;
+                spacing: 6px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 10px;
+                        background: Theme.text;
+                        Text {
+                            text: "P";
+                            color: Theme.surface;
+                            font-size: 22px;
+                            font-weight: 900;
+                        }
+                    }
+                }
+                Rectangle { height: 4px; }
+                Text {
+                    text: "PODEFA";
+                    font-size: 15px;
+                    font-weight: 700;
+                    letter-spacing: 0.4px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Version " + root.app-version;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                Rectangle { height: 6px; }
+                Text {
+                    text: "A light, open-source PDF viewer and editor: read, mark up, organize pages, fill forms.";
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Free software under the GNU AGPL 3.0 or later. Built with Slint and MuPDF.";
+                    wrap: word-wrap;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            HorizontalLayout {
+                padding: 10px;
+                padding-left: 16px;
+                Text {
+                    text: "© 2026 FINE Association";
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                DialogButton {
+                    text: "OK";
+                    primary: true;
+                    min-width: 72px;
+                    init => { self.focus(); }
+                    clicked => { root.about-visible = false; }
+                }
+            }
+        }
+
+        // A document that needs a password (Plan 0007 Phase 5): its name, the password, and what
+        // the last try said. A wrong password shakes the lock (unless motion is reduced).
+        if root.password-visible : Dialog {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            z: 2;
+            title: "Protected Document";
+            card-width: 340px;
+            closed => { root.password_cancel(); }
+            property <bool> show: false;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 56px;
+                        height: 56px;
+                        lock := Image {
+                            property <length> dx: 0px;
+                            x: (parent.width - self.width) / 2 + self.dx;
+                            width: 40px;
+                            height: 40px;
+                            source: root.password-busy ? @image-url("icons/lock-open.svg") : @image-url("icons/lock.svg");
+                            colorize: root.password-wrong ? Theme.danger : Theme.text;
+                        }
+                        // The shake: six steps of 40 ms, each tries' count starting one.
+                        shake := Timer {
+                            property <int> step: 0;
+                            interval: 40ms;
+                            running: false;
+                            triggered => {
+                                self.step += 1;
+                                lock.dx = self.step >= 6 ? 0px : (Math.mod(self.step, 2) == 0 ? 6px : -6px);
+                                if (self.step >= 6) {
+                                    self.running = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: root.password-file;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.password-wrong ? "That password is not right. Try again."
+                        : "This document is protected. Type its password to open it.";
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: root.password-wrong ? Theme.danger : Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    spacing: 4px;
+                    password-field := Field {
+                        horizontal-stretch: 1;
+                        input-type: show ? InputType.text : InputType.password;
+                        placeholder-text: "Password";
+                        enabled: !root.password-busy;
+                        init => { self.focus(); }
+                        accepted(text) => { root.password_submit(text); }
+                    }
+                    IconButton {
+                        y: (parent.height - self.height) / 2;
+                        icon: show ? @image-url("icons/eye-off.svg") : @image-url("icons/eye.svg");
+                        tip: show ? "Hide the password" : "Show the password";
+                        checked: show;
+                        clicked => { show = !show; }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    DialogButton {
+                        horizontal-stretch: 1;
+                        text: "Cancel";
+                        clicked => { root.password_cancel(); }
+                    }
+                    DialogButton {
+                        horizontal-stretch: 1;
+                        text: root.password-busy ? "Opening..." : "Unlock";
+                        icon: root.password-busy ? @image-url("") : @image-url("icons/arrow-right.svg");
+                        primary: true;
+                        enabled: !root.password-busy;
+                        clicked => { root.password_submit(password-field.text); }
+                    }
+                }
+            }
+            property <int> tries: root.password-tries;
+            changed tries => {
+                if (!Theme.reduce-motion && self.tries > 0) {
+                    shake.step = 0;
+                    shake.running = true;
+                }
+                password-field.select-all();
+            }
         }
 
         // The window's edge while it is not maximized: a frameless window has no system border.
