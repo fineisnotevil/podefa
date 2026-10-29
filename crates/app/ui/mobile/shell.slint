@@ -1,0 +1,1579 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The mobile shell (Plan 0008 Phase 2, from the concept's `src/components/mobile/`, DESIGN.md
+// step 38): a header island at the top, a thumb dock at the bottom, cards that open over the
+// dock, the search bar under the header, and a bottom sheet for pages, contents and documents.
+// It only lays out: every command calls the same Rust handler the desktop islands call.
+//
+// Every control is at least 44 logical px in both directions (plan row MH); the islands keep
+// clear of the system bars (`safe-top`, `safe-bottom`) and the cards of the on-screen keyboard.
+
+import { ListView } from "std-widgets.slint";
+import { ThumbRow, OutlineRow, TabItem } from "../types.slint";
+import { Theme } from "../theme.slint";
+import { Field, Island } from "../widgets.slint";
+
+// Taps on the shell's buttons, so Rust keeps the islands in sight while they are used.
+export global ShellActivity {
+    callback touched();
+}
+
+// A 44 px touch target with an icon; checked, it is filled with the text colour (the concept's
+// dark pill on light, light on dark). The gallery's column uses it too.
+export component TouchButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <length> icon-size: 20px;
+    in property <color> tint: Theme.text-muted;
+    // A tool's own fill and icon colour when chosen, as the desktop's Edit commands have them.
+    in property <color> checked-fill: Theme.text;
+    in property <color> checked-tint: Theme.surface;
+    // The chosen colour, as a dot in the corner (transparent: none).
+    in property <color> dot: transparent;
+    callback clicked();
+    width: 44px;
+    height: 44px;
+    // The island's 16 px radius less its 6 px padding, so the corners run parallel.
+    border-radius: 10px;
+    background: root.checked ? root.checked-fill : touch.pressed && root.enabled ? Theme.active : transparent;
+    animate background { duration: Theme.fade; }
+    Image {
+        source: root.icon;
+        width: root.icon-size;
+        height: root.icon-size;
+        colorize: root.checked ? root.checked-tint : root.tint;
+        opacity: root.enabled ? 1.0 : 0.3;
+    }
+    if root.dot != transparent : Rectangle {
+        x: parent.width - self.width - 6px;
+        y: parent.height - self.height - 6px;
+        width: 9px;
+        height: 9px;
+        border-radius: 4.5px;
+        background: root.dot;
+        border-width: 1px;
+        border-color: Theme.surface;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            ShellActivity.touched();
+            root.clicked();
+        }
+    }
+}
+
+// A row in the header's menus and the sheet: an icon and a label, 44 px tall.
+component SheetRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> detail;
+    in property <bool> current: false;
+    in property <bool> enabled: true;
+    // A long press picks the row up (`held`); then the finger's window y while it moves, and its
+    // release.
+    in property <bool> liftable: false;
+    callback clicked();
+    callback held(length);
+    callback held-moved(length);
+    callback held-ended();
+    property <bool> holding;
+    height: 44px;
+    border-radius: 10px;
+    background: root.current ? Theme.text : touch.pressed && root.enabled ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        if root.icon.width > 0 : Image {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            width: 18px;
+            height: 18px;
+            colorize: root.current ? Theme.surface : Theme.text-muted;
+        }
+        Text {
+            text: root.label;
+            color: root.current ? Theme.surface : Theme.text;
+            opacity: root.enabled ? 1.0 : 0.4;
+            font-size: 14px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.detail != "" : Text {
+            text: root.detail;
+            color: root.current ? Theme.surface : Theme.text-faint;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            if (!root.holding) {
+                root.clicked();
+            }
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && root.liftable) {
+                press.running = true;
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                press.running = false;
+                if (root.holding) {
+                    root.holding = false;
+                    root.held-ended();
+                }
+            }
+        }
+        moved => {
+            if (root.holding) {
+                root.held-moved(root.absolute-position.y + self.mouse-y);
+            } else if (abs(self.mouse-x - self.pressed-x) > 8px
+                || abs(self.mouse-y - self.pressed-y) > 8px) {
+                press.running = false;
+            }
+        }
+    }
+    press := Timer {
+        interval: 500ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (touch.pressed) {
+                root.holding = true;
+                root.held(root.absolute-position.y + touch.mouse-y);
+            }
+        }
+    }
+}
+
+// A labelled choice in a segmented row (the theme, the sheet's tabs).
+component Segment inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> checked;
+    callback clicked();
+    height: 40px;
+    border-radius: 8px;
+    background: root.checked ? Theme.surface : transparent;
+    drop-shadow-blur: root.checked ? 4px : 0px;
+    drop-shadow-color: Theme.island-shadow;
+    HorizontalLayout {
+        alignment: center;
+        spacing: 6px;
+        Image {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            width: 16px;
+            height: 16px;
+            colorize: root.checked ? Theme.text : Theme.text-muted;
+        }
+        Text {
+            text: root.label;
+            font-size: 13px;
+            font-weight: root.checked ? 600 : 400;
+            color: root.checked ? Theme.text : Theme.text-muted;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+// A colour in the Edit palette: a 28 px disc in a 44 px target, ringed when chosen.
+component SwatchButton inherits Rectangle {
+    in property <color> colour;
+    in property <bool> chosen;
+    callback clicked();
+    width: 44px;
+    height: 44px;
+    Rectangle {
+        width: 28px;
+        height: 28px;
+        border-radius: 14px;
+        background: root.colour;
+        border-width: root.chosen ? 2px : 1px;
+        border-color: root.chosen ? Theme.text : Theme.line-strong;
+    }
+    if root.chosen : Rectangle {
+        width: 36px;
+        height: 36px;
+        border-radius: 18px;
+        border-width: 2px;
+        border-color: Theme.text;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+// A dimmed layer over everything under a menu or the sheet; a tap on it closes them.
+component Scrim inherits Rectangle {
+    callback dismissed();
+    background: #00000059;
+    TouchArea { clicked => { root.dismissed(); } }
+}
+
+export component MobileShell inherits Rectangle {
+    // The open document and its state.
+    in property <string> doc-title;
+    in property <bool> dirty;
+    in property <bool> editable;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    // Zero-based, like the desktop status island's.
+    in property <int> current-page;
+    in property <int> total-pages;
+    in property <float> zoom-percent;
+    in property <int> theme;
+    in property <bool> reduce-motion;
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
+    in property <[ThumbRow]> thumbs;
+    in property <[OutlineRow]> outline-rows;
+    in property <bool> has-error;
+    in property <string> error-text;
+    in-out property <int> mode;
+    // Search: the bar shows while `find-visible`; Rust opens and closes it.
+    in property <bool> find-visible;
+    in-out property <string> find-text;
+    in property <string> find-counter;
+    in-out property <string> page-input;
+    in-out property <length> thumb-scroll-y;
+    // The system bars and the on-screen keyboard's top edge (the window's height without one).
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    // Landscape (Plan 0008 Phase 5): the camera cutout and the navigation bar can sit at a side.
+    in property <length> safe-left;
+    in property <length> safe-right;
+    in property <length> keyboard-top;
+    // Edit (Plan 0008 Phase 3): the tool (0 select, 1-4 markup, 5 note, 6 ink, 7 crop), the
+    // colour and ink width chosen, and whether the document has form fields.
+    in property <int> tool;
+    in property <int> colour-index;
+    in property <[color]> swatches;
+    in property <int> ink-width-index;
+    in property <bool> form-fields;
+    in property <bool> field-highlight;
+    in property <bool> has-field-focus;
+    // Book mode (Plan 0008 Phase 5 review): one page at a time, turned sideways.
+    in property <bool> book;
+    // Read hides every island after a while without a touch, until the next tap.
+    in property <bool> chrome-hidden;
+
+    // Where the header ends and the dock begins, for the document's insets.
+    out property <length> header-bottom: header.y + header.height;
+    out property <length> dock-top: dock.y;
+    // The bottom of the islands under the header (the search bar and the history capsule): the
+    // Tools column starts under them.
+    out property <length> chrome-bottom: max(capsule.y + capsule.height, search-bar.y + search-bar.height);
+    // The header and the dock lie inside the safe area (row MK, `--bench-rotate`).
+    out property <bool> in-safe-area: header.x >= root.safe-left && header.y >= root.safe-top
+        && header.x + header.width <= root.width - root.safe-right
+        && dock.x >= root.safe-left && dock.x + dock.width <= root.width - root.safe-right
+        && dock.y + dock.height <= root.height - root.safe-bottom
+        && header.y + header.height <= dock.y;
+    // The top of what floats over the bottom of the document: the dock, the edit strip, its
+    // palette, or the on-screen keyboard. An editor on the page is kept above it (row MI).
+    out property <length> floor: min(root.keyboard-top, root.stack-top);
+    // A document of the menu held over Tools' pages (Plan 0008 Phase 5 review): its tab's index
+    // and the finger's window y, the finger moving, and letting go.
+    property <bool> doc-holding;
+    callback doc-held(int, length);
+    callback doc-moved(length);
+    callback doc-let-go();
+    // A menu, a card or the sheet is open.
+    out property <bool> busy: root.docs-menu || root.more-menu || root.card != 0 || root.sheet-open;
+    // While the go-to-page card is open, Rust leaves its text alone.
+    out property <bool> page-field-focused: root.card == 1;
+
+    // The sheet: open, and its tab (0 pages, 1 contents, 2 documents).
+    callback sheet-changed(bool, int);
+    callback save();
+    callback save-as();
+    callback undo();
+    callback redo();
+    callback open-file();
+    callback images-to-pdf();
+    callback merge-open();
+    callback book-changed(bool);
+    callback choose-theme(int);
+    callback reduce-motion-changed(bool);
+    callback about();
+    callback props-open();
+    callback stamp-open(int);
+    callback convert-open(int);
+    callback find-open();
+    callback find-changed(string);
+    callback find-next();
+    callback find-previous();
+    callback find-close();
+    callback prev-page();
+    callback next-page();
+    callback go-to-page(string);
+    callback zoom-in();
+    callback zoom-out();
+    callback fit-width();
+    callback fit-page();
+    callback select-tab(int);
+    callback close-tab(int);
+    callback thumb-clicked(int);
+    callback thumbs-moved();
+    callback outline-clicked(int);
+    callback outline-toggled(int);
+    callback choose-tool(int);
+    callback choose-colour(int);
+    callback choose-ink-width(int);
+    callback crop-tool();
+    callback page-op(int);
+    callback toggle-field-highlight();
+    callback reset-field();
+    callback reset-form();
+    callback import-form-data();
+    callback export-form-data();
+    callback flatten-form();
+
+    property <length> edge: 8px;
+    // Where the islands start and how wide they run, inside the safe area's sides.
+    property <length> left: root.safe-left + root.edge;
+    property <length> span: root.width - root.safe-left - root.safe-right - 2 * root.edge;
+    // The room a menu under the header has: on a phone on its side less than its rows need, so
+    // they scroll (Plan 0008 Phase 5).
+    property <length> menu-room: root.height - root.safe-bottom - root.edge
+        - (header.y + header.height + root.edge);
+    property <bool> docs-menu: false;
+    property <bool> more-menu: false;
+    // The card over the dock: 0 none, 1 go to page, 2 zoom, 3 the form, 4 the tools.
+    property <int> card: 0;
+    property <bool> sheet-open: false;
+    property <int> sheet-tab: 0;
+    property <bool> has-doc: root.total-pages > 0;
+    property <bool> can-edit: root.editable && root.has-doc;
+    // The edit strip over the dock in Edit, and the chosen tool's palette over the strip.
+    property <bool> strip-shown: root.mode == 1 && root.has-doc;
+    property <length> strip-y: dock.y - root.edge - 56px;
+    property <bool> palette-shown: root.strip-shown && root.can-edit
+        && ((root.tool >= 1 && root.tool <= 4) || root.tool == 6);
+    property <length> palette-h: root.tool == 6 ? 104px : 56px;
+    property <length> palette-y: root.strip-y - root.edge - root.palette-h;
+    // The width of what sits at the dock's right end: Search and the zoom (or the tools).
+    property <length> right-group: root.mode == 2 ? 36px : 36px + 4px + zoom-text.preferred-width + 20px;
+    property <length> stack-top: root.palette-shown ? root.palette-y
+        : root.strip-shown ? root.strip-y : dock.y;
+    // Hidden islands fade out and let touches through to the page.
+    property <float> chrome: root.chrome-hidden ? 0 : 1;
+    animate chrome { duration: Theme.motion; easing: ease-out-expo; }
+
+    function set-mode(mode: int) {
+        // Leaving Edit puts the tool back to Select, as the desktop's mode buttons do.
+        if (mode != 1 && root.tool != 0) {
+            root.choose-tool(0);
+        }
+        if (root.card != 0) {
+            root.card = 0;
+        }
+        root.mode = mode;
+    }
+    function pick(tool: int) {
+        root.choose-tool(root.tool == tool ? 0 : tool);
+    }
+
+    // Android's Back (Plan 0008 Phase 3): closes the topmost menu, card or the sheet; false when
+    // none was open.
+    public function back() -> bool {
+        if (root.docs-menu || root.more-menu) {
+            root.docs-menu = false;
+            root.more-menu = false;
+            return true;
+        }
+        if (root.card != 0) {
+            root.card = 0;
+            return true;
+        }
+        if (root.sheet-open) {
+            root.close-sheet();
+            return true;
+        }
+        return false;
+    }
+
+    function open-sheet(tab: int) {
+        root.docs-menu = false;
+        root.more-menu = false;
+        root.card = 0;
+        root.sheet-tab = tab;
+        root.sheet-open = true;
+        root.sheet-changed(true, tab);
+    }
+    function close-sheet() {
+        root.sheet-open = false;
+        root.sheet-changed(false, root.sheet-tab);
+    }
+
+    // The header island: the document (a tap lists the open ones), search, save, pages and more.
+    header := Island {
+        x: root.left;
+        y: root.safe-top + root.edge;
+        width: root.span;
+        height: 56px;
+        border-radius: 16px;
+        opacity: root.chrome;
+        visible: self.opacity > 0.01;
+        HorizontalLayout {
+            padding: 6px;
+            spacing: 2px;
+            Rectangle {
+                width: 44px;
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 9px;
+                    background: Theme.text;
+                    Text {
+                        text: "P";
+                        color: Theme.surface;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+                }
+            }
+            doc-button := Rectangle {
+                horizontal-stretch: 1;
+                border-radius: 10px;
+                background: doc-touch.pressed ? Theme.hover : transparent;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 4px;
+                    spacing: 4px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            if root.dirty : Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: #f59e0b;
+                            }
+                            Text {
+                                text: root.doc-title == "" ? "PODEFA" : root.doc-title;
+                                color: Theme.text;
+                                font-size: 14px;
+                                font-weight: 600;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        Text {
+                            text: root.has-doc ? "Page " + (root.current-page + 1) + " / " + root.total-pages
+                                : "No document";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                        }
+                    }
+                    Image {
+                        y: (parent.height - self.height) / 2;
+                        source: @image-url("../icons/chevron-down.svg");
+                        width: 16px;
+                        height: 16px;
+                        colorize: Theme.text-faint;
+                        transform-rotation: root.docs-menu ? 180deg : 0deg;
+                    }
+                }
+                doc-touch := TouchArea {
+                    clicked => {
+                        root.more-menu = false;
+                        root.docs-menu = !root.docs-menu;
+                    }
+                }
+            }
+            TouchButton {
+                icon: @image-url("../icons/layers.svg");
+                enabled: root.has-doc;
+                clicked => { root.open-sheet(0); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/ellipsis-vertical.svg");
+                checked: root.more-menu;
+                clicked => {
+                    root.docs-menu = false;
+                    root.more-menu = !root.more-menu;
+                }
+            }
+        }
+    }
+
+    // The search bar, under the header.
+    search-bar := Rectangle {
+        x: root.left;
+        y: header.y + header.height + root.edge;
+        width: root.span;
+        height: root.find-visible ? 56px : 0px;
+    }
+    if root.find-visible : Island {
+        x: search-bar.x;
+        y: search-bar.y;
+        width: search-bar.width;
+        height: search-bar.height;
+        border-radius: 16px;
+        opacity: root.chrome;
+        visible: self.opacity > 0.01;
+        HorizontalLayout {
+            padding: 6px;
+            spacing: 2px;
+            Rectangle {
+                width: 44px;
+                Image {
+                    source: @image-url("../icons/search.svg");
+                    width: 18px;
+                    height: 18px;
+                    colorize: Theme.text-faint;
+                }
+            }
+            Field {
+                horizontal-stretch: 1;
+                placeholder-text: "Search the document";
+                text <=> root.find-text;
+                edited(text) => { root.find-changed(text); }
+                accepted => { root.find-next(); }
+                init => { self.focus(); }
+            }
+            if root.find-counter != "" : Text {
+                text: root.find-counter;
+                color: Theme.text-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            TouchButton {
+                icon: @image-url("../icons/chevron-up.svg");
+                clicked => { root.find-previous(); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/chevron-down.svg");
+                clicked => { root.find-next(); }
+            }
+            TouchButton {
+                icon: @image-url("../icons/x.svg");
+                clicked => { root.find-close(); }
+            }
+        }
+    }
+
+    // The history capsule under the header's right end (the concept's MobileHeader): Undo, Save,
+    // Save As and Redo. Its edge turns amber while there are unsaved changes.
+    capsule := Island {
+        width: history.preferred-width;
+        height: root.has-doc ? 52px : 0px;
+        x: root.left + root.span - self.width;
+        y: search-bar.y + search-bar.height + (root.find-visible ? root.edge : 0px);
+        border-radius: 26px;
+        border-color: root.dirty && root.editable ? #f59e0b99 : Theme.island-line;
+        opacity: root.chrome;
+        visible: root.has-doc && self.opacity > 0.01;
+        history := HorizontalLayout {
+            padding: 4px;
+            TouchButton {
+                border-radius: 22px;
+                icon: @image-url("../icons/undo-2.svg");
+                tint: Theme.text;
+                enabled: root.can-undo;
+                clicked => { root.undo(); }
+            }
+            TouchButton {
+                border-radius: 22px;
+                icon: @image-url("../icons/save.svg");
+                tint: root.dirty ? #d97706 : Theme.text-muted;
+                dot: root.dirty && root.editable ? #f59e0b : transparent;
+                enabled: root.editable && root.dirty;
+                clicked => { root.save(); }
+            }
+            TouchButton {
+                border-radius: 22px;
+                icon: @image-url("../icons/save-pen.svg");
+                enabled: root.editable;
+                clicked => { root.save-as(); }
+            }
+            TouchButton {
+                border-radius: 22px;
+                icon: @image-url("../icons/redo-2.svg");
+                tint: Theme.text;
+                enabled: root.can-redo;
+                clicked => { root.redo(); }
+            }
+        }
+    }
+
+    // An error, under the header (and the search bar).
+    if root.has-error : Rectangle {
+        x: root.left;
+        y: root.chrome-bottom + root.edge;
+        width: root.span;
+        height: 44px;
+        background: Theme.danger-surface;
+        border-color: Theme.danger-line;
+        border-width: 1px;
+        border-radius: 12px;
+        Text {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.error-text;
+            color: Theme.danger-text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+
+    // The thumb dock: pages on the left, the three modes in the middle, the zoom on the right.
+    dock := Rectangle {
+        x: root.left;
+        y: root.height - root.safe-bottom - root.edge - self.height;
+        width: root.span;
+        height: 56px;
+        opacity: root.chrome;
+        visible: self.opacity > 0.01;
+        // The pager and the zoom are small capsules, as in the concept (the pager at most 92 px);
+        // their touch areas run the dock's full height, so a thumb still finds them.
+        pager-island := Island {
+            x: 0px;
+            y: (parent.height - self.height) / 2;
+            width: 92px;
+            height: 36px;
+            border-radius: 12px;
+            opacity: root.has-doc ? 1.0 : 0.0;
+            Image {
+                x: 4px;
+                width: 18px;
+                height: 18px;
+                source: @image-url("../icons/chevron-left.svg");
+                colorize: Theme.text-muted;
+                opacity: root.current-page > 0 ? (prev-touch.pressed ? 0.5 : 1.0) : 0.25;
+            }
+            Rectangle {
+                x: 24px;
+                y: 4px;
+                width: 44px;
+                height: parent.height - 8px;
+                border-radius: 8px;
+                background: root.card == 1 ? Theme.text : page-touch.pressed ? Theme.active : transparent;
+                Text {
+                    width: parent.width - 2px;
+                    text: (root.current-page + 1) + " / " + root.total-pages;
+                    color: root.card == 1 ? Theme.surface : Theme.text;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+            }
+            Image {
+                x: parent.width - self.width - 4px;
+                width: 18px;
+                height: 18px;
+                source: @image-url("../icons/chevron-right.svg");
+                colorize: Theme.text-muted;
+                opacity: root.current-page + 1 < root.total-pages ? (next-touch.pressed ? 0.5 : 1.0) : 0.25;
+            }
+        }
+        prev-touch := TouchArea {
+            x: 0px;
+            width: 24px;
+            enabled: root.has-doc && root.current-page > 0;
+            clicked => { root.prev-page(); }
+        }
+        page-touch := TouchArea {
+            x: 24px;
+            width: 44px;
+            enabled: root.has-doc;
+            clicked => { root.card = root.card == 1 ? 0 : 1; }
+        }
+        next-touch := TouchArea {
+            x: 68px;
+            width: 24px;
+            enabled: root.has-doc && root.current-page + 1 < root.total-pages;
+            clicked => { root.next-page(); }
+        }
+        // In the middle of the dock, as in the concept; on a phone too narrow for that it gives way
+        // to the right-hand capsules.
+        Island {
+            width: modes.preferred-width;
+            x: max(pager-island.width + 4px, min((parent.width - self.width) / 2,
+                parent.width - root.right-group - 4px - self.width));
+            border-radius: 16px;
+            modes := HorizontalLayout {
+                padding: 6px;
+                TouchButton {
+                    icon: @image-url("../icons/book-open.svg");
+                    checked: root.mode == 0;
+                    clicked => { root.set-mode(0); }
+                }
+                TouchButton {
+                    icon: @image-url("../icons/pen-tool.svg");
+                    checked: root.mode == 1;
+                    enabled: root.has-doc;
+                    clicked => { root.set-mode(1); }
+                }
+                TouchButton {
+                    icon: @image-url("../icons/layout-grid.svg");
+                    checked: root.mode == 2;
+                    enabled: root.has-doc;
+                    clicked => { root.set-mode(2); }
+                }
+            }
+        }
+        // Search, beside the zoom (the concept's MobileBottomDock); the tools in Tools.
+        search-island := Island {
+            width: 36px;
+            height: 36px;
+            x: zoom-island.x - 4px - self.width;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: root.find-visible ? Theme.text : search-touch.pressed ? Theme.active : Theme.surface-float;
+            opacity: root.has-doc && root.mode != 2 ? 1.0 : 0.0;
+            Image {
+                source: @image-url("../icons/search.svg");
+                width: 16px;
+                height: 16px;
+                colorize: root.find-visible ? Theme.surface : Theme.text-muted;
+            }
+        }
+        search-touch := TouchArea {
+            x: search-island.x - 4px;
+            width: search-island.width + 6px;
+            enabled: root.has-doc && root.mode != 2;
+            clicked => {
+                root.card = 0;
+                if (root.find-visible) {
+                    root.find-close();
+                } else {
+                    root.find-open();
+                }
+            }
+        }
+        tools-island := Island {
+            width: 36px;
+            height: 36px;
+            x: parent.width - self.width;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: root.card == 4 ? Theme.text : tools-touch.pressed ? Theme.active : Theme.surface-float;
+            opacity: root.has-doc && root.mode == 2 ? 1.0 : 0.0;
+            Image {
+                source: @image-url("../icons/wrench.svg");
+                width: 16px;
+                height: 16px;
+                colorize: root.card == 4 ? Theme.surface : Theme.text-muted;
+            }
+        }
+        tools-touch := TouchArea {
+            x: tools-island.x - 4px;
+            width: tools-island.width + 4px;
+            enabled: root.has-doc && root.mode == 2;
+            clicked => { root.card = root.card == 4 ? 0 : 4; }
+        }
+        zoom-island := Island {
+            width: zoom-text.preferred-width + 20px;
+            height: 36px;
+            x: parent.width - self.width;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: root.card == 2 ? Theme.text : zoom-touch.pressed ? Theme.active : Theme.surface-float;
+            opacity: root.has-doc && root.mode != 2 ? 1.0 : 0.0;
+            zoom-text := Text {
+                text: Math.round(root.zoom-percent) + "%";
+                color: root.card == 2 ? Theme.surface : Theme.text;
+                font-size: 11px;
+                font-weight: 600;
+            }
+        }
+        zoom-touch := TouchArea {
+            x: zoom-island.x;
+            width: zoom-island.width;
+            enabled: root.has-doc && root.mode != 2;
+            clicked => { root.card = root.card == 2 ? 0 : 2; }
+        }
+    }
+
+    // The edit strip (the concept's `MobileEditorToolbar`): the tools, rotation and the form,
+    // in a row that scrolls sideways when the phone is narrower than it.
+    if root.strip-shown : Island {
+        x: root.left;
+        y: root.strip-y;
+        opacity: root.chrome;
+        visible: self.opacity > 0.01;
+        width: root.span;
+        height: 56px;
+        border-radius: 16px;
+        clip: true;
+        Flickable {
+            x: 6px;
+            width: parent.width - 12px;
+            content-width: max(self.width, tools.preferred-width);
+            content-height: self.height;
+            tools := HorizontalLayout {
+                width: self.preferred-width;
+                height: 56px;
+                spacing: 2px;
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/mouse-pointer-2.svg");
+                    checked: root.tool == 0;
+                    clicked => { root.choose-tool(0); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/highlighter.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 1;
+                    checked-fill: Theme.highlight-fill;
+                    checked-tint: Theme.highlight-ink;
+                    dot: root.tool == 1 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(1); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/underline.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 2;
+                    dot: root.tool == 2 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(2); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/strikethrough.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 3;
+                    checked-fill: Theme.strike-fill;
+                    checked-tint: Theme.strike-ink;
+                    dot: root.tool == 3 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(3); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/spell-check-2.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 4;
+                    dot: root.tool == 4 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(4); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/pen-tool.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 6;
+                    checked-fill: Theme.ink-fill;
+                    checked-tint: #ffffff;
+                    dot: root.tool == 6 ? root.swatches[root.colour-index] : transparent;
+                    clicked => { root.pick(6); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/sticky-note.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 5;
+                    clicked => { root.pick(5); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/crop.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 7;
+                    clicked => { root.crop-tool(); }
+                }
+                Rectangle {
+                    width: 9px;
+                    Rectangle {
+                        width: 1px;
+                        height: 24px;
+                        background: Theme.line-strong;
+                    }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/rotate-ccw.svg");
+                    enabled: root.can-edit;
+                    clicked => { root.page-op(0); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/rotate-cw.svg");
+                    enabled: root.can-edit;
+                    clicked => { root.page-op(1); }
+                }
+                if root.form-fields : Rectangle {
+                    width: 9px;
+                    Rectangle {
+                        width: 1px;
+                        height: 24px;
+                        background: Theme.line-strong;
+                    }
+                }
+                if root.form-fields : TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/text-cursor-input.svg");
+                    checked: root.field-highlight;
+                    clicked => { root.toggle-field-highlight(); }
+                }
+                if root.form-fields : TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/clipboard-list.svg");
+                    checked: root.card == 3;
+                    clicked => { root.card = root.card == 3 ? 0 : 3; }
+                }
+            }
+        }
+    }
+
+    // The chosen tool's palette, over the strip: the colours, and the Ink tool's line widths.
+    if root.palette-shown : Island {
+        x: root.left;
+        y: root.palette-y;
+        width: root.span;
+        height: root.palette-h;
+        border-radius: 16px;
+        VerticalLayout {
+            padding-top: 6px;
+            padding-bottom: 6px;
+            HorizontalLayout {
+                alignment: center;
+                for swatch[index] in root.swatches : SwatchButton {
+                    colour: swatch;
+                    chosen: index == root.colour-index;
+                    clicked => { root.choose-colour(index); }
+                }
+            }
+            if root.tool == 6 : HorizontalLayout {
+                alignment: center;
+                spacing: 8px;
+                for line[index] in [1px, 2px, 4px] : Rectangle {
+                    width: 72px;
+                    height: 44px;
+                    border-radius: 12px;
+                    background: index == root.ink-width-index ? Theme.active : width-touch.pressed ? Theme.hover : transparent;
+                    border-width: index == root.ink-width-index ? 1px : 0px;
+                    border-color: Theme.line-strong;
+                    Rectangle {
+                        width: 32px;
+                        height: line * 1.5;
+                        border-radius: line;
+                        background: Theme.text;
+                    }
+                    width-touch := TouchArea { clicked => { root.choose-ink-width(index); } }
+                }
+            }
+        }
+    }
+
+    // The form: Reset Field and Reset Form, its data, and Flatten (the desktop's form menu).
+    if root.card == 3 && root.strip-shown : Island {
+        x: root.left;
+        width: root.span;
+        height: form-list.preferred-height;
+        y: root.stack-top - root.edge - self.height;
+        border-radius: 16px;
+        form-list := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            SheetRow {
+                icon: @image-url("../icons/eraser.svg");
+                label: "Reset Field";
+                enabled: root.editable && root.has-field-focus;
+                clicked => {
+                    root.card = 0;
+                    root.reset-field();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/eraser.svg");
+                label: "Reset Form";
+                enabled: root.editable;
+                clicked => {
+                    root.card = 0;
+                    root.reset-form();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/file-input.svg");
+                label: "Import Data...";
+                enabled: root.editable;
+                clicked => {
+                    root.card = 0;
+                    root.import-form-data();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/file-output.svg");
+                label: "Export Data...";
+                clicked => {
+                    root.card = 0;
+                    root.export-form-data();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/layers.svg");
+                label: "Flatten Form";
+                enabled: root.editable;
+                clicked => {
+                    root.card = 0;
+                    root.flatten-form();
+                }
+            }
+        }
+    }
+
+    // Go to a page: over the dock, and over the on-screen keyboard while it shows.
+    if root.card == 1 : Island {
+        x: root.left;
+        width: root.span;
+        height: 56px;
+        y: min(root.stack-top - root.edge, root.keyboard-top - root.edge) - self.height;
+        border-radius: 16px;
+        HorizontalLayout {
+            padding: 6px;
+            padding-left: 14px;
+            spacing: 8px;
+            Text {
+                text: "Go to page";
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            Field {
+                horizontal-stretch: 1;
+                input-type: InputType.number;
+                placeholder-text: "1 - " + root.total-pages;
+                text <=> root.page-input;
+                accepted(text) => {
+                    root.go-to-page(text);
+                    root.card = 0;
+                }
+                // The current page is chosen, so typing replaces it.
+                init => {
+                    self.focus();
+                    self.select-all();
+                }
+            }
+            TouchButton {
+                icon: @image-url("../icons/arrow-up-right.svg");
+                checked: true;
+                clicked => {
+                    root.go-to-page(root.page-input);
+                    root.card = 0;
+                }
+            }
+        }
+    }
+
+    // The zoom: smaller and larger, the percentage, and the fits.
+    if root.card == 2 : Island {
+        x: root.left;
+        width: root.span;
+        height: 160px;
+        y: root.stack-top - root.edge - self.height;
+        border-radius: 16px;
+        VerticalLayout {
+            padding: 6px;
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 4px;
+                TouchButton {
+                    icon: @image-url("../icons/zoom-out.svg");
+                    clicked => { root.zoom-out(); }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: Math.round(root.zoom-percent) + "%";
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchButton {
+                    icon: @image-url("../icons/zoom-in.svg");
+                    clicked => { root.zoom-in(); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                SheetRow {
+                    horizontal-stretch: 1;
+                    icon: @image-url("../icons/move-horizontal.svg");
+                    label: "Fit width";
+                    clicked => {
+                        root.fit-width();
+                        root.card = 0;
+                    }
+                }
+                SheetRow {
+                    horizontal-stretch: 1;
+                    icon: @image-url("../icons/maximize-2.svg");
+                    label: "Fit page";
+                    clicked => {
+                        root.fit-page();
+                        root.card = 0;
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                SheetRow {
+                    horizontal-stretch: 1;
+                    icon: @image-url("../icons/gallery-vertical.svg");
+                    label: "Scroll";
+                    current: !root.book;
+                    clicked => {
+                        root.book-changed(false);
+                        root.card = 0;
+                    }
+                }
+                SheetRow {
+                    horizontal-stretch: 1;
+                    icon: @image-url("../icons/gallery-horizontal.svg");
+                    label: "Book";
+                    current: root.book;
+                    clicked => {
+                        root.book-changed(true);
+                        root.card = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // The tools (Tools mode): new files from the document, and documents from files.
+    if root.card == 4 : Island {
+        width: min(root.span, 300px);
+        x: root.left + root.span - self.width;
+        height: tools-list.preferred-height;
+        y: root.stack-top - root.edge - self.height;
+        border-radius: 16px;
+        tools-list := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            SheetRow {
+                icon: @image-url("../icons/combine.svg");
+                label: "Merge files...";
+                clicked => {
+                    root.card = 0;
+                    root.merge-open();
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/file-archive.svg");
+                label: "Compress a copy...";
+                enabled: root.editable;
+                clicked => {
+                    root.card = 0;
+                    root.convert-open(0);
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/image.svg");
+                label: "Export as images...";
+                clicked => {
+                    root.card = 0;
+                    root.convert-open(1);
+                }
+            }
+            SheetRow {
+                icon: @image-url("../icons/image-plus.svg");
+                label: "Images to PDF...";
+                clicked => {
+                    root.card = 0;
+                    root.images-to-pdf();
+                }
+            }
+        }
+    }
+
+    // The open documents, under the header.
+    if root.docs-menu : Scrim {
+        dismissed => { root.docs-menu = false; }
+    }
+    if root.docs-menu : Island {
+        // Out of sight while one of its documents is held over the pages.
+        opacity: root.doc-holding ? 0 : 1;
+        x: root.left;
+        y: header.y + header.height + root.edge;
+        width: root.span;
+        height: min(root.menu-room, docs-list.preferred-height);
+        border-radius: 16px;
+        docs-scroll := Flickable {
+            content-width: self.width;
+            content-height: docs-list.preferred-height;
+            docs-list := VerticalLayout {
+                width: docs-scroll.width;
+                height: self.preferred-height;
+                padding: 6px;
+                spacing: 2px;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    Text {
+                        text: "Open documents (" + root.tabs.length + ")";
+                        color: Theme.text-faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    SheetRow {
+                        width: 96px;
+                        label: "Manage";
+                        clicked => { root.open-sheet(2); }
+                    }
+                }
+                for tab[index] in root.tabs : SheetRow {
+                    label: (tab.dirty ? "* " : "") + tab.title;
+                    current: index == root.active-tab;
+                    // In Tools another document can be held and let go in a gap of this one.
+                    liftable: root.mode == 2 && index != root.active-tab;
+                    clicked => {
+                        root.docs-menu = false;
+                        root.select-tab(index);
+                    }
+                    held(y) => {
+                        root.doc-holding = true;
+                        root.doc-held(index, y);
+                    }
+                    held-moved(y) => { root.doc-moved(y); }
+                    held-ended => {
+                        root.doc-holding = false;
+                        root.docs-menu = false;
+                        root.doc-let-go();
+                    }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/folder-open.svg");
+                    label: "Open a file...";
+                    clicked => {
+                        root.docs-menu = false;
+                        root.open-file();
+                    }
+                }
+            }
+        }
+    }
+
+    // More: the theme, then what the desktop's title row and Tools island hold.
+    if root.more-menu : Scrim {
+        dismissed => { root.more-menu = false; }
+    }
+    if root.more-menu : Island {
+        width: min(root.span, 300px);
+        x: root.left + root.span - self.width;
+        y: header.y + header.height + root.edge;
+        height: min(root.menu-room, more-list.preferred-height);
+        border-radius: 16px;
+        more-scroll := Flickable {
+            content-width: self.width;
+            content-height: more-list.preferred-height;
+            more-list := VerticalLayout {
+                width: more-scroll.width;
+                height: self.preferred-height;
+                padding: 6px;
+                spacing: 2px;
+                Rectangle {
+                    height: 48px;
+                    border-radius: 10px;
+                    background: Theme.hover;
+                    HorizontalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        Segment {
+                            border-radius: 6px;
+                            horizontal-stretch: 1;
+                            label: "Light";
+                            icon: @image-url("../icons/sun.svg");
+                            checked: root.theme == 1;
+                            clicked => { root.choose-theme(1); }
+                        }
+                        Segment {
+                            border-radius: 6px;
+                            horizontal-stretch: 1;
+                            label: "Dark";
+                            icon: @image-url("../icons/moon.svg");
+                            checked: root.theme == 2;
+                            clicked => { root.choose-theme(2); }
+                        }
+                        Segment {
+                            border-radius: 6px;
+                            horizontal-stretch: 1;
+                            label: "System";
+                            icon: @image-url("../icons/monitor.svg");
+                            checked: root.theme == 0;
+                            clicked => { root.choose-theme(0); }
+                        }
+                    }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/gallery-vertical.svg");
+                    label: "Reduce motion";
+                    detail: root.reduce-motion ? "On" : "Off";
+                    clicked => { root.reduce-motion-changed(!root.reduce-motion); }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/circle-alert.svg");
+                    label: "About PODEFA";
+                    clicked => {
+                        root.more-menu = false;
+                        root.about();
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.line; }
+                SheetRow {
+                    icon: @image-url("../icons/info.svg");
+                    label: "Document properties";
+                    enabled: root.has-doc;
+                    clicked => {
+                        root.more-menu = false;
+                        root.props-open();
+                    }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/stamp.svg");
+                    label: "Watermark";
+                    enabled: root.has-doc && root.editable;
+                    clicked => {
+                        root.more-menu = false;
+                        root.stamp-open(0);
+                    }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/list-ordered.svg");
+                    label: "Page numbers";
+                    enabled: root.has-doc && root.editable;
+                    clicked => {
+                        root.more-menu = false;
+                        root.stamp-open(1);
+                    }
+                }
+            }
+        }
+    }
+
+    // The bottom sheet: pages, contents and the open documents.
+    if root.sheet-open : Scrim {
+        dismissed => { root.close-sheet(); }
+    }
+    if root.sheet-open : Rectangle {
+        x: 0px;
+        width: root.width;
+        height: root.height * 0.72;
+        y: root.height - self.height;
+        background: Theme.surface;
+        border-top-left-radius: 24px;
+        border-top-right-radius: 24px;
+        border-width: 1px;
+        border-color: Theme.island-line;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: Theme.shadow;
+        // Taps between the rows stay in the sheet.
+        TouchArea { }
+        VerticalLayout {
+            padding-top: 8px;
+            padding-left: root.safe-left + 12px;
+            padding-right: root.safe-right + 12px;
+            padding-bottom: root.safe-bottom + 8px;
+            spacing: 8px;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 40px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.line-strong;
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 48px;
+                    border-radius: 12px;
+                    background: Theme.hover;
+                    HorizontalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Pages";
+                            icon: @image-url("../icons/layers.svg");
+                            checked: root.sheet-tab == 0;
+                            clicked => { root.open-sheet(0); }
+                        }
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Contents";
+                            icon: @image-url("../icons/bookmark.svg");
+                            checked: root.sheet-tab == 1;
+                            clicked => { root.open-sheet(1); }
+                        }
+                        Segment {
+                            horizontal-stretch: 1;
+                            label: "Docs (" + root.tabs.length + ")";
+                            icon: @image-url("../icons/file-text.svg");
+                            checked: root.sheet-tab == 2;
+                            clicked => { root.open-sheet(2); }
+                        }
+                    }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/x.svg");
+                    clicked => { root.close-sheet(); }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+
+            // Three pages to a row. Fixed height: Rust derives the rows in view from the scroll
+            // position alone (MOBILE_THUMB_ROW_PX).
+            if root.sheet-tab == 0 : ListView {
+                vertical-stretch: 1;
+                content-y <=> root.thumb-scroll-y;
+                changed content-y => { root.thumbs-moved(); }
+                for r in Math.ceil(root.thumbs.length / 3) : HorizontalLayout {
+                    height: 196px;
+                    spacing: 8px;
+                    for k in 3 : cell := Rectangle {
+                        property <int> i: r * 3 + k;
+                        property <ThumbRow> thumb: root.thumbs[self.i];
+                        horizontal-stretch: 1;
+                        border-radius: 12px;
+                        background: self.i >= root.thumbs.length ? transparent
+                            : self.thumb.current ? Theme.active
+                            : cell-touch.pressed ? Theme.hover : transparent;
+                        if cell.i < root.thumbs.length : VerticalLayout {
+                            padding: 6px;
+                            spacing: 6px;
+                            Rectangle {
+                                height: 150px;
+                                border-width: cell.thumb.has-image ? 0px : 1px;
+                                border-color: Theme.line-strong;
+                                Image {
+                                    source: cell.thumb.image;
+                                    image-fit: contain;
+                                    width: parent.width;
+                                    height: parent.height;
+                                }
+                            }
+                            Text {
+                                text: cell.thumb.label;
+                                horizontal-alignment: center;
+                                font-size: 12px;
+                                color: cell.thumb.current ? Theme.text : Theme.text-muted;
+                            }
+                        }
+                        cell-touch := TouchArea {
+                            enabled: cell.i < root.thumbs.length;
+                            clicked => {
+                                root.thumb-clicked(cell.i);
+                                root.close-sheet();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.sheet-tab == 1 && root.outline-rows.length > 0 : ListView {
+                vertical-stretch: 1;
+                for row[index] in root.outline-rows : Rectangle {
+                    height: 44px;
+                    border-radius: 12px;
+                    background: outline-touch.pressed ? Theme.hover : transparent;
+                    outline-touch := TouchArea {
+                        clicked => {
+                            root.outline-clicked(index);
+                            root.close-sheet();
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 4px + row.depth * 16px;
+                        spacing: 4px;
+                        Rectangle {
+                            width: 36px;
+                            if row.expandable : Image {
+                                source: @image-url("../icons/chevron-right.svg");
+                                width: 16px;
+                                height: 16px;
+                                colorize: Theme.text-muted;
+                                transform-rotation: row.expanded ? 90deg : 0deg;
+                            }
+                            TouchArea {
+                                enabled: row.expandable;
+                                clicked => { root.outline-toggled(index); }
+                            }
+                        }
+                        Text {
+                            text: row.title;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            font-size: 14px;
+                            color: Theme.text;
+                            opacity: row.enabled ? 1.0 : 0.5;
+                        }
+                    }
+                }
+            }
+            if root.sheet-tab == 1 && root.outline-rows.length == 0 : Text {
+                vertical-stretch: 1;
+                text: "This document has no outline";
+                color: Theme.text-faint;
+                font-size: 13px;
+                horizontal-alignment: center;
+            }
+
+            if root.sheet-tab == 2 : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 6px;
+                ListView {
+                    vertical-stretch: 1;
+                    for tab[index] in root.tabs : HorizontalLayout {
+                        height: 52px;
+                        padding-bottom: 4px;
+                        SheetRow {
+                            horizontal-stretch: 1;
+                            label: (tab.dirty ? "* " : "") + tab.title;
+                            current: index == root.active-tab;
+                            clicked => {
+                                root.select-tab(index);
+                                root.close-sheet();
+                            }
+                        }
+                        TouchButton {
+                            icon: @image-url("../icons/x.svg");
+                            clicked => { root.close-tab(index); }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.line; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    SheetRow {
+                        horizontal-stretch: 1;
+                        icon: @image-url("../icons/folder-open.svg");
+                        label: "Open a file...";
+                        clicked => {
+                            root.close-sheet();
+                            root.open-file();
+                        }
+                    }
+                    SheetRow {
+                        horizontal-stretch: 1;
+                        icon: @image-url("../icons/image-plus.svg");
+                        label: "Images to PDF";
+                        clicked => {
+                            root.close-sheet();
+                            root.images-to-pdf();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

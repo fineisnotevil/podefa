@@ -68,11 +68,62 @@ jobs:
           fi
         shell: bash
 
+      # Export as Word is off by default (the `docx` feature); it is still built and tested here so
+      # it keeps working until it is switched on.
+      - name: Clippy and tests with the docx feature
+        run: |
+          cargo clippy -p engine-mupdf -p app --all-targets --features engine-mupdf/docx,app/docx -- -D warnings
+          cargo test -p engine-mupdf --features docx --test word_test
+        shell: bash
+
       - name: Cargo deny check
         if: runner.os == 'Linux'
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # The Android APK (Plan 0008 Phase 1, ADR 0012), built as scripts/android-build.sh builds it on
+  # the maintainer's machine; signed with a throwaway debug key.
+  android:
+    name: Android APK (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install the NDK, platform and build tools
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$sdkmanager" --install "ndk;28.2.13676358" "platforms;android-35" "build-tools;35.0.1" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+
+      - name: Build the APK
+        run: scripts/android-build.sh
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: podefa-android-arm64
+          path: target/android/podefa.apk
 
   reuse-lint:
     name: REUSE Compliance Lint

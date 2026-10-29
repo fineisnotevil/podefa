@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+[package]
+name = "podefa-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The Android app of PODEFA: the activity's entry point around the app crate"
+publish = false
+
+[lints]
+workspace = true
+
+# The library Android's activity loads (`libpodefa.so`). On other targets the crate is empty, so
+# `cargo build --workspace` stays cheap on the desktop. Build the APK with `scripts/android-build.sh`.
+[lib]
+name = "podefa"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+app = { path = "../app" }
+slint = { workspace = true, features = ["backend-android-activity-06"] }
+libc = "0.2"
+
+[package.metadata.android]
+package = "org.fineassociation.podefa"
+apk_name = "podefa"
+# The icon (Plan 0008 Phase 5), compiled by aapt.
+resources = "res"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "PODEFA"
+icon = "@mipmap/ic_launcher"
+# The activity's Java class comes from the dex the build script adds (ADR 0012).
+has_code = true
+
+[package.metadata.android.application.activity]
+name = "org.fineassociation.podefa.PodefaActivity"
+# One activity: a document opened from elsewhere while the app runs arrives in onNewIntent.
+launch_mode = "singleTask"
+config_changes = "orientation|screenSize|screenLayout|keyboardHidden|keyboard|uiMode|density"
+exported = true
+
+# "Open with": PDF documents from other apps and file managers.
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+data = [{ scheme = "content", mime_type = "application/pdf" }, { scheme = "file", mime_type = "application/pdf" }]
+
+# "Share": a PDF sent from another app opens like one opened with it (Plan 0008 Phase 5).
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.SEND"]
+categories = ["android.intent.category.DEFAULT"]
+data = [{ mime_type = "application/pdf" }]

@@ -1,0 +1,2379 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The main window (Plan 0007 Phase 2): its own frame, and islands floating over the canvas - the
+// title row, the sidebar with the three modes, the drawer, search, and the status islands. Every
+// command the menu bar had lives in the island it belongs to (plan §0, question 1).
+//
+// The modes (Phase 3): Read shows the pages; Edit lays a dot grid under them; Tools pulls the
+// camera back to the gallery. A mode change only fades and scales what is drawn already: the
+// canvas keeps its size and place, so no tile is rendered while it moves (plan row AT).
+
+import { ComboBox, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
+import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem } from "types.slint";
+import { Theme } from "theme.slint";
+import { Field, Island, IconButton, DialogButton, DialogSurface, Dialog } from "widgets.slint";
+import { TitleRow } from "title.slint";
+import { SidebarColumn, Drawer } from "sidebar.slint";
+import { StatusIsland, MessageIsland } from "statusbar.slint";
+import { SearchIsland } from "search.slint";
+import { Gallery } from "gallery.slint";
+import { MobileShell, ShellActivity } from "mobile/shell.slint";
+export { ShellActivity }
+export { Theme as UiTheme }
+import { MobileGallery } from "mobile/gallery.slint";
+
+// Re-exported so the Rust side sees the row types under the generated module.
+export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem }
+
+export component MainWindow inherits Window {
+    title: root.doc-title == "" ? "PODEFA - PDF Viewer"
+        : (root.dirty ? "*" : "") + root.doc-title + " - PODEFA";
+    init => {
+        root.apply-theme();
+        viewport-keys.focus();
+    }
+    // The window draws its own frame (no system title bar or border), except where Rust turns
+    // this off (macOS keeps its native frame, plan §0 question 4). Every edge resizes it while
+    // it is not maximized.
+    in-out property <bool> own-frame: true;
+    no-frame: root.own-frame;
+    resize-border-width: root.own-frame && !root.maximized ? 6px : 0px;
+    background: root.mode == 1 ? Theme.canvas-edit : Theme.canvas;
+    animate background { duration: Theme.motion; }
+    // The mobile shell (Plan 0008) instead of the desktop's islands: on a phone, and on the
+    // desktop with `--mobile`, in a phone-sized window.
+    in property <bool> mobile: false;
+    // A field's options: 44 px rows on a phone (Plan 0008 row MH). Rust places the list by it.
+    out property <length> choice-row-h: root.mobile ? 44px : 24px;
+    min-width: root.mobile ? 320px : 640px;
+    // A phone on its side is about 360-430 px tall (Plan 0008 Phase 5, landscape).
+    min-height: root.mobile ? 320px : 660px;
+    preferred-width: root.mobile ? 384px : 900px;
+    preferred-height: root.mobile ? 832px : 700px;
+
+    // The islands' distance from the window's edge: smaller when maximized.
+    property <length> inset: root.maximized || !root.own-frame ? 8px : 12px;
+    property <length> island-gap: 8px;
+    // The tools' dialogs on a phone (Plan 0008 Phase 4): a sheet's bottom and the room above it,
+    // and a row's height (a 44 px target, plan row MH).
+    property <length> sheet-bottom: mshell.floor - root.island-gap;
+    // When the on-screen keyboard of a phone on its side leaves less than that under the header,
+    // the sheet covers the header too (Plan 0008 Phase 5).
+    property <length> sheet-top: root.sheet-bottom - mshell.header-bottom - root.island-gap < 160px
+        ? root.safe-area-insets.top + root.island-gap : mshell.header-bottom + root.island-gap;
+    property <length> sheet-room: root.sheet-bottom - root.sheet-top;
+    // Across the width inside the safe area's sides (in landscape a cutout can sit at one).
+    property <length> sheet-x: root.safe-area-insets.left + root.island-gap;
+    property <length> sheet-w: root.width - root.safe-area-insets.left - root.safe-area-insets.right
+        - 2 * root.island-gap;
+    property <length> row-h: root.mobile ? 44px : 30px;
+    property <length> button-h: root.mobile ? 44px : 28px;
+    property <length> canvas-top: root.mobile ? mshell.header-bottom + root.island-gap
+        : root.inset + 40px + root.island-gap;
+    property <bool> drawer-shown: !root.mobile && root.sidebar-visible && root.total_pages > 0;
+    property <length> drawer-width: 212px;
+    property <length> canvas-left: root.inset + sidebar.width + root.island-gap
+        + (root.drawer-shown ? root.drawer-width + root.island-gap : 0px);
+    // The canvas runs under the whole window and the islands float over it; the document keeps
+    // this much room clear at its edges, so its first page starts under the title row, its column
+    // is centred beside the sidebar, and its last page ends over the status island (Rust's
+    // `Margins`). A change lays the pages out again.
+    out property <length> doc-inset-top: root.canvas-top;
+    out property <length> doc-inset-left: root.mobile ? 6px : root.canvas-left;
+    out property <length> doc-inset-right: root.mobile ? 6px : root.inset;
+    // On a phone the last page can scroll up above the on-screen keyboard too (row MI).
+    out property <length> doc-inset-bottom: root.mobile ? root.height - min(mshell.dock-top, mshell.keyboard-top) + root.island-gap
+        : root.inset + status.height + root.island-gap;
+    changed doc-inset-top => { root.insets_changed(); }
+    changed doc-inset-left => { root.insets_changed(); }
+    changed doc-inset-right => { root.insets_changed(); }
+    changed doc-inset-bottom => { root.insets_changed(); }
+    // The lowest window y an editor on the page may reach: above the mobile shell's dock, edit
+    // strip and palette, and the on-screen keyboard (Plan 0008 row MI).
+    out property <length> edit-floor: root.mobile ? mshell.floor : root.height;
+    changed edit-floor => { root.edit_floor_changed(); }
+    // The scroll bar's track: the window's right edge between the title row and the status island.
+    out property <length> sb-track-h: root.view-h - root.doc-inset-top - root.doc-inset-bottom;
+
+    // The mode (Plan 0007 §4): 0 Read, 1 Edit, 2 Tools. Phase 2 switches the sidebar's commands;
+    // Phase 3 adds the gallery and the transitions. Choosing a tool by its key moves to Edit.
+    in-out property <int> mode: 0;
+    changed tool => {
+        if (root.tool != 0 && root.mode != 1) {
+            root.mode = 1;
+        }
+    }
+    changed mode => { root.mode_changed(); }
+    // How far each mode has come in, from 0 to 1, over `Theme.motion`.
+    // Set by Rust for one frame once a document's first view is drawn: Edit's dot grid, the
+    // gallery and every mode's commands are drawn then at opacity 0, which femtovg still renders
+    // into a layer (itemrenderer.rs:520-533), so each image is tinted and uploaded and the gallery
+    // built before the first change to its mode, not in that change's first frame (row AT).
+    in property <bool> warm;
+    property <float> edit-t: root.mode == 1 ? 1 : 0;
+    animate edit-t { duration: Theme.motion; easing: ease-out-expo; }
+    property <float> tools-t: root.mode == 2 ? 1 : 0;
+    animate tools-t { duration: Theme.motion; easing: ease-out-expo; }
+    // The gallery (Tools): how far it is scrolled, the gap a drag would drop in, and where its
+    // strip is in the window (for the bench harness).
+    in-out property <length> gallery-scroll: 0px;
+    in-out property <int> gallery-drop: -1;
+    out property <length> gallery-strip-x: gallery.strip-abs-x;
+    out property <length> gallery-strip-y: gallery.strip-abs-y;
+    out property <length> gallery-view-w: root.width - gallery.inset-left;
+    // The phone's gallery column (Plan 0008 Phase 4): its scroll (0 or less), the gap a lifted
+    // page would land in, and its height.
+    in-out property <length> mgallery-offset: 0px;
+    in-out property <int> mgallery-drop: -1;
+    // The pages a finger holds in the column, the one under it first (at most 3).
+    in property <[ThumbRow]> mgallery-stack;
+    out property <length> mgallery-view-h: mgallery.height;
+    // Where the column's room starts: under the header's search bar and history capsule.
+    out property <length> mgallery-inset-top: mshell.chrome-bottom + root.island-gap;
+    // A menu, a card or the sheet is open on the phone: the islands stay in sight.
+    out property <bool> mobile-busy: mshell.busy;
+    out property <bool> mobile-in-safe-area: mshell.in-safe-area;
+    out property <length> safe-inset-left: root.safe-area-insets.left;
+    out property <length> safe-inset-top: root.safe-area-insets.top;
+    out property <length> safe-inset-right: root.safe-area-insets.right;
+    out property <length> safe-inset-bottom: root.safe-area-insets.bottom;
+    // Shows the tile counters in the status island (when tracing).
+    in-out property <bool> diagnostics: false;
+
+
+    in-out property <[TileView]> tiles;
+    in-out property <[PageView]> pages;
+    // Extent of the canvas window, not of the document (Plan 0002, §4.2).
+    in-out property <length> canvas-w: 0px;
+    in-out property <length> canvas-h: 0px;
+
+    // The Flickable's position, bound both ways: the Flickable writes it on every scroll and
+    // Rust writes it to scroll programmatically (anchored zoom, re-anchor, go-to-page).
+    in-out property <length> scroll-x: 0px;
+    in-out property <length> scroll-y: 0px;
+    // The pinch being made: the pages' scale and shift on the GPU, around `pinch-o*`.
+    in-out property <float> pinch-scale: 1;
+    in-out property <length> pinch-dx: 0px;
+    in-out property <length> pinch-dy: 0px;
+    in-out property <length> pinch-ox: 0px;
+    in-out property <length> pinch-oy: 0px;
+    in-out property <length> view-w: 0px;
+    in-out property <length> view-h: 0px;
+
+    // The open document's file name, for the title bar; empty when nothing is open.
+    in-out property <string> doc-title: "";
+    // 0 = follow the system, 1 = light, 2 = dark (Plan 0003, §4.6).
+    in-out property <int> theme: 0;
+    // Recent files, newest first, as the File menu shows them.
+    in-out property <[string]> recent-files;
+
+    // The sidebar (Plan 0003, §4.3): 0 = page thumbnails, 1 = outline.
+    in-out property <bool> sidebar-visible: false;
+    in-out property <int> sidebar-tab: 0;
+    in-out property <[ThumbRow]> thumbs;
+    in-out property <[OutlineRow]> outline-rows;
+    // The thumbnail list's scroll position, bound both ways like the viewport's.
+    in-out property <length> thumb-scroll-y: 0px;
+    // Dragging thumbnails to reorder pages: the payload (opaque, Rust knows what moves), and
+    // the row the drop would land at, before or after it.
+    in-out property <data-transfer> page-drag-data;
+    // The open documents, one tab each, and the one shown (Plan 0007 Phase 4).
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
+    callback select-tab(int);
+    callback close-tab(int);
+    // Pages dragged from the gallery or the thumbnails onto a tab, or onto the new-tab button.
+    callback pages-to-tab(int);
+    callback pages-to-new-tab();
+    // A tab dragged (its index), or the drag over (-1): dropped in the shown document's pages,
+    // its document goes in there (Plan 0008 Phase 5 review).
+    callback tab_drag(int);
+    in-out property <int> drop-row: -1;
+    in-out property <bool> drop-after: false;
+    in-out property <int> pages-chosen: 0;
+    // A tool job running on the engine's tool thread, and what the status bar says of it.
+    in-out property <bool> tool-running: false;
+    // The merge panel: its file list, in order, and the chosen row.
+    in-out property <bool> merge-visible: false;
+    // The same panel orders images for Images to PDF (Plan 0005 Phase 4).
+    in-out property <bool> merge-images: false;
+    in-out property <[string]> merge-files;
+    in-out property <int> merge-selected: -1;
+    // The split panel: every N pages (mode 0) or page ranges (mode 1).
+    in-out property <bool> split-visible: false;
+    in-out property <int> split-mode: 0;
+    in-out property <string> split-every: "1";
+    in-out property <string> split-ranges: "";
+    in-out property <string> split-error: "";
+    // The document properties panel.
+    in-out property <bool> props-visible: false;
+    in-out property <string> props-title: "";
+    in-out property <string> props-author: "";
+    in-out property <string> props-subject: "";
+    in-out property <string> props-keywords: "";
+    in-out property <string> props-info: "";
+    // The stamp panel (Plan 0005 Phase 3): a watermark (mode 0) or page numbers (mode 1).
+    in-out property <bool> stamp-visible: false;
+    in-out property <int> stamp-mode: 0;
+    in-out property <string> stamp-text: "DRAFT";
+    in-out property <bool> stamp-diagonal: true;
+    in-out property <float> stamp-opacity: 30;
+    in-out property <int> stamp-colour: 0;
+    in-out property <string> stamp-format: "{n} / {total}";
+    in-out property <string> stamp-first: "1";
+    in-out property <int> stamp-corner: 4;
+    in-out property <string> stamp-size: "10";
+    in-out property <string> stamp-pages: "";
+    in-out property <string> stamp-error: "";
+    // The convert panel (Plan 0005 Phase 4): compress (mode 0) or export as images (mode 1).
+    in-out property <bool> convert-visible: false;
+    in-out property <int> convert-mode: 0;
+    in-out property <int> convert-preset: 1;
+    in-out property <int> convert-format: 0;
+    in-out property <string> convert-dpi: "150";
+    in-out property <string> convert-pages: "";
+    in-out property <string> convert-error: "";
+    // Filling form fields (Plan 0006): the editor over a text field, a choice field's options,
+    // and the cursor over a field (1 text, 2 pointer).
+    in-out property <bool> field-editor-visible: false;
+    in-out property <length> field-editor-x;
+    in-out property <length> field-editor-y;
+    in-out property <length> field-editor-w;
+    in-out property <length> field-editor-h;
+    in-out property <length> field-editor-font-size: 12px;
+    in-out property <string> field-editor-text;
+    in-out property <bool> field-editor-multiline: false;
+    in-out property <bool> field-editor-password: false;
+    // A comb field's boxes (0: not a comb field) and the character in each.
+    in-out property <int> field-editor-cells: 0;
+    in-out property <[string]> field-editor-chars;
+    // Every fillable field of the near pages, shaded unless the user turned it off.
+    in-out property <[FieldView]> field-rects;
+    in-out property <bool> field-highlight: true;
+    // Bumped each time the editor or the options open, so an editor already showing takes
+    // the keys again (Tab from one text field to the next).
+    in-out property <int> field-editor-serial: 0;
+    // A multi-select list: its options are ticked (one mark per option) until it closes.
+    in-out property <bool> field-choices-multi: false;
+    in-out property <[bool]> field-choice-marks;
+    // The field with the keyboard focus (Plan 0006 Phase 2), outlined while no editor covers it.
+    in-out property <bool> field-focus-visible: false;
+    in-out property <length> field-focus-x;
+    in-out property <length> field-focus-y;
+    in-out property <length> field-focus-w;
+    in-out property <length> field-focus-h;
+    in-out property <bool> has-field-focus: false;
+    in-out property <bool> form-fields: false;
+    in-out property <bool> field-choices-visible: false;
+    in-out property <[string]> field-choices;
+    in-out property <int> field-choice-selected: -1;
+    in-out property <length> field-choices-x;
+    in-out property <length> field-choices-y;
+    in-out property <length> field-choices-w;
+    in-out property <int> field-cursor: 0;
+    // The crop panel, open once the Crop tool's rectangle is drawn.
+    in-out property <bool> crop-visible: false;
+    in-out property <string> crop-size: "";
+    out property <color> crop-colour: Theme.accent;
+    // Where the thumbnail list is in the window, for the bench harness's drags.
+    in-out property <length> thumb-list-x: 0px;
+    in-out property <length> thumb-list-y: 0px;
+
+    // The find bar (Plan 0003, §4.4).
+    in-out property <bool> find-visible: false;
+    // Book mode (Plan 0008 Phase 5 review): one page at a time, turned sideways; Rust keeps it.
+    in property <bool> book-mode: false;
+    // While the page follows a finger turning it, or slides to the next one: its offset.
+    in property <length> book-shift: 0px;
+    // Read on a phone hides its islands after a while without a touch (Rust's timer).
+    in property <bool> chrome-hidden: false;
+    in-out property <string> find-text: "";
+    in-out property <string> find-counter: "";
+    in-out property <[HitView]> hit-rects;
+
+    // The text selection (Plan 0003, §4.5): highlight rectangles, and whether a touch long
+    // press is selecting (the Flickable stops panning until the finger lifts).
+    in-out property <[HitView]> sel-rects;
+    in-out property <bool> touch-selecting: false;
+    // Whether the pointer is over text: the text cursor shows only there.
+    in-out property <bool> text-cursor: false;
+
+    // Annotating (Plan 0004 Phase 1): whether the document can be edited and has unsaved
+    // changes, the tool (0 select, 1 highlight, 2 underline, 3 strike-out, 4 squiggly), the
+    // colour and its swatches, and the outline of the selected annotation.
+    in-out property <bool> editable: false;
+    // MuPDF repaired the open file (Plan 0005 Phase 4): File offers a repaired copy.
+    in-out property <bool> repaired: false;
+    // Export as Word is in the build only with the `docx` feature (Plan 0005 Phase 5).
+    in-out property <bool> word-export: false;
+    in-out property <bool> dirty: false;
+    in-out property <int> tool: 0;
+    in-out property <int> colour-index: 0;
+    in-out property <[color]> swatches;
+    in-out property <[HitView]> annot-sel-rects;
+    in-out property <bool> has-annot-selection: false;
+    // Whether Edit > Undo and Redo have anything to do (Plan 0004 Phase 2).
+    in-out property <bool> can-undo: false;
+    in-out property <bool> can-redo: false;
+    // Sticky notes (Plan 0004 Phase 3): the editor, placed in viewport coordinates next to its
+    // note, and the preview shown while the pointer rests on a note.
+    in-out property <bool> note-editor-visible: false;
+    in-out property <length> note-editor-x: 0px;
+    in-out property <length> note-editor-y: 0px;
+    in-out property <string> note-text: "";
+    in-out property <bool> note-hover-visible: false;
+    in-out property <length> note-hover-x: 0px;
+    in-out property <length> note-hover-y: 0px;
+    in-out property <string> note-hover-text: "";
+    // The Ink tool (Plan 0004 Phase 4): the line width chosen, and the stroke being drawn as
+    // SVG path commands in viewport coordinates, with its colour and width.
+    in-out property <int> ink-width-index: 1;
+    in-out property <string> ink-commands: "";
+    in-out property <color> ink-colour;
+    in-out property <length> ink-stroke-width: 2px;
+    // Where the viewport sits in the window, for scripted pointer input (bench only).
+    out property <length> viewport-abs-x: viewport.absolute-position.x;
+    out property <length> viewport-abs-y: viewport.absolute-position.y;
+
+    in-out property <string> status_text: "No document loaded";
+    in-out property <string> error_text: "";
+    in-out property <bool> has_error: false;
+    in-out property <int> current_page: 0;
+    in-out property <int> total_pages: 0;
+    in-out property <float> zoom_percent: 100.0;
+    in-out property <bool> is_loading: false;
+    // Diagnostics for the manual acceptance checks.
+    in-out property <int> tiles_rendered: 0;
+    in-out property <int> tiles_requested: 0;
+
+    // The document scrollbar (Plan 0002, §4.2): Rust places the thumb from the document
+    // position, because the Flickable only knows the canvas window.
+    in-out property <bool> sb-visible: false;
+    in-out property <length> sb-thumb-y: 0px;
+    in-out property <length> sb-thumb-h: 0px;
+    // The go-to-page field's text; Rust follows the current page while the field is not
+    // being edited.
+    in-out property <string> page-input: "";
+    out property <bool> page-field-focused: root.mobile ? mshell.page-field-focused
+        : status.page-field-focused;
+
+    callback prev_page();
+    callback next_page();
+    callback zoom_in();
+    callback zoom_out();
+    callback zoom_reset();
+    callback viewport_moved();
+    // One of `doc-inset-*` changed.
+    callback insets_changed();
+    callback fit_width();
+    callback fit_page();
+    callback book_mode_chosen(bool);
+    // The mouse wheel in book mode: within the page, and a turn at its end.
+    callback book_wheel(length);
+    // A key on the viewport: text as Slint reports it, plus ctrl and shift; true when handled.
+    callback nav_key(string, bool, bool) -> bool;
+    // A key anywhere in the window, before the focused element sees it: the shortcuts that work
+    // from every field (open, save, close, find, sidebar, zoom); true when handled.
+    callback global_key(string, bool, bool) -> bool;
+    // Ctrl+wheel: the wheel delta and the cursor, viewport-relative, in logical pixels.
+    callback wheel_zoom(length, length, length);
+    // A pinch (Plan 0008 Phase 2): 0 started, 1 updated, 2 ended, 3 cancelled; the cumulative
+    // scale and the centre between the fingers, viewport-relative.
+    callback pinch(int, float, length, length);
+    callback go_to_page(string);
+    // The scrollbar thumb was dragged to `offset` within a track of `track`.
+    callback scrollbar_moved(length, length);
+    // Pointer input on the page, viewport-relative: 0 down, 1 up, 2 move (pressed),
+    // 3 double-click, 4 cancel; with shift and whether it is a touch.
+    callback select_pointer(int, length, length, bool, bool);
+    callback copy_selection();
+    callback choose_tool(int);
+    callback choose_colour(int);
+    callback choose_ink_width(int);
+    callback delete_annotation();
+    callback undo();
+    callback redo();
+    callback note_save();
+    callback note_cancel();
+    callback save();
+    callback save_as();
+    // The pointer moved over the page without a button down, viewport-relative.
+    callback hover(length, length);
+    callback find_open();
+    callback find_changed(string);
+    callback find_next();
+    callback find_previous();
+    callback find_close();
+    // Gives the keyboard back to the viewport (after the find bar closes).
+    callback focus_viewport();
+    focus_viewport => { viewport-keys.focus(); }
+    callback toggle_sidebar();
+    callback sidebar_tab_changed();
+    callback thumbs_moved();
+    callback thumb_clicked(int, bool, bool);
+    // Page operations (Plan 0005 Phase 1) on the chosen thumbnails, or the current page:
+    // 0 rotate left, 1 rotate right, 2 duplicate, 3 delete, 4 move earlier, 5 move later,
+    // 6 insert a blank page after.
+    callback page_op(int);
+    callback thumb_drag_started(int);
+    // Tools that write new files, and the document's properties (Plan 0005 Phase 2).
+    callback merge_open();
+    callback merge_add();
+    callback merge_add_current();
+    callback merge_move(int);
+    callback merge_remove();
+    callback merge_run();
+    callback merge_close();
+    callback split_open();
+    callback split_run();
+    callback split_close();
+    callback extract_pages();
+    callback insert_from_file();
+    callback props_open();
+    callback convert_open(int);
+    callback convert_run();
+    callback convert_close();
+    callback images_to_pdf();
+    callback export_word();
+    callback field_commit();
+    callback field_cancel();
+    callback field_choose(int);
+    callback field_edited(string);
+    callback toggle_field_highlight();
+    callback field_tab(bool);
+    callback reset_field();
+    callback reset_form();
+    callback import_form_data();
+    callback export_form_data();
+    callback flatten_form();
+    callback stamp_open(int);
+    callback stamp_apply();
+    callback stamp_close();
+    callback crop_tool();
+    callback crop_apply(bool);
+    callback crop_cancel();
+    callback props_save();
+    callback props_close();
+    callback cancel_tool();
+    callback thumb_dropped(int, bool);
+    callback outline_clicked(int);
+    callback outline_toggled(int);
+    callback open_file();
+    callback open_recent(int);
+    callback choose_theme(int);
+    // Plan 0007 Phase 5: reduce motion, About, the message box and the password dialog.
+    in-out property <bool> reduce-motion: false;
+    callback set_reduce_motion(bool);
+    in-out property <bool> about-visible: false;
+    in property <string> app-version;
+    in-out property <bool> message-visible: false;
+    in property <string> message-text;
+    in property <int> message-level;
+    in property <int> message-buttons;
+    callback message_answered(int);
+    in-out property <bool> password-visible: false;
+    in property <string> password-file;
+    in property <bool> password-wrong;
+    in property <bool> password-busy;
+    // Counts the wrong tries: each one shakes the lock.
+    in property <int> password-tries;
+    callback password_submit(string);
+    callback password_cancel();
+    callback quit();
+    // A drag over the window: whether it carries a document we can open.
+    callback can_open_drop(data-transfer) -> bool;
+    // A drop: open the document it carries.
+    callback open_drop(data-transfer);
+    // The mode changed (Rust waits for the motion to end before it draws anything new).
+    callback mode_changed();
+    // Android's Back on the page: commits an open field or note editor or clears a selection.
+    callback back_close() -> bool;
+    // Android's Back with nothing left open: asks about unsaved changes and closes after; false
+    // when nothing is unsaved, so the system closes the app.
+    callback back_quit() -> bool;
+    callback edit_floor_changed();
+    // The gallery: it scrolled; a page was ticked, double-clicked (back to Read on it), or one
+    // of its actions or a gap's was pressed; pages were dropped in a gap; the chosen pages' bar.
+    // A click on a page is a thumbnail's click (`thumb_clicked`).
+    callback gallery_scrolled();
+    callback gallery_toggled(int);
+    callback gallery_opened(int);
+    callback gallery_action(int, int);
+    callback gallery_divider(int, int);
+    callback gallery_dropped(int);
+    callback gallery_chosen_action(int);
+    callback gallery_clear();
+    // The phone's gallery: a tap made a page the current one; every page chosen.
+    callback gallery_current(int);
+    callback gallery_choose_all();
+    // The phone's gallery: a lifted page was let go (after `gallery_dropped`, if it landed).
+    callback gallery_drag_ended();
+
+
+    function apply-theme() {
+        Palette.color-scheme = root.theme == 1 ? ColorScheme.light
+            : root.theme == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
+    changed theme => { root.apply-theme(); }
+
+    // Android's Back (Plan 0008 Phase 3), one level at a time: the shell's menus, cards and sheet,
+    // a dialog, the search bar, an editor or selection on the page, Edit or Tools back to Read,
+    // and last the unsaved question. Slint finishes the activity when Back is not accepted
+    // (`i-slint-backend-android-activity-1.18.1/javahelper.rs:788-810`).
+    function back() -> bool {
+        // The page takes the keys back first: an editor that loses them keeps the word the
+        // keyboard was composing, and a Back after it closes still reaches this scope.
+        viewport-keys.focus();
+        if (root.mobile && mshell.back()) {
+            return true;
+        }
+        if (root.merge-visible) {
+            root.merge_close();
+            return true;
+        }
+        if (root.split-visible) {
+            root.split_close();
+            return true;
+        }
+        if (root.convert-visible) {
+            root.convert_close();
+            return true;
+        }
+        if (root.stamp-visible) {
+            root.stamp_close();
+            return true;
+        }
+        if (root.crop-visible) {
+            root.crop_cancel();
+            return true;
+        }
+        if (root.props-visible) {
+            root.props_close();
+            return true;
+        }
+        if (root.find-visible) {
+            root.find_close();
+            return true;
+        }
+        if (root.mobile && root.mode == 2 && mgallery.back()) {
+            return true;
+        }
+        if (root.back_close()) {
+            return true;
+        }
+        if (root.mode != 0) {
+            if (root.tool != 0) {
+                root.choose_tool(0);
+            }
+            root.mode = 0;
+            return true;
+        }
+        return root.back_quit();
+    }
+
+    global-keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            if (event.text == Key.Back) {
+                return root.back() ? accept : reject;
+            }
+            if (root.global_key(event.text, event.modifiers.control, event.modifiers.shift)) {
+                return accept;
+            }
+            return reject;
+        }
+
+        // Edit's dot grid, over the whole window under the islands.
+        Image {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            source: @image-url("textures/dot-grid.svg");
+            horizontal-tiling: repeat;
+            vertical-tiling: repeat;
+            colorize: Theme.grid-dot;
+            opacity: root.edit-t;
+            visible: root.edit-t > 0 || root.warm;
+        }
+
+        // Document viewport. The FocusScope takes the navigation keys (Plan 0002, §4.6); it has
+        // focus from startup and takes it back on a click into the page.
+        viewport-keys := FocusScope {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            key-pressed(event) => {
+                if (root.nav_key(event.text, event.modifiers.control, event.modifiers.shift)) {
+                    return accept;
+                }
+                return reject;
+            }
+            // Files dropped from other applications (Plan 0003, §3.2): Slint 1.18.1's winit backend
+            // never delivers them, so this is inert until the Slint release carrying
+            // slint-ui/slint#13527, and needs no change then.
+            DropArea {
+                can-drop(event) => {
+                    return root.can_open_drop(event.data) ? DragAction.copy : DragAction.none;
+                }
+                dropped(event) => {
+                    root.open_drop(event.data);
+                    return DragAction.copy;
+                }
+                // Going to Tools, the pages fall back under the gallery, which fades in over them;
+                // nothing in them is drawn again. No opacity here: it would draw every tile into
+                // a layer on every frame of the motion. The window's background is the canvas
+                // colour.
+                canvas := Rectangle {
+                    transform-scale: 1 - 0.08 * root.tools-t;
+                    visible: root.tools-t < 1;
+
+                    // Two fingers (or a trackpad pinch) zoom (Plan 0008 Phase 2): while they move,
+                    // the pages only scale on the GPU, around where the fingers started and
+                    // following them, and nothing is drawn; once they lift, Rust zooms to the
+                    // scale shown, with the same page point under the fingers.
+                    pinch := ScaleRotateGestureHandler {
+                        width: parent.width;
+                        height: parent.height;
+                        enabled: root.total_pages > 0;
+                        started => { root.pinch(0, self.scale, self.center.x, self.center.y); }
+                        updated => { root.pinch(1, self.scale, self.center.x, self.center.y); }
+                        ended => { root.pinch(2, self.scale, self.center.x, self.center.y); }
+                        cancelled => { root.pinch(3, self.scale, self.center.x, self.center.y); }
+
+                        Rectangle {
+                            x: root.pinch-dx + root.book-shift;
+                            y: root.pinch-dy;
+                            width: parent.width;
+                            height: parent.height;
+                            transform-scale: root.pinch-scale;
+                            transform-origin: { x: root.pinch-ox, y: root.pinch-oy };
+                            viewport := Flickable {
+                                // A failed open keeps the document that was already showing.
+                                visible: root.total_pages > 0;
+                                content-width: root.canvas-w;
+                                content-height: root.canvas-h;
+                                content-x <=> root.scroll-x;
+                                content-y <=> root.scroll-y;
+                                // A mouse drag selects text (Plan 0003, §0 decision 6); touch still pans,
+                                // except while a long press is selecting (or moving a note) or the Ink
+                                // or Crop tool draws.
+                                mouse-drag-pan-enabled: false;
+                                // In book mode a finger moves the page through Rust (`book.rs`).
+                                interactive: !root.touch-selecting && root.tool != 6 && root.tool != 7
+                                    && !root.book-mode;
+
+                                // These fire on every change, user or programmatic, including each tick of
+                                // the 180 ms wheel animation, which makes them the viewport source of truth.
+                                changed content-x => { root.viewport_moved(); }
+                                changed content-y => { root.viewport_moved(); }
+                                changed width  => { root.view-w = viewport.width;  root.viewport_moved(); }
+                                changed height => { root.view-h = viewport.height; root.viewport_moved(); }
+
+                                // Declared before the tiles so they paint under them: a cell still in flight
+                                // shows its page's base layer, or white paper on a page drawn as one image.
+                                for page in root.pages : Rectangle {
+                                    x: page.x; y: page.y; width: page.w; height: page.h;
+                                    background: white;
+                                    Image {
+                                        source: page.image;
+                                        width: parent.width; height: parent.height;
+                                    }
+                                }
+
+                                for tile in root.tiles : Image {
+                                    source: tile.image;
+                                    visible: tile.visible;
+                                    x: tile.x; y: tile.y; width: tile.w; height: tile.h;
+                                }
+
+                                // Form fields over the tiles, so they show before they are touched; a required
+                                // field has a red edge.
+                                for field in root.field-rects : Rectangle {
+                                    visible: root.field-highlight;
+                                    x: field.x; y: field.y; width: field.w; height: field.h;
+                                    background: rgba(64, 128, 255, 0.16);
+                                    border-width: 1px;
+                                    border-color: field.required ? rgba(220, 38, 38, 0.85) : rgba(64, 128, 255, 0.5);
+                                }
+
+                                // Search hits over the tiles: page-relative rectangles placed like tiles.
+                                for hit in root.hit-rects : Rectangle {
+                                    x: hit.x; y: hit.y; width: hit.w; height: hit.h;
+                                    background: hit.current ? #ff8c0080 : #ffd60066;
+                                    border-width: hit.current ? 1px : 0px;
+                                    border-color: #e65100;
+                                }
+
+                                // The text selection, over the tiles and the search hits.
+                                for sel in root.sel-rects : Rectangle {
+                                    x: sel.x; y: sel.y; width: sel.w; height: sel.h;
+                                    background: rgba(37, 99, 235, 0.35);
+                                }
+
+                                // The selected annotation's bounds.
+                                for annot in root.annot-sel-rects : Rectangle {
+                                    x: annot.x - 2px; y: annot.y - 2px;
+                                    width: annot.w + 4px; height: annot.h + 4px;
+                                    border-width: 2px;
+                                    border-radius: 2px;
+                                    border-color: rgba(37, 99, 235, 0.9);
+                                }
+
+                                // Ctrl+wheel zooms at the cursor. The Flickable forwards wheel events to its
+                                // children first, so this area - kept over the viewport, not the canvas -
+                                // sees them; without ctrl it rejects them and the Flickable scrolls.
+                                TouchArea {
+                                    x: -root.scroll-x; y: -root.scroll-y;
+                                    width: viewport.width; height: viewport.height;
+                                    scroll-event(event) => {
+                                        if (event.modifiers.control) {
+                                            root.wheel_zoom(event.delta-y, self.mouse-x, self.mouse-y);
+                                            return accept;
+                                        }
+                                        if (root.book-mode) {
+                                            root.book_wheel(event.delta-y);
+                                            return accept;
+                                        }
+                                        return reject;
+                                    }
+                                    mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
+                                        : root.field-cursor == 1 ? MouseCursor.text
+                                        : root.field-cursor == 2 ? MouseCursor.pointer
+                                        : root.text-cursor ? MouseCursor.text : MouseCursor.default;
+                                    changed mouse-x => { root.hover(self.mouse-x, self.mouse-y); }
+                                    changed mouse-y => { root.hover(self.mouse-x, self.mouse-y); }
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down) {
+                                            viewport-keys.focus();
+                                        }
+                                        if (event.button == PointerEventButton.left || event.touch-finger-id != 0) {
+                                            if (event.kind == PointerEventKind.down) {
+                                                root.select_pointer(0, self.mouse-x, self.mouse-y, event.modifiers.shift, event.touch-finger-id != 0);
+                                            } else if (event.kind == PointerEventKind.up) {
+                                                root.select_pointer(1, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                            } else if (event.kind == PointerEventKind.cancel) {
+                                                root.select_pointer(4, self.mouse-x, self.mouse-y, false, event.touch-finger-id != 0);
+                                            }
+                                        }
+                                    }
+                                    moved => {
+                                        if (self.pressed) {
+                                            root.select_pointer(2, self.mouse-x, self.mouse-y, false, false);
+                                        }
+                                    }
+                                    double-clicked => {
+                                        root.select_pointer(3, self.mouse-x, self.mouse-y, false, false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // The document scrollbar, over the right edge of the viewport, clear of the
+                    // window's buttons and the status island.
+                    Rectangle {
+                        x: parent.width - 12px;
+                        y: root.doc-inset-top;
+                        width: 12px;
+                        height: root.sb-track-h;
+                        visible: root.sb-visible && !root.mobile;
+                        background: Theme.scroll-track;
+                        Rectangle {
+                            y: root.sb-thumb-y;
+                            height: root.sb-thumb-h;
+                            x: 2px;
+                            width: parent.width - 4px;
+                            border-radius: 4px;
+                            background: thumb-area.pressed ? Theme.scroll-thumb-pressed : Theme.scroll-thumb;
+                        }
+                        thumb-area := TouchArea {
+                            // Where in the thumb it was grabbed, so a drag does not snap its top to
+                            // the cursor.
+                            property <length> grab: 0px;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    if (self.mouse-y >= root.sb-thumb-y && self.mouse-y < root.sb-thumb-y + root.sb-thumb-h) {
+                                        self.grab = self.mouse-y - root.sb-thumb-y;
+                                    } else {
+                                        self.grab = root.sb-thumb-h / 2;
+                                        root.scrollbar_moved(self.mouse-y - self.grab, self.height);
+                                    }
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.scrollbar_moved(self.mouse-y - self.grab, self.height);
+                                }
+                            }
+                        }
+                    }
+
+                    // The ink stroke being drawn, over the page until MuPDF draws it in the tiles.
+                    if root.ink-commands != "" : Rectangle {
+                        x: viewport.x;
+                        y: viewport.y;
+                        width: viewport.width;
+                        height: viewport.height;
+                        clip: true;
+                        Path {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            commands: root.ink-commands;
+                            stroke: root.ink-colour;
+                            stroke-width: root.ink-stroke-width;
+                            stroke-line-cap: round;
+                            stroke-line-join: round;
+                            // Unscaled: the commands are in this element's logical pixels.
+                            fit: preserve;
+                        }
+                    }
+
+                    // A note's text while the pointer rests on it.
+                    if root.note-hover-visible && !root.note-editor-visible : Rectangle {
+                        x: root.note-hover-x;
+                        y: root.note-hover-y;
+                        width: min(280px, hover-text.preferred-width + 16px);
+                        height: hover-text.preferred-height + 12px;
+                        background: #fff8c4;
+                        border-width: 1px;
+                        border-color: #c9b458;
+                        border-radius: 4px;
+                        hover-text := Text {
+                            x: 8px;
+                            y: 6px;
+                            width: parent.width - 16px;
+                            text: root.note-hover-text;
+                            wrap: word-wrap;
+                            color: #3b3000;
+                        }
+                    }
+
+                    // The field with the keyboard focus (Plan 0006 Phase 2): Space or Enter sets a check
+                    // box or radio button, Tab moves on.
+                    if root.field-focus-visible && !root.field-editor-visible && !root.field-choices-visible : Rectangle {
+                        x: root.field-focus-x - 2px;
+                        y: root.field-focus-y - 2px;
+                        width: root.field-focus-w + 4px;
+                        height: root.field-focus-h + 4px;
+                        border-width: 2px;
+                        border-radius: 2px;
+                        border-color: Theme.accent;
+                    }
+
+                    // The editor over a text field (Plan 0006): Enter (Ctrl+Enter in a multi-line field)
+                    // or Tab keeps the text, Esc drops it; a click elsewhere keeps it too.
+                    if root.field-editor-visible : FocusScope {
+                        x: root.field-editor-x;
+                        y: root.field-editor-y;
+                        width: root.field-editor-w;
+                        height: root.field-editor-h;
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.field_cancel();
+                                return accept;
+                            }
+                            if (event.text == Key.Tab || event.text == Key.Backtab) {
+                                root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
+                                return accept;
+                            }
+                            if (event.text == Key.Return
+                                && (!root.field-editor-multiline || event.modifiers.control)) {
+                                root.field_commit();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: #e8f0ff;
+                            border-width: 1px;
+                            border-color: Theme.accent;
+                            clip: true;
+                            TextInput {
+                                x: 2px;
+                                y: root.field-editor-multiline ? 1px : 0px;
+                                width: parent.width - 4px;
+                                height: parent.height - (root.field-editor-multiline ? 2px : 0px);
+                                text <=> root.field-editor-text;
+                                font-size: root.field-editor-font-size;
+                                single-line: !root.field-editor-multiline;
+                                wrap: root.field-editor-multiline ? TextWrap.word-wrap : TextWrap.no-wrap;
+                                vertical-alignment: root.field-editor-multiline
+                                    ? TextVerticalAlignment.top : TextVerticalAlignment.center;
+                                input-type: root.field-editor-password ? InputType.password : InputType.text;
+                                // A comb field's characters are drawn in their boxes below.
+                                color: root.field-editor-cells > 0 ? transparent : #000000;
+                                selection-background-color: root.field-editor-cells > 0
+                                    ? transparent : Theme.selection;
+                                edited => { root.field_edited(self.text); }
+                                init => {
+                                    self.focus();
+                                    self.select-all();
+                                }
+                                property <int> serial: root.field-editor-serial;
+                                changed serial => {
+                                    self.focus();
+                                    self.select-all();
+                                }
+                            }
+                            // A comb field: one character in each box, the next box to fill outlined.
+                            if root.field-editor-cells > 0 : Rectangle {
+                                property <length> cell: self.width / root.field-editor-cells;
+                                for i in root.field-editor-cells - 1 : Rectangle {
+                                    x: (i + 1) * parent.cell;
+                                    width: 1px;
+                                    background: rgba(37, 99, 235, 0.25);
+                                }
+                                for ch[i] in root.field-editor-chars : Text {
+                                    x: i * parent.cell;
+                                    width: parent.cell;
+                                    height: parent.height;
+                                    text: ch;
+                                    font-size: root.field-editor-font-size;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    color: #000000;
+                                }
+                                Rectangle {
+                                    x: min(root.field-editor-chars.length, root.field-editor-cells - 1) * parent.cell;
+                                    width: parent.cell;
+                                    border-width: 2px;
+                                    border-color: Theme.accent;
+                                }
+                            }
+                        }
+                    }
+
+                    // A choice field's options, under the field: a click chooses, Esc closes.
+                    if root.field-choices-visible : FocusScope {
+                        x: root.field-choices-x;
+                        y: root.field-choices-y;
+                        width: root.field-choices-w;
+                        height: min(8, root.field-choices.length) * root.choice-row-h + 4px;
+                        init => {
+                            if (!root.field-editor-visible) {
+                                self.focus();
+                            }
+                        }
+                        property <int> serial: root.field-editor-serial;
+                        changed serial => {
+                            if (!root.field-editor-visible) {
+                                self.focus();
+                            }
+                        }
+                        // Up and Down move through the options, Space chooses (ticks, in a multi-select
+                        // list), Enter chooses or keeps the ticks, Tab keeps them and moves on.
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.field_cancel();
+                                return accept;
+                            }
+                            if (event.text == Key.Tab || event.text == Key.Backtab) {
+                                root.field_tab(event.text == Key.Backtab || event.modifiers.shift);
+                                return accept;
+                            }
+                            if (root.field-editor-visible) {
+                                return reject;
+                            }
+                            if (event.text == Key.UpArrow) {
+                                root.field-choice-selected = max(0, root.field-choice-selected - 1);
+                                return accept;
+                            }
+                            if (event.text == Key.DownArrow) {
+                                root.field-choice-selected = min(root.field-choices.length - 1, root.field-choice-selected + 1);
+                                return accept;
+                            }
+                            if (event.text == " " || (event.text == Key.Return && !root.field-choices-multi)) {
+                                root.field_choose(root.field-choice-selected);
+                                return accept;
+                            }
+                            if (event.text == Key.Return) {
+                                root.field_commit();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            drop-shadow-blur: 6px;
+                            drop-shadow-color: Theme.shadow;
+                            ListView {
+                                x: 2px;
+                                y: 2px;
+                                width: parent.width - 4px;
+                                height: parent.height - 4px;
+                                for label[index] in root.field-choices : Rectangle {
+                                    property <bool> chosen: root.field-choices-multi
+                                        ? root.field-choice-marks[index] : index == root.field-choice-selected;
+                                    height: root.choice-row-h;
+                                    background: self.chosen ? Theme.selection : transparent;
+                                    // In a multi-select list the keyboard's place is outlined.
+                                    border-width: root.field-choices-multi && index == root.field-choice-selected ? 1px : 0px;
+                                    border-color: Theme.accent;
+                                    Text {
+                                        x: 6px;
+                                        width: 14px;
+                                        visible: root.field-choices-multi;
+                                        text: root.field-choice-marks[index] ? "✓" : "";
+                                        vertical-alignment: center;
+                                        color: parent.chosen ? Theme.selection-text : Theme.text;
+                                    }
+                                    Text {
+                                        x: root.field-choices-multi ? 22px : 6px;
+                                        width: parent.width - self.x - 6px;
+                                        text: label;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        color: parent.chosen ? Theme.selection-text : Theme.text;
+                                    }
+                                    TouchArea { clicked => { root.field_choose(index); } }
+                                }
+                            }
+                        }
+                    }
+
+                    // The note editor: Ctrl+Enter or Save keeps the text, Esc or Cancel drops it.
+                    if root.note-editor-visible : FocusScope {
+                        x: root.note-editor-x;
+                        y: root.note-editor-y;
+                        width: 280px;
+                        height: 170px;
+                        capture-key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.note_cancel();
+                                return accept;
+                            }
+                            if (event.text == Key.Return && event.modifiers.control) {
+                                root.note_save();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        Rectangle {
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.line-strong;
+                            border-radius: 4px;
+                            drop-shadow-blur: 6px;
+                            drop-shadow-color: Theme.shadow;
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 6px;
+                                TextEdit {
+                                    text <=> root.note-text;
+                                    wrap: word-wrap;
+                                    init => { self.focus(); }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    height: 28px;
+                                    Text {
+                                        // A phone's keyboard has no Ctrl.
+                                        text: root.mobile ? "" : "Ctrl+Enter";
+                                        color: Theme.text;
+                                        opacity: 0.6;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    DialogButton { text: "Cancel"; clicked => { root.note_cancel(); } }
+                                    DialogButton { text: "Save"; primary: true; clicked => { root.note_save(); } }
+                                }
+                            }
+                        }
+                    }
+
+                    // The selected annotation's colours and Delete, over its top edge; on a phone,
+                    // 44 px targets (Plan 0008 row MH).
+                    if root.has-annot-selection && root.annot-sel-rects.length > 0 && root.tool != 6 : annot-bar := Island {
+                        property <HitView> first: root.annot-sel-rects[0];
+                        property <length> swatch: root.mobile ? 30px : 18px;
+                        property <length> target: root.mobile ? 44px : 18px;
+                        width: self.preferred-width;
+                        height: self.preferred-height;
+                        x: max(4px, min(canvas.width - self.width - 16px, self.first.x + root.scroll-x));
+                        y: self.first.y + root.scroll-y > self.height + 12px
+                            ? self.first.y + root.scroll-y - self.height - 8px
+                            : self.first.y + self.first.h + root.scroll-y + 8px;
+                        HorizontalLayout {
+                            padding: 4px;
+                            padding-left: 8px;
+                            spacing: 6px;
+                            for swatch[index] in root.swatches : Rectangle {
+                                width: annot-bar.target;
+                                height: annot-bar.target;
+                                Rectangle {
+                                    width: annot-bar.swatch;
+                                    height: annot-bar.swatch;
+                                    border-radius: root.mobile ? self.width / 2 : 4px;
+                                    background: swatch;
+                                    border-width: index == root.colour-index ? 2px : 1px;
+                                    border-color: index == root.colour-index ? Theme.text : Theme.line-strong;
+                                }
+                                TouchArea { clicked => { root.choose_colour(index); } }
+                            }
+                            Rectangle { width: 1px; background: Theme.line-strong; }
+                            IconButton {
+                                width: root.mobile ? 44px : 28px;
+                                height: root.mobile ? 44px : 28px;
+                                icon: @image-url("icons/trash-2.svg");
+                                icon-size: 14px;
+                                tip: "Delete (Delete)";
+                                danger: true;
+                                clicked => { root.delete_annotation(); }
+                            }
+                        }
+                    }
+
+                    // Reset Field, beside the field with the keyboard focus (concept step 37). Not on a
+                    // phone: a 44 px button there covers the next field; the edit strip's Form card
+                    // has Reset Field.
+                    if !root.mobile && root.editable && root.has-field-focus && (root.field-focus-visible || root.field-editor-visible) : IconButton {
+                        property <bool> over-editor: root.field-editor-visible;
+                        x: (self.over-editor ? root.field-editor-x + root.field-editor-w : root.field-focus-x + root.field-focus-w) + 6px;
+                        y: self.over-editor ? root.field-editor-y : root.field-focus-y;
+                        width: 24px;
+                        height: 24px;
+                        icon: @image-url("icons/eraser.svg");
+                        icon-size: 13px;
+                        tip: "Reset Field";
+                        clicked => { root.reset_field(); }
+                    }
+
+                    if (root.total_pages == 0 && !root.has_error) : VerticalLayout {
+                        alignment: center;
+                        spacing: 12px;
+                        Text {
+                            text: "Open a PDF to start";
+                            color: Theme.text-muted;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            DialogButton {
+                                text: "Open a File...";
+                                clicked => { root.open_file(); }
+                            }
+                        }
+                        Text {
+                            text: "or press Ctrl+O";
+                            color: Theme.text-faint;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tools: the gallery, over the whole window under the islands; it comes in from a little
+        // smaller as the canvas falls back (the concept's "camera pull-back").
+        gallery := Gallery {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            visible: !root.mobile && (root.tools-t > 0 || root.warm) && root.total_pages > 0;
+            opacity: root.tools-t;
+            transform-scale: 0.88 + 0.12 * root.tools-t;
+            inset-left: root.mobile ? root.island-gap : root.inset + sidebar.width + root.island-gap;
+            inset-top: root.canvas-top;
+            inset-bottom: root.doc-inset-bottom;
+            thumbs: root.thumbs;
+            total-pages: root.total_pages;
+            pages-chosen: root.pages-chosen;
+            editable: root.editable;
+            drag-data: root.page-drag-data;
+            scroll <=> root.gallery-scroll;
+            drop-index <=> root.gallery-drop;
+            scrolled => { root.gallery_scrolled(); }
+            card-clicked(index, ctrl, shift) => { root.thumb_clicked(index, ctrl, shift); }
+            card-toggled(index) => { root.gallery_toggled(index); }
+            card-opened(index) => { root.gallery_opened(index); }
+            card-action(index, which) => { root.gallery_action(index, which); }
+            divider-action(index, which) => { root.gallery_divider(index, which); }
+            drag-started(index) => { root.thumb_drag_started(index); }
+            dropped-at(index) => { root.gallery_dropped(index); }
+            chosen-action(which) => { root.gallery_chosen_action(which); }
+            clear-chosen => { root.gallery_clear(); }
+        }
+
+        // On a phone, the pages in one column (Plan 0008 Phase 4).
+        mgallery := MobileGallery {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            visible: root.mobile && (root.tools-t > 0 || root.warm) && root.total_pages > 0;
+            opacity: root.tools-t;
+            transform-scale: 0.88 + 0.12 * root.tools-t;
+            inset-top: root.mgallery-inset-top;
+            inset-bottom: root.doc-inset-bottom;
+            thumbs: root.thumbs;
+            total-pages: root.total_pages;
+            pages-chosen: root.pages-chosen;
+            editable: root.editable;
+            offset <=> root.mgallery-offset;
+            drop-index <=> root.mgallery-drop;
+            stack: root.mgallery-stack;
+            scrolled => { root.gallery_scrolled(); }
+            card-tapped(index) => { root.gallery_current(index); }
+            card-toggled(index) => { root.gallery_toggled(index); }
+            card-opened(index) => { root.gallery_opened(index); }
+            card-action(index, which) => { root.gallery_action(index, which); }
+            divider-action(index, which) => { root.gallery_divider(index, which); }
+            drag-started(index) => { root.thumb_drag_started(index); }
+            dropped-at(index) => { root.gallery_dropped(index); }
+            chosen-action(which) => { root.gallery_chosen_action(which); }
+            clear-chosen => { root.gallery_clear(); }
+            choose-all => { root.gallery_choose_all(); }
+            drag-ended => { root.gallery_drag_ended(); }
+        }
+
+        // The tools' dialogs (Plans 0005 and 0006), over the canvas and the gallery, so one opened
+        // in Tools shows there too. On a phone each is a sheet above the dock, the edit strip or
+        // the on-screen keyboard, with 44 px rows (Plan 0008 Phase 4).
+        dialogs := Rectangle {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            // Over the mobile shell, whose header a sheet covers when the keyboard leaves it too
+            // little room (Plan 0008 Phase 5). On the desktop a dialog with its scrim stands over the
+            // islands too (Plan 0007 Phase 5); Crop stays under them, beside the page.
+            z: root.mobile || root.merge-visible || root.split-visible || root.stamp-visible
+                || root.convert-visible || root.props-visible ? 1 : 0;
+
+            // On the desktop a tool's dialog stands in the middle of the window over a scrim
+            // (Plan 0007 Phase 5); Crop stays at the top, beside the page being cropped.
+            if !root.mobile && (root.merge-visible || root.split-visible || root.stamp-visible
+                || root.convert-visible || root.props-visible) : Rectangle {
+                background: Theme.scrim;
+                TouchArea {}
+            }
+
+            // Merge Files (Plan 0005 Phase 2): the files in the order they go into the new
+            // document; the open one can be among them, as it is now.
+            if root.merge-visible : FocusScope {
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 460px);
+                height: root.mobile ? min(root.sheet-room, 420px) : min(parent.height - 32px, 360px);
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.merge_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
+                    sheet-merge := VerticalLayout {
+                        padding: root.mobile ? 16px : 10px;
+                        spacing: 8px;
+                        Text {
+                            text: root.merge-images ? "Images to PDF - one page each, in this order"
+                                : "Merge files - in this order";
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        ListView {
+                            vertical-stretch: 1;
+                            for name[index] in root.merge-files : Rectangle {
+                                height: 26px;
+                                background: index == root.merge-selected
+                                    ? Theme.selection : transparent;
+                                Text {
+                                    x: 6px;
+                                    text: (index + 1) + ". " + name;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    color: index == root.merge-selected
+                                        ? Theme.selection-text : Theme.text;
+                                }
+                                TouchArea { clicked => { root.merge-selected = index; } }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            DialogButton {
+                                text: root.merge-images ? "Add images..." : "Add files...";
+                                clicked => { root.merge_add(); }
+                            }
+                            if !root.merge-images : DialogButton {
+                                text: "Add open document";
+                                enabled: root.total_pages > 0;
+                                clicked => { root.merge_add_current(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: root.button-h;
+                            DialogButton {
+                                text: "Up";
+                                enabled: root.merge-selected > 0;
+                                clicked => { root.merge_move(-1); }
+                            }
+                            DialogButton {
+                                text: "Down";
+                                enabled: root.merge-selected >= 0
+                                    && root.merge-selected + 1 < root.merge-files.length;
+                                clicked => { root.merge_move(1); }
+                            }
+                            DialogButton {
+                                text: "Remove";
+                                enabled: root.merge-selected >= 0;
+                                clicked => { root.merge_remove(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            DialogButton { text: "Cancel"; clicked => { root.merge_close(); } }
+                            DialogButton {
+                                text: root.merge-images ? "Make PDF..." : "Merge...";
+                                primary: true;
+                                enabled: root.merge-files.length >= 1 && !root.tool-running;
+                                clicked => { root.merge_run(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Split: the open document, as it is now, into files of N pages or by ranges.
+            if root.split-visible : FocusScope {
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 420px);
+                height: root.mobile ? min(root.sheet-room, sheet-split.preferred-height)
+                    : min(parent.height - 32px, sheet-split.preferred-height);
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.split_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-split-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-split.height;
+                        sheet-split := VerticalLayout {
+                            width: sheet-split-scroll.width;
+                            height: max(sheet-split-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Split into files";
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                DialogButton {
+                                    text: "Every";
+                                    checkable: true;
+                                    checked: root.split-mode == 0;
+                                    clicked => { root.split-mode = 0; }
+                                }
+                                Field {
+                                    width: 60px;
+                                    text <=> root.split-every;
+                                    enabled: root.split-mode == 0;
+                                }
+                                Text {
+                                    text: "pages";
+                                    vertical-alignment: center;
+                                    color: Theme.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                DialogButton {
+                                    text: "Ranges";
+                                    checkable: true;
+                                    checked: root.split-mode == 1;
+                                    clicked => { root.split-mode = 1; }
+                                }
+                                Field {
+                                    placeholder-text: "1-3, 4, 5-";
+                                    text <=> root.split-ranges;
+                                    enabled: root.split-mode == 1;
+                                }
+                            }
+                            Text {
+                                text: root.split-error;
+                                color: Theme.danger;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                DialogButton { text: "Cancel"; clicked => { root.split_close(); } }
+                                DialogButton {
+                                    text: "Split...";
+                                    primary: true;
+                                    enabled: !root.tool-running;
+                                    clicked => { root.split_run(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Document Properties: the fields readers show, and what else the file says.
+            // Watermark and page numbers (Plan 0005 Phase 3): text written into the pages.
+            if root.stamp-visible : FocusScope {
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 440px);
+                height: root.mobile ? min(root.sheet-room, sheet-stamp.preferred-height)
+                    : min(parent.height - 32px, sheet-stamp.preferred-height);
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.stamp_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-stamp-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-stamp.height;
+                        sheet-stamp := VerticalLayout {
+                            width: sheet-stamp-scroll.width;
+                            height: max(sheet-stamp-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 6px;
+                            Text {
+                                text: root.stamp-mode == 0 ? "Watermark" : "Page numbers";
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Text"; vertical-alignment: center; color: Theme.text; }
+                                Field { text <=> root.stamp-text; init => { self.focus(); } }
+                            }
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Direction"; vertical-alignment: center; color: Theme.text; }
+                                DialogButton {
+                                    text: "Diagonal";
+                                    checkable: true;
+                                    checked: root.stamp-diagonal;
+                                    clicked => { root.stamp-diagonal = true; }
+                                }
+                                DialogButton {
+                                    text: "Horizontal";
+                                    checkable: true;
+                                    checked: !root.stamp-diagonal;
+                                    clicked => { root.stamp-diagonal = false; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.stamp-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Opacity"; vertical-alignment: center; color: Theme.text; }
+                                Slider {
+                                    minimum: 5;
+                                    maximum: 100;
+                                    value <=> root.stamp-opacity;
+                                }
+                                Text {
+                                    width: 40px;
+                                    text: round(root.stamp-opacity) + "%";
+                                    vertical-alignment: center;
+                                    color: Theme.text;
+                                }
+                            }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                                Field {
+                                    text <=> root.stamp-format;
+                                    placeholder-text: "{n} / {total}";
+                                    init => { self.focus(); }
+                                }
+                            }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Start at"; vertical-alignment: center; color: Theme.text; }
+                                Field { width: 70px; text <=> root.stamp-first; }
+                                Text { text: "Size (pt)"; vertical-alignment: center; color: Theme.text; }
+                                Field { width: 70px; text <=> root.stamp-size; }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.stamp-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Position"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
+                                    current-index <=> root.stamp-corner;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Colour"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["Grey", "Red", "Blue", "Black"];
+                                    current-index <=> root.stamp-colour;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                                Field {
+                                    text <=> root.stamp-pages;
+                                    placeholder-text: "All, or 1-3, 5, 8-";
+                                }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.stamp-error;
+                                color: Theme.danger;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                DialogButton { text: "Cancel"; clicked => { root.stamp_close(); } }
+                                DialogButton {
+                                    text: "Apply";
+                                    primary: true;
+                                    clicked => { root.stamp_apply(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Compress or export as images (Plan 0005 Phase 4): new files from the document as
+            // it is now.
+            if root.convert-visible : FocusScope {
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 420px);
+                height: root.mobile ? min(root.sheet-room, sheet-convert.preferred-height)
+                    : min(parent.height - 32px, sheet-convert.preferred-height);
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.convert_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-convert-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-convert.height;
+                        sheet-convert := VerticalLayout {
+                            width: sheet-convert-scroll.width;
+                            height: max(sheet-convert-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 6px;
+                            Text {
+                                text: root.convert-mode == 0 ? "Compress a copy" : "Export pages as images";
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            if root.convert-mode == 0 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Preset"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["Lossless", "Balanced: images to 150 dpi", "Strong: images to 96 dpi"];
+                                    current-index <=> root.convert-preset;
+                                }
+                            }
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Format"; vertical-alignment: center; color: Theme.text; }
+                                ComboBox {
+                                    model: ["PNG", "JPEG"];
+                                    current-index <=> root.convert-format;
+                                }
+                            }
+                            // A row of its own: beside the format it ran out of a phone's sheet.
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Resolution"; vertical-alignment: center; color: Theme.text; }
+                                Field { width: 70px; text <=> root.convert-dpi; }
+                                Text { text: "dpi"; vertical-alignment: center; color: Theme.text; }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.convert-mode == 1 : HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 80px; text: "Pages"; vertical-alignment: center; color: Theme.text; }
+                                Field {
+                                    text <=> root.convert-pages;
+                                    placeholder-text: "All, or 1-3, 5, 8-";
+                                }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.convert-error;
+                                color: Theme.danger;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                DialogButton { text: "Cancel"; clicked => { root.convert_close(); } }
+                                DialogButton {
+                                    text: root.convert-mode == 0 ? "Compress..." : "Export...";
+                                    primary: true;
+                                    enabled: !root.tool-running;
+                                    clicked => { root.convert_run(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Crop: the rectangle the Crop tool drew, applied to its page or to every page.
+            if root.crop-visible : FocusScope {
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 380px);
+                height: root.mobile ? min(root.sheet-room, sheet-crop.preferred-height) : 96px;
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.crop_cancel();
+                        return accept;
+                    }
+                    if (event.text == Key.Return) {
+                        root.crop_apply(false);
+                        return accept;
+                    }
+                    return reject;
+                }
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-crop-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-crop.height;
+                        sheet-crop := VerticalLayout {
+                            width: sheet-crop-scroll.width;
+                            height: max(sheet-crop-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Crop to the drawn area (" + root.crop-size + ")";
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                DialogButton { text: "Cancel"; clicked => { root.crop_cancel(); } }
+                                DialogButton { text: "All pages"; clicked => { root.crop_apply(true); } }
+                                DialogButton {
+                                    text: "This page";
+                                    primary: true;
+                                    clicked => { root.crop_apply(false); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.props-visible : FocusScope {
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 460px);
+                height: root.mobile ? min(root.sheet-room, sheet-props.preferred-height) : min(parent.height - 32px, 380px);
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.props_close();
+                        return accept;
+                    }
+                    return reject;
+                }
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
+                    // Its rows scroll when the sheet has less room than they need (a phone on its side).
+                    sheet-props-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-props.height;
+                        sheet-props := VerticalLayout {
+                            width: sheet-props-scroll.width;
+                            height: max(sheet-props-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 6px;
+                            Text {
+                                text: "Document properties";
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Title"; vertical-alignment: center; color: Theme.text; }
+                                Field {
+                                    text <=> root.props-title;
+                                    read-only: !root.editable;
+                                    init => { self.focus(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Author"; vertical-alignment: center; color: Theme.text; }
+                                Field { text <=> root.props-author; read-only: !root.editable; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Subject"; vertical-alignment: center; color: Theme.text; }
+                                Field { text <=> root.props-subject; read-only: !root.editable; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.row-h;
+                                Text { width: 70px; text: "Keywords"; vertical-alignment: center; color: Theme.text; }
+                                Field { text <=> root.props-keywords; read-only: !root.editable; }
+                            }
+                            Text {
+                                vertical-stretch: 1;
+                                text: root.props-info;
+                                wrap: word-wrap;
+                                font-size: 12px;
+                                color: Theme.text;
+                                opacity: 0.75;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                DialogButton { text: "Close"; clicked => { root.props_close(); } }
+                                if root.editable : DialogButton {
+                                    text: "Save";
+                                    primary: true;
+                                    clicked => { root.props_save(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        title-row := TitleRow {
+            visible: !root.mobile;
+            x: root.inset;
+            y: root.inset;
+            width: root.width - 2 * root.inset;
+            own-frame: root.own-frame;
+            maximized: root.maximized;
+            tabs: root.tabs;
+            active-tab: root.active-tab;
+            editable: root.editable;
+            repaired: root.repaired;
+            can-undo: root.can-undo;
+            can-redo: root.can-redo;
+            recent-files: root.recent-files;
+            theme: root.theme;
+            open-file => { root.open_file(); }
+            open-recent(index) => { root.open_recent(index); }
+            save => { root.save(); }
+            save-as => { root.save_as(); }
+            undo => { root.undo(); }
+            redo => { root.redo(); }
+            choose-theme(index) => { root.choose_theme(index); }
+            reduce-motion: root.reduce-motion;
+            reduce-motion-changed(on) => { root.set_reduce_motion(on); }
+            about => { root.about-visible = true; }
+            minimize => { root.minimized = true; }
+            toggle-maximize => { root.maximized = !root.maximized; }
+            close => { root.quit(); }
+            select-tab(index) => { root.select-tab(index); }
+            close-tab(index) => { root.close-tab(index); }
+            new-tab => { root.open_file(); }
+            pages-to-tab(index) => { root.pages-to-tab(index); }
+            pages-to-new-tab => { root.pages-to-new-tab(); }
+            drag-data: root.page-drag-data;
+            tab-drag(index) => { root.tab_drag(index); }
+        }
+
+        sidebar := SidebarColumn {
+            visible: !root.mobile;
+            x: root.inset;
+            y: root.canvas-top;
+            height: root.height - root.canvas-top - root.inset;
+            mode <=> root.mode;
+            warm: root.warm;
+            editable: root.editable;
+            total-pages: root.total_pages;
+            tool-running: root.tool-running;
+            tool: root.tool;
+            colour-index: root.colour-index;
+            swatches: root.swatches;
+            ink-width-index: root.ink-width-index;
+            sidebar-visible: root.sidebar-visible;
+            sidebar-tab: root.sidebar-tab;
+            find-visible: root.find-visible;
+            field-highlight: root.field-highlight;
+            form-fields: root.form-fields;
+            has-field-focus: root.has-field-focus;
+            word-export: root.word-export;
+            choose-tool(tool) => { root.choose_tool(tool); }
+            choose-colour(index) => { root.choose_colour(index); }
+            choose-ink-width(index) => { root.choose_ink_width(index); }
+            show-drawer(tab) => {
+                if (root.sidebar-visible && root.sidebar-tab == tab) {
+                    root.toggle_sidebar();
+                } else {
+                    if (root.sidebar-tab != tab) {
+                        root.sidebar-tab = tab;
+                        root.sidebar_tab_changed();
+                    }
+                    if (!root.sidebar-visible) {
+                        root.toggle_sidebar();
+                    }
+                }
+            }
+            find-open => { root.find_open(); }
+            page-op(op) => { root.page_op(op); }
+            crop-tool => { root.crop_tool(); }
+            toggle-field-highlight => { root.toggle_field_highlight(); }
+            reset-field => { root.reset_field(); }
+            reset-form => { root.reset_form(); }
+            import-form-data => { root.import_form_data(); }
+            export-form-data => { root.export_form_data(); }
+            flatten-form => { root.flatten_form(); }
+            merge-open => { root.merge_open(); }
+            split-open => { root.split_open(); }
+            extract-pages => { root.extract_pages(); }
+            insert-from-file => { root.insert_from_file(); }
+            stamp-open(mode) => { root.stamp_open(mode); }
+            convert-open(mode) => { root.convert_open(mode); }
+            images-to-pdf => { root.images_to_pdf(); }
+            export-word => { root.export_word(); }
+            props-open => { root.props_open(); }
+        }
+
+        // Read only: Edit and Tools fade it out. The pages keep the drawer's room, so a mode
+        // change does not move them (plan row AT). It ends above the status row.
+        if root.drawer-shown && root.tools-t + root.edit-t < 1 : Drawer {
+            opacity: 1 - root.tools-t - root.edit-t;
+            x: root.inset + sidebar.width + root.island-gap;
+            y: root.canvas-top;
+            width: root.drawer-width;
+            height: root.height - root.canvas-top - root.inset - status.height - root.island-gap;
+            sidebar-tab: root.sidebar-tab;
+            thumbs: root.thumbs;
+            outline-rows: root.outline-rows;
+            thumb-scroll-y <=> root.thumb-scroll-y;
+            page-drag-data: root.page-drag-data;
+            drop-row <=> root.drop-row;
+            drop-after <=> root.drop-after;
+            pages-chosen: root.pages-chosen;
+            editable: root.editable;
+            changed thumb-list-x => { root.thumb-list-x = self.thumb-list-x; }
+            changed thumb-list-y => { root.thumb-list-y = self.thumb-list-y; }
+            thumbs-moved => { root.thumbs_moved(); }
+            thumb-clicked(index, ctrl, shift) => { root.thumb_clicked(index, ctrl, shift); }
+            thumb-drag-started(index) => { root.thumb_drag_started(index); }
+            thumb-dropped(index, after) => { root.thumb_dropped(index, after); }
+            outline-clicked(index) => { root.outline_clicked(index); }
+            outline-toggled(index) => { root.outline_toggled(index); }
+        }
+
+        // The search island, under the title row.
+        if root.find-visible && root.mode != 2 && !root.mobile : SearchIsland {
+            width: self.preferred-width;
+            height: self.preferred-height;
+            x: root.canvas-left + (root.width - root.canvas-left - self.width) / 2;
+            y: root.canvas-top + root.island-gap;
+            find-text <=> root.find-text;
+            find-counter: root.find-counter;
+            find-changed(text) => { root.find_changed(text); }
+            find-next => { root.find_next(); }
+            find-previous => { root.find_previous(); }
+            find-close => { root.find_close(); }
+        }
+
+        // An error, under the title row (and the search island).
+        if root.has_error && !root.mobile : Rectangle {
+            x: root.canvas-left + (root.width - root.canvas-left - self.width) / 2;
+            y: root.canvas-top + root.island-gap + (root.find-visible ? 48px : 0px);
+            width: min(560px, root.width - root.canvas-left - 32px);
+            height: 36px;
+            background: Theme.danger-surface;
+            border-color: Theme.danger-line;
+            border-width: 1px;
+            border-radius: Theme.radius-island;
+            Text {
+                x: 12px;
+                width: parent.width - 24px;
+                text: root.error_text;
+                color: Theme.danger-text;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        status := StatusIsland {
+            visible: !root.mobile;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            // Clear of the scroll bar at the window's right edge; in Tools, page navigation only,
+            // in the middle under the gallery (DESIGN.md step 33).
+            nav-only: root.mode == 2;
+            x: root.mode == 2
+                ? gallery.inset-left + (root.width - gallery.inset-left - self.width) / 2
+                : root.width - self.width - max(root.inset, 12px) - 8px;
+            y: root.height - self.height - root.inset;
+            current-page: root.current_page;
+            total-pages: root.total_pages;
+            is-loading: root.is_loading;
+            zoom-percent: root.zoom_percent;
+            page-input <=> root.page-input;
+            prev-page => { root.prev_page(); }
+            next-page => { root.next_page(); }
+            go-to-page(text) => {
+                root.go_to_page(text);
+                viewport-keys.focus();
+            }
+            zoom-in => { root.zoom_in(); }
+            zoom-out => { root.zoom_out(); }
+            zoom-reset => { root.zoom_reset(); }
+            fit-width => { root.fit_width(); }
+            fit-page => { root.fit_page(); }
+            book: root.book-mode;
+            book-changed(on) => { root.book_mode_chosen(on); }
+        }
+
+        if (root.status_text != "" || root.tool-running) && !root.mobile : MessageIsland {
+            x: root.inset + sidebar.width + root.island-gap;
+            y: root.height - self.height - root.inset;
+            height: 32px;
+            width: min(self.preferred-width, status.x - self.x - root.island-gap);
+            text: root.status_text;
+            tool-running: root.tool-running;
+            diagnostics: root.diagnostics;
+            tiles-rendered: root.tiles_rendered;
+            tiles-requested: root.tiles_requested;
+            cancel-tool => { root.cancel_tool(); }
+        }
+
+        // The mobile shell, over everything but the dialogs' own panels (Plan 0008 Phase 2).
+        mshell := MobileShell {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            visible: root.mobile;
+            doc-title: root.doc-title;
+            dirty: root.dirty;
+            editable: root.editable;
+            can-undo: root.can-undo;
+            can-redo: root.can-redo;
+            current-page: root.current_page;
+            total-pages: root.total_pages;
+            zoom-percent: root.zoom_percent;
+            theme: root.theme;
+            tabs: root.tabs;
+            active-tab: root.active-tab;
+            thumbs: root.thumbs;
+            outline-rows: root.outline-rows;
+            has-error: root.has_error;
+            error-text: root.error_text;
+            mode <=> root.mode;
+            find-visible: root.find-visible;
+            find-text <=> root.find-text;
+            find-counter: root.find-counter;
+            page-input <=> root.page-input;
+            thumb-scroll-y <=> root.thumb-scroll-y;
+            safe-top: root.safe-area-insets.top;
+            safe-bottom: root.safe-area-insets.bottom;
+            safe-left: root.safe-area-insets.left;
+            safe-right: root.safe-area-insets.right;
+            keyboard-top: root.virtual-keyboard-size.height > 0 ? root.virtual-keyboard-position.y : root.height;
+            tool: root.tool;
+            colour-index: root.colour-index;
+            swatches: root.swatches;
+            ink-width-index: root.ink-width-index;
+            form-fields: root.form-fields;
+            field-highlight: root.field-highlight;
+            has-field-focus: root.has-field-focus;
+            choose-tool(tool) => { root.choose_tool(tool); }
+            choose-colour(index) => { root.choose_colour(index); }
+            choose-ink-width(index) => { root.choose_ink_width(index); }
+            crop-tool => { root.crop_tool(); }
+            page-op(op) => { root.page_op(op); }
+            toggle-field-highlight => { root.toggle_field_highlight(); }
+            reset-field => { root.reset_field(); }
+            reset-form => { root.reset_form(); }
+            import-form-data => { root.import_form_data(); }
+            export-form-data => { root.export_form_data(); }
+            flatten-form => { root.flatten_form(); }
+            sheet-changed(open, tab) => {
+                if (tab <= 1 && root.sidebar-tab != tab) {
+                    root.sidebar-tab = tab;
+                    root.sidebar_tab_changed();
+                }
+                if ((open && tab <= 1) != root.sidebar-visible) {
+                    root.toggle_sidebar();
+                }
+            }
+            save => { root.save(); }
+            save-as => { root.save_as(); }
+            undo => { root.undo(); }
+            redo => { root.redo(); }
+            open-file => { root.open_file(); }
+            images-to-pdf => { root.images_to_pdf(); }
+            merge-open => { root.merge_open(); }
+            book: root.book-mode;
+            book-changed(on) => { root.book_mode_chosen(on); }
+            chrome-hidden: root.chrome-hidden && root.mode == 0;
+            choose-theme(index) => { root.choose_theme(index); }
+            reduce-motion: root.reduce-motion;
+            reduce-motion-changed(on) => { root.set_reduce_motion(on); }
+            about => { root.about-visible = true; }
+            props-open => { root.props_open(); }
+            stamp-open(mode) => { root.stamp_open(mode); }
+            convert-open(mode) => { root.convert_open(mode); }
+            find-open => { root.find_open(); }
+            find-changed(text) => { root.find_changed(text); }
+            find-next => { root.find_next(); }
+            find-previous => { root.find_previous(); }
+            find-close => { root.find_close(); }
+            prev-page => { root.prev_page(); }
+            next-page => { root.next_page(); }
+            go-to-page(text) => { root.go_to_page(text); }
+            zoom-in => { root.zoom_in(); }
+            zoom-out => { root.zoom_out(); }
+            fit-width => { root.fit_width(); }
+            fit-page => { root.fit_page(); }
+            select-tab(index) => { root.select-tab(index); }
+            doc-held(index, y) => {
+                root.tab_drag(index);
+                mgallery.hold-doc(root.tabs[index].title, y - mgallery.absolute-position.y);
+            }
+            doc-moved(y) => { mgallery.move-doc(y - mgallery.absolute-position.y); }
+            doc-let-go => {
+                let at = mgallery.drop-doc();
+                if (at >= 0) {
+                    root.gallery_dropped(at);
+                }
+                root.tab_drag(-1);
+            }
+            close-tab(index) => { root.close-tab(index); }
+            thumb-clicked(index) => { root.thumb_clicked(index, false, false); }
+            thumbs-moved => { root.thumbs_moved(); }
+            outline-clicked(index) => { root.outline_clicked(index); }
+            outline-toggled(index) => { root.outline_toggled(index); }
+        }
+
+
+        // A message (Plan 0007 Phase 5): what `platform::MessageDialog` shows on the desktop, in
+        // the window's own style. Its level (0 information, 1 warning, 2 error), its buttons
+        // (0 OK, 1 Yes and No, 2 Yes, No and Cancel); the answer is 0 yes or OK, 1 no, 2 cancel.
+        if root.message-visible : Dialog {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            z: 2;
+            title: root.message-level == 2 ? "Error" : root.message-level == 1 ? "Warning" : "PODEFA";
+            card-width: 400px;
+            closed => { root.message_answered(root.message-buttons == 0 ? 0 : 2); }
+            VerticalLayout {
+                padding: 16px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        alignment: start;
+                        Image {
+                            width: 20px;
+                            height: 20px;
+                            source: root.message-level == 2 ? @image-url("icons/circle-x.svg")
+                                : root.message-level == 1 ? @image-url("icons/triangle-alert.svg")
+                                : @image-url("icons/circle-alert.svg");
+                            colorize: root.message-level == 2 ? Theme.danger
+                                : root.message-level == 1 ? Theme.highlight-ink : Theme.text-muted;
+                        }
+                    }
+                    Text {
+                        text: root.message-text;
+                        wrap: word-wrap;
+                        font-size: 13px;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    if root.message-buttons == 2 : DialogButton {
+                        text: "Cancel";
+                        clicked => { root.message_answered(2); }
+                    }
+                    if root.message-buttons >= 1 : DialogButton {
+                        text: "No";
+                        clicked => { root.message_answered(1); }
+                    }
+                    DialogButton {
+                        text: root.message-buttons == 0 ? "OK" : "Yes";
+                        primary: true;
+                        min-width: 72px;
+                        init => { self.focus(); }
+                        clicked => { root.message_answered(0); }
+                    }
+                }
+            }
+        }
+
+        // About PODEFA (the brand menu).
+        if root.about-visible : Dialog {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            z: 2;
+            title: "About";
+            card-width: 340px;
+            closed => { root.about-visible = false; }
+            VerticalLayout {
+                padding: 20px;
+                padding-bottom: 16px;
+                spacing: 6px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 10px;
+                        background: Theme.text;
+                        Text {
+                            text: "P";
+                            color: Theme.surface;
+                            font-size: 22px;
+                            font-weight: 900;
+                        }
+                    }
+                }
+                Rectangle { height: 4px; }
+                Text {
+                    text: "PODEFA";
+                    font-size: 15px;
+                    font-weight: 700;
+                    letter-spacing: 0.4px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Version " + root.app-version;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                Rectangle { height: 6px; }
+                Text {
+                    text: "A light, open-source PDF viewer and editor: read, mark up, organize pages, fill forms.";
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Free software under the GNU AGPL 3.0 or later. Built with Slint and MuPDF.";
+                    wrap: word-wrap;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            HorizontalLayout {
+                padding: 10px;
+                padding-left: 16px;
+                Text {
+                    text: "© 2026 FINE Association";
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                DialogButton {
+                    text: "OK";
+                    primary: true;
+                    min-width: 72px;
+                    init => { self.focus(); }
+                    clicked => { root.about-visible = false; }
+                }
+            }
+        }
+
+        // A document that needs a password (Plan 0007 Phase 5): its name, the password, and what
+        // the last try said. A wrong password shakes the lock (unless motion is reduced).
+        if root.password-visible : Dialog {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            z: 2;
+            title: "Protected Document";
+            card-width: 340px;
+            closed => { root.password_cancel(); }
+            property <bool> show: false;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 56px;
+                        height: 56px;
+                        lock := Image {
+                            property <length> dx: 0px;
+                            x: (parent.width - self.width) / 2 + self.dx;
+                            width: 40px;
+                            height: 40px;
+                            source: root.password-busy ? @image-url("icons/lock-open.svg") : @image-url("icons/lock.svg");
+                            colorize: root.password-wrong ? Theme.danger : Theme.text;
+                        }
+                        // The shake: six steps of 40 ms, each tries' count starting one.
+                        shake := Timer {
+                            property <int> step: 0;
+                            interval: 40ms;
+                            running: false;
+                            triggered => {
+                                self.step += 1;
+                                lock.dx = self.step >= 6 ? 0px : (Math.mod(self.step, 2) == 0 ? 6px : -6px);
+                                if (self.step >= 6) {
+                                    self.running = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: root.password-file;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.password-wrong ? "That password is not right. Try again."
+                        : "This document is protected. Type its password to open it.";
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: root.password-wrong ? Theme.danger : Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    spacing: 4px;
+                    password-field := Field {
+                        horizontal-stretch: 1;
+                        input-type: show ? InputType.text : InputType.password;
+                        placeholder-text: "Password";
+                        enabled: !root.password-busy;
+                        init => { self.focus(); }
+                        accepted(text) => { root.password_submit(text); }
+                    }
+                    IconButton {
+                        y: (parent.height - self.height) / 2;
+                        icon: show ? @image-url("icons/eye-off.svg") : @image-url("icons/eye.svg");
+                        tip: show ? "Hide the password" : "Show the password";
+                        checked: show;
+                        clicked => { show = !show; }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    DialogButton {
+                        horizontal-stretch: 1;
+                        text: "Cancel";
+                        clicked => { root.password_cancel(); }
+                    }
+                    DialogButton {
+                        horizontal-stretch: 1;
+                        text: root.password-busy ? "Opening..." : "Unlock";
+                        icon: root.password-busy ? @image-url("") : @image-url("icons/arrow-right.svg");
+                        primary: true;
+                        enabled: !root.password-busy;
+                        clicked => { root.password_submit(password-field.text); }
+                    }
+                }
+            }
+            property <int> tries: root.password-tries;
+            changed tries => {
+                if (!Theme.reduce-motion && self.tries > 0) {
+                    shake.step = 0;
+                    shake.running = true;
+                }
+                password-field.select-all();
+            }
+        }
+
+        // The window's edge while it is not maximized: a frameless window has no system border.
+        if root.own-frame && !root.maximized : Rectangle {
+            width: 100%;
+            height: 100%;
+            border-width: 1px;
+            border-color: Theme.window-edge;
+        }
+    }
+}

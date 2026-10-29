@@ -5,7 +5,9 @@
 //!
 //! `bench_full_page_render` reproduces the per-zoom-click cost of the **old** full-page rasterizer:
 //! for a given PDF it renders the same page at several zoom scales and reports wall-clock time and
-//! the size of the RGBA8 buffer the engine returns to the UI. It is kept as the "before" column.
+//! the size of the buffer the engine returns to the UI. It is kept as the "before" column, so its
+//! analytical table still uses the old RGBA8 basis (`bytes_for`) even though the engine now
+//! rasterizes RGB8; the measured column is whatever the engine returns today.
 //!
 //! `bench_tiled_zoom` measures the **Phase 1** path: for each zoom step it renders only the tiles a
 //! 900x700 viewport needs, reusing the engine's display list and scratch raster, and reports the
@@ -34,6 +36,8 @@ fn fixture_path(name: &str) -> PathBuf {
 fn bytes_for(size: pdf_core::Rect, scale: f32) -> u64 {
     let w = (size.width * scale).ceil() as u64;
     let h = (size.height * scale).ceil() as u64;
+    // The old full-page path's buffer, RGBA8: this is the "before" figure the plan quotes, so it
+    // stays at four bytes even though the engine's own rasters are three now.
     w * h * 4
 }
 
@@ -68,7 +72,7 @@ fn bench_full_page_render() {
     );
     println!(
         "{:>6}  {:>11}  {:>10}  {:>10}  {:>10}",
-        "scale", "pixels", "RGBA8", "cold", "warm"
+        "scale", "pixels", "bytes", "cold", "warm"
     );
 
     for scale in scales {
@@ -102,7 +106,9 @@ fn bench_full_page_render() {
         );
     }
 
-    println!("\nAnalytical full-page cost (RGBA8, one buffer, and 2x for pixmap + UI copy):");
+    println!(
+        "\nAnalytical full-page cost (the old RGBA8 path, one buffer, and 2x for pixmap + UI copy):"
+    );
     for scale in [1.0_f32, 4.0, 10.0, 64.0] {
         let mb = bytes_for(size, scale) as f64 / (1024.0 * 1024.0);
         println!(
