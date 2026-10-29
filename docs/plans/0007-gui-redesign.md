@@ -7,9 +7,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 4 (tabs) passed its gate on 2026-10-26; Phase 5 not started.** Row AU passed: 10 tabs of
-`large_200p.pdf` hold 157.4-158.2 MiB against ceilings of 175.4-216.1 MiB, 4 tabs peak at
-152.7-155.5 MiB (§5, Phase 4 results).
+**Phase 5 (dialogs, password, About, reduce motion) is implemented and at its gate
+(2026-10-29).** Rows AW and AX pass; row AQ fails by 0.30 MiB, from Plan 0008's mobile shell, not
+from this phase (§5, Phase 5 results); the maintainer's review of both themes is open.
 
 - Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
 - Phase 1 (`.slint` files, `slint-build`, the `Theme` global): passed its gate on 2026-10-25.
@@ -18,7 +18,8 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
   review fixes (§5, Phase 3 results, "Second review").
 - Phase 4 (tabs, ADR 0011): passed its gate on 2026-10-26; results in §5 and
   `docs/benchmarks.md` §13.5.
-- Phase 5: not started.
+- Phase 5 (dialogs, password, About, reduce motion): implemented and at its gate (2026-10-29);
+  results in §5 and `docs/benchmarks.md` §13.6.
 
 Started 2026-10-25 on the maintainer's decision to put the GUI before the remaining roadmap
 ("Gelecek planları erteliyoruz. Sırada GUI güncellemesi var"; v0.5 Secure and later wait). Plan
@@ -520,6 +521,74 @@ gallery page dropped on another tab (copied to its end, that tab marked unsaved,
 enabled); a page dropped on + (a new tab with that page); Split at the gap after page 1 of
 `large_200p.pdf` (a new tab `large_200p_2-200` with 199 pages and their thumbnails; the source
 left with page 1, both unsaved, no error on switching back); Ctrl+Tab; Ctrl+W on an unchanged tab.
+
+### Phase 5 results (2026-10-29)
+
+- **Files:** `crates/app/src/dialogs.rs` (new: the message box queue, About, the password
+  dialog, the reduce-motion setting); `DialogButton`, `DialogSurface` and `Dialog` in
+  `widgets.slint`; the three dialogs and the restyled tools' dialogs in `main.slint`; the brand
+  menu's rows in `title.slint` and the More menu's in `mobile/shell.slint`;
+  `platform::set_message_presenter`; `EngineEvent::NeedsPassword`; `tools::unlock`;
+  `Settings::reduce_motion`; eight Lucide icons (eye, eye-off, arrow-right, lock, lock-open,
+  circle-alert, triangle-alert, circle-x); `crates/app/tests/theme_test.rs`.
+- **Message boxes:** `MessageDialog::show` goes to a presenter when one is set. On the desktop
+  `dialogs::wire` sets one that shows the box in the window over a scrim (title by level, its
+  icon, the buttons right-aligned, the primary focused, Escape answers Cancel or OK); a box asked
+  for while one is shown waits in a queue. Android keeps its native dialogs.
+- **The tools' dialogs** (Merge, Split, Watermark, Page Numbers, Convert, Properties) are
+  `DialogSurface` cards with `DialogButton`s, centred over a scrim on the desktop and as tall as
+  their content; Crop stays at the canvas's top, since its box is drawn on the page. On the phone
+  they stay sheets.
+- **Password:** opening a protected document made the engine report an error before; now
+  `MupdfError::PasswordRequired` and `InvalidPassword` become `NeedsPassword { wrong }`, and the
+  app shows the dialog (the file's name, the field with a show/hide button, Cancel and Unlock).
+  Unlock sends `Open` again with the password; a wrong one turns the lock and the text red and
+  shakes the lock (6 x 40 ms, not with reduce motion); Cancel keeps the document before. The
+  engine keeps the password, and the tool thread authenticates its own copy of the document with
+  it (`tools::unlock`), so Extract, Split, Compress and the others work on it.
+  `tools_test.rs::a_protected_document_asks_for_its_password_and_its_tools_read_it` (AES-256)
+  checks no password, a wrong one, the right one, and an extract before and after an unsaved
+  change; with `unlock` removed it fails.
+- **About:** the brand menu's last row on the desktop, the More menu's on the phone: the name,
+  the version from Cargo, one line on what it does, the licence, the copyright.
+- **Reduce motion:** a checkable row in the same menus, kept as `reduce_motion` in the settings
+  (written only when on). Every duration in the `Theme` global (`motion`, `pour`, `pour-step`, and
+  the new `quick` 150 ms and `fade` 120 ms that replace the literal durations) is
+  `reduce-motion ? 0ms : ...`; the mode change's Rust-side motion and book mode's page turn take 0
+  ms too.
+
+| Row | Result | Pass |
+| :--- | :--- | :--- |
+| AW | `theme_test.rs` reads the tokens of both themes from `theme.slint` and checks `text`, `text-muted`, `text-faint` and `danger` on `shell`, `canvas`, `surface` and `hover`, and `text` on `active`: every pair at least 4.5:1. Before the change `text-faint` (#71717a dark, #a1a1aa light) failed everywhere, 2.49-3.81:1 in dark and 2.22-2.56:1 in light, and dark `danger` (#f87171) on `hover` was 4.34:1; now `text-faint` is #9e9ea6 / #6b6b73 (lowest 4.52:1, dark on `hover`) and dark `danger` #f97a7a (4.63:1 on `hover`) | yes |
+| AX | `theme_test.rs` checks that every `animate` duration and delay in `crates/app/ui` is a `Theme` token and that every duration token is `reduce-motion ? 0ms`. `--bench-modes 1` on `large_200p.pdf`, 6 changes: 21 frames with reduce motion on against 289 off, worst frame 12.9 ms and 16.1 ms, 0 tiles | yes |
+
+The other rows, release build, run alternately with the binary of the commit before (`95d26ad`,
+Plan 0008 closed) in the same session:
+
+| Row | `95d26ad` | Phase 5 | Pass |
+| :--- | :--- | :--- | :--- |
+| AQ `app.exe` | 20,688,896 bytes | 20,805,120 bytes: +113.5 KiB for this phase, +1.80 MiB over the 18,919,936-byte baseline | **no** (<= +1.5 MiB): see below |
+| AR `t_first_page`, median of 5, two batches | 741 ms, 945 ms | 724 ms, 859 ms | not slower than `95d26ad`; both over the Phase 1 baseline +10% this session (the machine was busy: the same binary ranged 672-1677 ms) |
+| AS idle frames in 5 s | 0 in 5 of 5 | 0 in 6 of 6 | yes |
+| AT `--bench-modes 2`, 0 tiles | 0 in 24 changes | 0 in 36 changes | yes |
+| AT first entry into Tools | 19.5, 19.8 ms | 19.1, 20.4 ms | as before: over the budget on the first change only |
+| AU `--bench-tabs 4` | | `ws_4` 147.7 MiB under a 169.1 MiB ceiling, `peak_ws` 153.6 MiB | yes |
+
+`--bench-pages` 14 of 14 on 200 pages. `cargo test --workspace` 241 passed; fmt and clippy
+clean; `cargo deny check advisories` clean after `pulldown-cmark` 0.13.5 (RUSTSEC-2026-0414, a
+Slint dependency; it failed CI on Ubuntu). The phone was not used: the library suite on Android
+and the More menu's new rows were not checked there.
+
+**Row AQ fails, and not because of this phase.** The binary grew 1.69 MiB between Phase 4 and
+`95d26ad`: Plan 0008 compiles the phone's shell and gallery (`ui/mobile/*.slint`) into the desktop
+binary too, since `--mobile` shows them there, and added book mode. Options for the review: (a)
+build the mobile shell into the desktop binary only behind a Cargo feature (`--mobile` then needs
+it), which should bring AQ back under the limit (not measured); (b) accept the row's FAIL as
+documented, as with Plan 0002's row B; (c) raise the row's limit, since it was set before the
+phone's shell existed.
+
+With `text-faint` raised, dark's `text-faint` (#9e9ea6) sits next to `text-muted` (#a1a1aa):
+the two steps differ little in dark now. That is the cost of AA on `hover`; the review decides.
 
 ## 6. Acceptance and benchmarks
 

@@ -1648,6 +1648,31 @@ under ceilings of 175.4-216.1 MiB, 2.0-2.1 MiB per extra tab on average. `t_open
 tabs 2 to N, `t_switch` 19-21 ms. Row AU passes in 6 of 6 runs; the table and the other rows are
 in the plan's §5, Phase 4 results.
 
+### 13.6 Phase 5: contrast and reduce motion (rows AW, AX)
+
+Metrics:
+
+- **Contrast (row AW):** WCAG 2.x contrast ratio, `(L1 + 0.05) / (L2 + 0.05)` from the sRGB
+  relative luminance of the two colours, computed by `crates/app/tests/theme_test.rs` from the
+  token values in `crates/app/ui/theme.slint` (both branches of each `dark ? ... : ...`). Pairs:
+  `text`, `text-muted`, `text-faint` and `danger` on `shell`, `canvas`, `surface` and `hover`, and
+  `text` on `active`. Passes when every pair is at least 4.5:1.
+- **Reduce motion (row AX):** the same test checks that every `animate` duration and delay in
+  `crates/app/ui` names a `Theme` token and that every duration token reads
+  `reduce-motion ? 0ms : ...`. On a real window, `--bench-modes` counts the frames a mode change
+  draws (§13.4): with the setting on (`reduce_motion=true` in the settings file) a change draws
+  only the frames of its new layout.
+
+```
+cargo test -p app --test theme_test
+target\release\app.exe crates\engine-mupdf\tests\fixtures\large_200p.pdf --bench-modes 1
+```
+
+Release build, the §1 machine, 2026-10-29: the test passes (lowest pair 4.52:1, dark
+`text-faint` on `hover`; before the token change `text-faint` was 2.22-3.81:1). `--bench-modes 1`,
+6 changes, 0 tiles: 21 frames with reduce motion on, worst 12.9 ms; 289 frames with it off, worst
+16.1 ms. The other rows are in the plan's §5, Phase 5 results.
+
 ## 14. Plan 0008: the phone
 
 The maintainer's phone: Samsung Galaxy A34 (SM-A346E), Android 16, 1080 x 2340 at 450 dpi,

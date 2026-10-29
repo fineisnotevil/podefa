@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Dialogs in the window's style** (Plan 0007 Phase 5): on the desktop, message boxes (unsaved
+  changes, errors) show inside the window over a scrim, one at a time, instead of the system's;
+  the tools' dialogs (Merge, Split, Watermark, Page Numbers, Convert, Properties) use the same
+  card, buttons and scrim and sit in the window's middle. Android keeps its own message boxes.
+- **Password-protected documents** open: a dialog asks for the password, says when it was wrong
+  (the lock shakes), and can show what was typed. The tools (Extract, Split, Compress and the
+  others) read a protected document with the same password.
+- **About PODEFA**, in the brand menu on the desktop and the More menu on the phone.
+- **Reduce motion**, in the same menus and kept in the settings (`reduce_motion`): every
+  animation, the mode change and book mode's page turn take 0 ms.
 - **Book mode** (Plan 0008 Phase 5 review), on the desktop and the phone: one page at a time,
   turned sideways. On the phone a finger pulls the page left or right to turn it; on the desktop
   the wheel and Page Up/Down scroll within the page and turn at its ends, and Left/Right turn.
@@ -81,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tab, with no dialog; the new document is saved with Save As.
 
 ### Changed
+- **Contrast** (Plan 0007 Phase 5, row AW): `text-faint` is #6b6b73 in light and #9e9ea6 in
+  dark (it was 2.2-3.8:1), and dark's `danger` #f97a7a, so every text colour reaches 4.5:1 on
+  every surface; a test checks it from the tokens (`crates/app/tests/theme_test.rs`).
 - **Opening a document keeps the one you have open**: it opens in a tab of its own, so opening no
   longer asks to save the shown document first.
 - **The window shares one tile budget and one set of raster workers across its tabs:** only the
