@@ -134,6 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Quit and Ctrl+Q:** the close button and Ctrl+W do the same.
 
 ### Fixed
+- The new-tab button no longer lies over the tab strip, and the gallery's gap pill sits in the
+  gap, not on a card's edge (Plan 0007 Phase 5).
 - **Text fields on the phone** (Search, Watermark, Document Properties and the other sheets): the
   word being composed on the keyboard showed as a selection, so typing and deleting seemed to
   select and break the text. The app's own `Field` draws no selection while a word is composed.

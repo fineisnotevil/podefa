@@ -587,6 +587,10 @@ it), which should bring AQ back under the limit (not measured); (b) accept the r
 documented, as with Plan 0002's row B; (c) raise the row's limit, since it was set before the
 phone's shell existed.
 
+**The two misalignments** noted at Phase 4's gate (§0) are fixed by the maintainer: the tab
+strip's scroll area (`TabStrip`'s `wheel` in `title.slint`) and the gallery's cards (`PageCard` in
+`gallery.slint`) now have `x: 0`, so Slint no longer centres them in their parent (`a307968`).
+
 With `text-faint` raised, dark's `text-faint` (#9e9ea6) sits next to `text-muted` (#a1a1aa):
 the two steps differ little in dark now. That is the cost of AA on `hover`; the review decides.
 
