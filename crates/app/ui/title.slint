@@ -153,6 +153,7 @@ component TabStrip inherits Rectangle {
     changed max-scroll => { root.reveal(); }
 
     wheel := TouchArea {
+        x: 0;
         width: min(root.row-w, root.room);
         scroll-event(event) => {
             root.scroll = max(0px, min(root.max-scroll,

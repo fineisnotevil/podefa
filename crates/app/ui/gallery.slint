@@ -457,6 +457,7 @@ export component Gallery inherits Rectangle {
             property <bool> near: self.x + self.width > root.scroll - GalleryMetrics.pitch
                 && self.x < root.scroll + root.view-w + GalleryMetrics.pitch;
             if slot.near : PageCard {
+                x: 0;
                 y: (parent.height - GalleryMetrics.card-h) / 2;
                 page: row;
                 chosen: row.selected || (root.pages-chosen == 0 && row.current);
