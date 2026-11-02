@@ -76,6 +76,12 @@ jobs:
           cargo test -p engine-mupdf --features docx --test word_test
         shell: bash
 
+      # The phone's shell on the desktop (`--mobile`) is behind the `mobile` feature; without it the
+      # desktop binary carries stubs (crates/app/build.rs). The Android job builds the real one too.
+      - name: Clippy with the mobile feature
+        run: cargo clippy -p app --all-targets --features mobile -- -D warnings
+        shell: bash
+
       - name: Cargo deny check
         if: runner.os == 'Linux'
         uses: EmbarkStudios/cargo-deny-action@v2

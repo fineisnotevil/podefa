@@ -17,6 +17,9 @@ workspace = true
 [features]
 # Export as Word (Plan 0005 Phase 5): off until a writer keeps the layout; see engine-mupdf's feature.
 docx = ["engine-mupdf/docx"]
+# The phone's shell and gallery on the desktop (`--mobile`, Plan 0008). Android always has them;
+# without the feature the desktop binary carries stubs in their place (build.rs, row AQ).
+mobile = []
 
 [build-dependencies]
 slint-build = { workspace = true }

@@ -22,7 +22,7 @@ name = "podefa"
 crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
-app = { path = "../app" }
+app = { path = "../app", features = ["mobile"] }
 slint = { workspace = true, features = ["backend-android-activity-06"] }
 libc = "0.2"
 

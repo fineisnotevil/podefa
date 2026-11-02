@@ -4454,9 +4454,16 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
 
     // `--bench-*` flags script a run; `FA_PDF_TRACE=1` records one by hand. Both are inert
     // otherwise, and neither belongs in CI: every number here is machine-specific.
-    // The mobile shell (Plan 0008): always on a phone, on the desktop with `--mobile`.
-    let mobile = cfg!(target_os = "android") || args.iter().any(|arg| arg == "--mobile");
+    // The mobile shell (Plan 0008): always on a phone, on the desktop with `--mobile` when built
+    // with the `mobile` feature (without it the shell is a stub, build.rs).
+    let asked = args.iter().any(|arg| arg == "--mobile");
     args.retain(|arg| arg != "--mobile");
+    let mobile = cfg!(target_os = "android") || (cfg!(feature = "mobile") && asked);
+    if asked && !mobile {
+        eprintln!(
+            "--mobile needs a build with the `mobile` feature: cargo run -p app --features mobile"
+        );
+    }
     main_window.set_mobile(mobile);
     // `--landscape` (Plan 0008 Phase 5): the screen on its side, for trying the landscape layout
     // by hand; a phone-sized wide window on the desktop.
