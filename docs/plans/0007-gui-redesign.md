@@ -7,10 +7,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
 ## Status
 
-**Phase 5 (dialogs, password, About, reduce motion) is implemented and at its gate
-(2026-10-29).** Rows AW and AX pass; row AQ passes since the phone's markup is behind the `mobile`
-feature on the desktop (the maintainer's choice; §5, Phase 5 results); the maintainer's review of
-both themes is open.
+**Closed (2026-11-02).** Phase 5 passed its gate after the maintainer's review of both themes on
+the phone and one change from it (the phone's history capsule shows from the first change; §5,
+Phase 5 results).
 
 - Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
 - Phase 1 (`.slint` files, `slint-build`, the `Theme` global): passed its gate on 2026-10-25.
@@ -19,8 +18,8 @@ both themes is open.
   review fixes (§5, Phase 3 results, "Second review").
 - Phase 4 (tabs, ADR 0011): passed its gate on 2026-10-26; results in §5 and
   `docs/benchmarks.md` §13.5.
-- Phase 5 (dialogs, password, About, reduce motion): implemented and at its gate (2026-10-29);
-  results in §5 and `docs/benchmarks.md` §13.6.
+- Phase 5 (dialogs, password, About, reduce motion): passed its gate on 2026-11-02; results in
+  §5 and `docs/benchmarks.md` §13.6.
 
 Started 2026-10-25 on the maintainer's decision to put the GUI before the remaining roadmap
 ("Gelecek planları erteliyoruz. Sırada GUI güncellemesi var"; v0.5 Secure and later wait). Plan
@@ -60,6 +59,10 @@ in the concept (its `DESIGN.md`, step 37). The answers to §9:
 and 1. The maintainer noted two misalignments for Phase 5: the new-tab button lay over the tab
 strip (its scroll area had no `x` and was centred in the strip) and the gap pill sat on a card's
 right edge (the cards had no `x` and were centred in their slots).
+
+**Phase 5 passed its gate on 2026-11-02** ("Bu aşama da tamamlandı. Onaylıyorum."), after the
+maintainer approved both themes on the phone and checked the history capsule's change. The plan
+is closed.
 
 ## 1. Goal and scope
 
