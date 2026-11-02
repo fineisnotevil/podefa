@@ -853,3 +853,25 @@ The app's own `Field` (`crates/app/ui/widgets.slint`) makes its selection colour
 while `preedit-text` is not empty, and every line field uses it. The note editor's `TextEdit`
 still shows it. Report it to Slint (a composing word is usually underlined, not selected) and
 drop the workaround once a release fixes it.
+
+## 29. `form_test` crashes now and then on CI's Ubuntu runner
+
+**Labels:** `bug`, `ci`, `engine`
+
+### Problem Statement
+
+`crates/engine-mupdf/tests/form_test.rs` died of SIGSEGV on the Ubuntu runner twice on
+2026-11-02 (at `e7efd43` and `809a049`, the second a change to documents only), with no test
+named before the crash, while the next run of the same code passed. It did not happen in 40 runs
+on Windows, nor in 160 runs on the Debian mini PC (60 one after another, 100 with 14 test
+threads and three cores kept busy). The cause is not known. One candidate, not confirmed: MuPDF
+1.27's `fz_new_base14_font` (`source/fitz/font.c:919-941`) fills the base-14 font cache, which
+cloned contexts share, without a lock; text in a field that its font cannot encode reaches it
+through `fz_encode_character_with_fallback` (`font.c:2206`), and form_test's tests run in
+parallel threads.
+
+### Proposed Solution
+
+CI's test step on Linux now keeps a core file and prints every thread's backtrace when a test
+binary crashes. Read the next one and fix the cause; if it is the base-14 cache, take a lock
+around the first load (or load the 14 fonts once at start) and send the fix upstream.

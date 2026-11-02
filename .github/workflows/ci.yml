@@ -33,7 +33,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang libclang-dev pkg-config libxkbcommon-dev libfontconfig1-dev
+          sudo apt-get install -y build-essential clang libclang-dev pkg-config libxkbcommon-dev libfontconfig1-dev gdb
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -59,13 +59,28 @@ jobs:
       - name: Clippy lints
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # On Linux a test binary that crashes leaves a core file, and its backtraces are printed:
+      # form_test died of SIGSEGV twice on this runner (e7efd43, 809a049) and never elsewhere
+      # (docs/backlog.md item 29).
       - name: Run tests
         run: |
-          if command -v cargo-nextest >/dev/null 2>&1; then
-            cargo nextest run --workspace
-          else
-            cargo test --workspace
+          if [ "$RUNNER_OS" = Linux ]; then
+            ulimit -c unlimited
+            sudo sysctl -q -w kernel.core_pattern=/tmp/core.%E.%p
           fi
+          status=0
+          if command -v cargo-nextest >/dev/null 2>&1; then
+            cargo nextest run --workspace || status=$?
+          else
+            cargo test --workspace || status=$?
+          fi
+          if [ "$status" -ne 0 ] && ls /tmp/core.* >/dev/null 2>&1; then
+            for core in /tmp/core.*; do
+              exe=$(basename "$core" | sed 's/^core\.//; s/\.[0-9]*$//' | tr '!' '/')
+              gdb -batch -ex "thread apply all bt" "$exe" "$core"
+            done
+          fi
+          exit "$status"
         shell: bash
 
       # Export as Word is off by default (the `docx` feature); it is still built and tested here so
