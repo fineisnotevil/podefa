@@ -8,8 +8,9 @@ SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 ## Status
 
 **Phase 5 (dialogs, password, About, reduce motion) is implemented and at its gate
-(2026-10-29).** Rows AW and AX pass; row AQ fails by 0.30 MiB, from Plan 0008's mobile shell, not
-from this phase (§5, Phase 5 results); the maintainer's review of both themes is open.
+(2026-10-29).** Rows AW and AX pass; row AQ passes since the phone's markup is behind the `mobile`
+feature on the desktop (the maintainer's choice; §5, Phase 5 results); the maintainer's review of
+both themes is open.
 
 - Phase 0 (research, the design's cost, this plan): passed its gate on 2026-10-25 (§0).
 - Phase 1 (`.slint` files, `slint-build`, the `Theme` global): passed its gate on 2026-10-25.
@@ -579,13 +580,26 @@ clean; `cargo deny check advisories` clean after `pulldown-cmark` 0.13.5 (RUSTSE
 Slint dependency; it failed CI on Ubuntu). The phone was not used: the library suite on Android
 and the More menu's new rows were not checked there.
 
-**Row AQ fails, and not because of this phase.** The binary grew 1.69 MiB between Phase 4 and
-`95d26ad`: Plan 0008 compiles the phone's shell and gallery (`ui/mobile/*.slint`) into the desktop
-binary too, since `--mobile` shows them there, and added book mode. Options for the review: (a)
-build the mobile shell into the desktop binary only behind a Cargo feature (`--mobile` then needs
-it), which should bring AQ back under the limit (not measured); (b) accept the row's FAIL as
-documented, as with Plan 0002's row B; (c) raise the row's limit, since it was set before the
-phone's shell existed.
+**Row AQ failed, and not because of this phase.** The binary grew 1.69 MiB between Phase 4 and
+`95d26ad`: Plan 0008 compiled the phone's shell and gallery (`ui/mobile/*.slint`) into the desktop
+binary too, since `--mobile` shows them there, and added book mode. The maintainer chose (a) of
+three options (the others: accept the FAIL, raise the limit): the phone's markup is built into the
+desktop binary only with the new `mobile` feature of `app`. `crates/app/build.rs` imports it
+through the `@mobile` library path, which points at `ui/mobile` on Android or with the feature,
+and otherwise at stubs it writes from those files: their exported globals, and components with
+the same properties, callbacks and public functions but nothing inside, so `main.slint` is
+unchanged. Without the feature `--mobile` says it needs it and is ignored. `podefa-android` asks
+for the feature (and the build script takes Android's real files anyway); CI runs clippy with it.
+
+| Row | Phase 5 at the gate | With the `mobile` feature off | Pass |
+| :--- | :--- | :--- | :--- |
+| AQ `app.exe` | 20,805,120 bytes | 19,920,896 bytes: -863.5 KiB, +0.95 MiB over the baseline | yes |
+| AR `t_first_page`, median of 5 | 724 ms, 859 ms | 767 ms | as before (a busy machine, see above) |
+| AS idle frames in 5 s | 0 | 0 in 5 of 5 | yes |
+| AT `--bench-modes 2` | 0 tiles; first into Tools 19.1, 20.4 ms | 0 tiles in 24 changes; first into Tools 17.5, 19.4 ms | as before |
+
+`cargo test --workspace` 241 passed, `cargo test -p app --features mobile` 24 passed; clippy clean
+with and without the feature.
 
 **The two misalignments** noted at Phase 4's gate (§0) are fixed by the maintainer: the tab
 strip's scroll area (`TabStrip`'s `wheel` in `title.slint`) and the gallery's cards (`PageCard` in

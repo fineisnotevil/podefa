@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tab, with no dialog; the new document is saved with Save As.
 
 ### Changed
+- **The phone's shell on the desktop** (`--mobile`) needs a build with the `app` crate's `mobile`
+  feature (`cargo run -p app --features mobile -- --mobile`); without it the desktop binary
+  carries stubs in its place, 863.5 KiB smaller (Plan 0007 Phase 5, row AQ). Android is unchanged.
 - **Contrast** (Plan 0007 Phase 5, row AW): `text-faint` is #6b6b73 in light and #9e9ea6 in
   dark (it was 2.2-3.8:1), and dark's `danger` #f97a7a, so every text colour reaches 4.5:1 on
   every surface; a test checks it from the tokens (`crates/app/tests/theme_test.rs`).
