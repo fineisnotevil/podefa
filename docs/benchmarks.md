@@ -1866,3 +1866,52 @@ gaps of 17-18 ms. One Undo from the More menu removed exactly the last of five s
 
 While the keyboard slides in, each frame changes the document's bottom inset and lays it out
 again: 4-26 us each (`reanchor` lines), about 20 times.
+
+## 15. Plan 0009: v0.5 secure
+
+### 15.1 Phase 0: redaction and encryption through mupdf-rs 0.8
+
+`crates/engine-mupdf/tests/secure_bench.rs` (ignored), release build, 2026-11-03, the §1 machine.
+
+```powershell
+cargo test --release -p engine-mupdf --test secure_bench -- --ignored --nocapture --test-threads 1
+```
+
+**Redaction.** A generated page has a public line and a secret one (`SECRET-42`), and the secret
+also sits in a highlight over that line, a note and a free-text annotation beside it, a link over
+it, the outline and the document's title: 7 copies in the file's bytes, all uncompressed so the
+saved bytes can be searched. One redaction annotation covers the secret line and is applied with
+`PdfPage::redact_with_options`, with MuPDF's defaults and with mupdf-rs' `pymupdf_default`
+(both gave the same result here).
+
+| Step | Result |
+| :--- | :--- |
+| Apply the redaction | 0.26-0.32 ms. The secret is gone from the page's text and the public line stays; the link over it is gone |
+| What stays in the open document | The highlight over the line (with its comment), the note and the free text beside it, the title, the outline entry |
+| Incremental save | **Accepted by MuPDF, and all 7 copies are still in the file**: the original bytes are kept and the redaction is only appended. The app's Save in place checks `can_be_saved_incrementally` first, which is false after a redaction, and asks for Save As (`crates/engine-mupdf/src/lib.rs:1004`) |
+| Full save without garbage collection (what the app's Save As does, `lib.rs:1029`) | **7 copies**: the old content stream is written although nothing refers to it |
+| Full save with garbage collection (level 4) | 5 copies: the 2 in the page content and the link are gone; the highlight, note, free text, outline and title keep theirs. Reopened, the page's text has no secret |
+| Undo of the redaction, no save before it | Text, link and the redaction annotation are back; redo removes them again |
+| Undo after a garbage-collecting save of the same document | The page is broken (no text at all, two annotations of unknown type), as Plan 0005 §3.4 found for any such save |
+
+**Encryption.** `large_200p.pdf` (200 pages, 24 KB) saved with a user password and an owner
+password, both with Turkish letters, and print-only permissions. Two runs each:
+
+| Method | Save | Reopen, a wrong and the right password | File |
+| :--- | ---: | ---: | ---: |
+| AES-256 | 11.8 / 12.4 ms | 54.2 / 52.5 ms | 22,980 B |
+| AES-128 | 1.0 / 1.2 ms | 9.5 / 8.3 ms | 22,738 B |
+| RC4-128 | 1.2 / 1.1 ms | 8.6 / 9.6 ms | 22,641 B |
+
+- The wrong password is refused and the user and owner passwords are both accepted, with all
+  three methods.
+- An annotation added after opening with the user password and saved incrementally (0.3-0.5 ms)
+  keeps the encryption; the file still asks for the password and has the note.
+- Opened with the user password only, the document saved with `Encryption::None` opens with no
+  password: MuPDF does not stop a user-password holder from removing the encryption.
+- `PdfDocument::permissions` reported 3900 (every permission) for both passwords although the
+  file allows printing only. mupdf-rs reads MuPDF's value with `Permission::from_bits`, which
+  fails on the reserved bits a real `/P` has set and falls back to `Permission::all()`
+  (`patches/mupdf/src/pdf/document.rs:841-844`).
+- The cost of AES-256 is its key derivation (once per save and per password tried), not the
+  streams: the file is small. A large file's stream encryption is measured in Phase 2.

@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `docs/plans/0009-v0.5-secure.md`: Phase 0 of the v0.5 Secure plan, at its gate - redaction,
+  encryption and permissions, verifying and making digital signatures, with what MuPDF and
+  mupdf-rs 0.8 offer verified in source, four phases with acceptance rows, and eight questions for
+  the approver. No feature code. `crates/engine-mupdf/tests/secure_bench.rs` (ignored) and
+  `docs/benchmarks.md` §15 measure redaction and encryption; they show that a redacted document
+  written by a save without garbage collection, as Save As writes today, still holds the removed
+  text, and that mupdf-rs reports every permission for any encrypted document.
 - **Dialogs in the window's style** (Plan 0007 Phase 5): on the desktop, message boxes (unsaved
   changes, errors) show inside the window over a scrim, one at a time, instead of the system's;
   the tools' dialogs (Merge, Split, Watermark, Page Numbers, Convert, Properties) use the same
