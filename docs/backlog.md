@@ -875,3 +875,50 @@ parallel threads.
 CI's test step on Linux now keeps a core file and prints every thread's backtrace when a test
 binary crashes. Read the next one and fix the cause; if it is the base-14 cache, take a lock
 around the first load (or load the 14 fonts once at start) and send the fix upstream.
+
+## 30. Markdown notes stored inside the PDF
+
+**Labels:** `feature`, `engine`, `research`
+
+### Problem Statement
+
+The maintainer asked (2026-11-02) about Markdown notes in the style of Obsidian or Notion: blocks
+drawn on a page at given coordinates, and notes outside the page. The question was whether to
+keep them in the PDF or in a new container (`.md` plus `.pdf`); the research below looked at the
+PDF. It was read from MuPDF 1.27's source and from other readers' documentation; no prototype was
+built and no other reader was tried.
+
+- **FreeText does not work.** MuPDF regenerates the appearance of a dirty annotation (moved or
+  edited) as plain text (`pdf-appearance.c:3700-3735`), and `pdf_set_annot_contents` removes
+  `/RC` (`pdf-annot.c:1378`). Stamps with a non-standard `/Name` and an `/AP` are kept, only moved
+  (`pdf-appearance.c:3723-3735`): a block is a Stamp such as `/Name /PODEFA.Markdown`, with its
+  Markdown source in the annotation's dictionary and an appearance the app draws.
+- **Drawing needs C wrappers.** MuPDF's Story (HTML to a display list, the `html` feature is on)
+  and `pdf_set_annot_appearance_from_display_list` (`annot.h:998`) have no mupdf-rs 0.8 wrapper;
+  both need `fz_try` shims like `patches/mupdf/journal/tools.c`. Path: `pulldown-cmark` to HTML,
+  Story to a display list, the list as the Stamp's appearance.
+- **Fonts.** Only URW's base-14 fonts are compiled in (mupdf-sys `build.rs:431-434`). They hold
+  Turkish letters and are embedded as CID fonts, but this is to be checked, and embedding adds
+  size.
+- **Notes off the page** go in the document's `/EmbeddedFiles` name tree; other readers do not
+  show annotations outside the page. MuPDF 1.27 has no helper for the tree, only
+  `pdf_add_embedded_file` (`annot.h:961`).
+- **Page grafts copy 9 keys** (`pdf-graft.c:235-245`): `/PieceInfo` is lost on Split, Extract,
+  Insert from File, Duplicate and tab drags. Data must live in annotations, which
+  `edit::copy_annotations` copies whole; document-level attachments need their own copy in
+  Split, Extract and Merge.
+- **The app's other tools are safe:** Flatten Form bakes widgets only (`form.rs:726`), saves keep
+  reachable objects, undo comes from the journal.
+- **v0.5 Secure:** redaction must clean the notes too; adding notes to a signed document can break
+  the signature by its DocMDP level, so only incremental saves.
+- **Other readers (not tried):** macOS Preview is reported to rewrite files and break annotation
+  appearances; Acrobat's Sanitize and Remove Hidden Information delete attachments, comments and
+  other applications' data on purpose. PDF/A-1 allows no attachments and PDF/A-2 only PDF/A ones,
+  so an `.md` attachment breaks those claims.
+
+### Proposed Solution
+
+A plan of its own, after the roadmap's current releases, whose Phase 0 builds a prototype: a
+Stamp with a Markdown appearance drawn by Story (Turkish text, file size), moved and edited in
+the app, then saved in Preview and Acrobat to see what survives; and the `/EmbeddedFiles` tree
+carried through Split, Extract and Merge, with a PDF/A check.
