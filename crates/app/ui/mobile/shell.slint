@@ -266,8 +266,9 @@ export component MobileShell inherits Rectangle {
     out property <length> header-bottom: header.y + header.height;
     out property <length> dock-top: dock.y;
     // The bottom of the islands under the header (the search bar and the history capsule): the
-    // Tools column starts under them.
-    out property <length> chrome-bottom: max(capsule.y + capsule.height, search-bar.y + search-bar.height);
+    // Tools column starts under them. The capsule's room is kept while it is hidden, so the column
+    // does not jump when the first change shows it.
+    out property <length> chrome-bottom: max(capsule.y + (root.has-doc ? 52px : 0px), search-bar.y + search-bar.height);
     // The header and the dock lie inside the safe area (row MK, `--bench-rotate`).
     out property <bool> in-safe-area: header.x >= root.safe-left && header.y >= root.safe-top
         && header.x + header.width <= root.width - root.safe-right
@@ -563,16 +564,21 @@ export component MobileShell inherits Rectangle {
     }
 
     // The history capsule under the header's right end (the concept's MobileHeader): Undo, Save,
-    // Save As and Redo. Its edge turns amber while there are unsaved changes.
+    // Save As and Redo. It appears with the document's first change (the maintainer's review of
+    // Plan 0007 Phase 5) and stays while there is something to undo, redo or save. Its edge turns
+    // amber while there are unsaved changes.
+    property <bool> history-shown: root.has-doc && (root.dirty || root.can-undo || root.can-redo);
+    property <float> history-in: root.history-shown ? 1 : 0;
+    animate history-in { duration: Theme.quick; easing: ease-out; }
     capsule := Island {
         width: history.preferred-width;
-        height: root.has-doc ? 52px : 0px;
+        height: root.history-shown ? 52px : 0px;
         x: root.left + root.span - self.width;
         y: search-bar.y + search-bar.height + (root.find-visible ? root.edge : 0px);
         border-radius: 26px;
         border-color: root.dirty && root.editable ? #f59e0b99 : Theme.island-line;
-        opacity: root.chrome;
-        visible: root.has-doc && self.opacity > 0.01;
+        opacity: root.chrome * root.history-in;
+        visible: root.history-shown && self.opacity > 0.01;
         history := HorizontalLayout {
             padding: 4px;
             TouchButton {

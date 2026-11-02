@@ -605,6 +605,12 @@ with and without the feature.
 strip's scroll area (`TabStrip`'s `wheel` in `title.slint`) and the gallery's cards (`PageCard` in
 `gallery.slint`) now have `x: 0`, so Slint no longer centres them in their parent (`a307968`).
 
+**The maintainer's review on the phone** (2026-11-02) approved both themes ("Temalar onaylandı")
+and asked for one change: the history capsule (Undo, Save, Save As, Redo) should not show until
+a change is made. `shell.slint` now shows it while `dirty || can-undo || can-redo` and fades it
+in over `Theme.quick` (0 ms with reduce motion); `chrome-bottom` keeps its 52 px, so Tools'
+column does not move when it appears.
+
 With `text-faint` raised, dark's `text-faint` (#9e9ea6) sits next to `text-muted` (#a1a1aa):
 the two steps differ little in dark now. That is the cost of AA on `hover`; the review decides.
 

@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tab, with no dialog; the new document is saved with Save As.
 
 ### Changed
+- **The phone's history capsule** (Undo, Save, Save As, Redo) stays hidden until the document's
+  first change and fades in with it; it stays while there is something to undo, redo or save.
+  Tools' column keeps the capsule's room, so it does not jump (Plan 0007 Phase 5 review).
 - **The phone's shell on the desktop** (`--mobile`) needs a build with the `app` crate's `mobile`
   feature (`cargo run -p app --features mobile -- --mobile`); without it the desktop binary
   carries stubs in its place, 863.5 KiB smaller (Plan 0007 Phase 5, row AQ). Android is unchanged.
