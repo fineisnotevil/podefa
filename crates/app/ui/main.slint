@@ -276,6 +276,8 @@ export component MainWindow inherits Window {
     in-out property <bool> crop-visible: false;
     in-out property <string> crop-size: "";
     out property <color> crop-colour: Theme.accent;
+    // The Redact tool's panel (Plan 0009 Phase 1): whether Apply removes the hidden information too.
+    in-out property <bool> redact-clean: true;
     // Where the thumbnail list is in the window, for the bench harness's drags.
     in-out property <length> thumb-list-x: 0px;
     in-out property <length> thumb-list-y: 0px;
@@ -453,6 +455,9 @@ export component MainWindow inherits Window {
     callback crop_tool();
     callback crop_apply(bool);
     callback crop_cancel();
+    callback redact_tool();
+    callback redact_search();
+    callback redact_apply();
     callback props_save();
     callback props_close();
     callback cancel_tool();
@@ -742,7 +747,7 @@ export component MainWindow inherits Window {
                                         }
                                         return reject;
                                     }
-                                    mouse-cursor: root.tool == 5 || root.tool == 6 || root.tool == 7 ? MouseCursor.crosshair
+                                    mouse-cursor: root.tool >= 5 && root.tool <= 8 ? MouseCursor.crosshair
                                         : root.field-cursor == 1 ? MouseCursor.text
                                         : root.field-cursor == 2 ? MouseCursor.pointer
                                         : root.text-cursor ? MouseCursor.text : MouseCursor.default;
@@ -1727,6 +1732,74 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // Redact (Plan 0009 Phase 1): while the tool is on, its marks are drawn on the pages;
+            // Apply removes what is under them into a new file.
+            if root.tool == 8 && !root.crop-visible : FocusScope {
+                x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
+                y: root.mobile ? root.sheet-bottom - self.height : 16px;
+                width: root.mobile ? root.sheet-w : min(parent.width - 32px, 460px);
+                height: root.mobile ? min(root.sheet-room, sheet-redact.preferred-height) : sheet-redact.preferred-height;
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.choose_tool(0);
+                        return accept;
+                    }
+                    return reject;
+                }
+                DialogSurface {
+                    border-radius: root.mobile ? 20px : Theme.radius-island;
+                    sheet-redact-scroll := Flickable {
+                        interactive: root.mobile;
+                        content-width: self.width;
+                        content-height: sheet-redact.height;
+                        sheet-redact := VerticalLayout {
+                            width: sheet-redact-scroll.width;
+                            height: max(sheet-redact-scroll.height, self.min-height);
+                            padding: root.mobile ? 16px : 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Redact";
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            Text {
+                                text: "Drag over what to remove, or mark what Find found. Apply removes the text, images and drawing under the marks into a new file; the original stays as it is.";
+                                wrap: word-wrap;
+                                font-size: 12px;
+                                color: Theme.text-muted;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                DialogButton {
+                                    text: "Remove hidden information";
+                                    checkable: true;
+                                    checked: root.redact-clean;
+                                    icon: root.redact-clean ? @image-url("icons/check.svg") : @image-url("");
+                                    clicked => { root.redact-clean = !root.redact-clean; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: root.button-h;
+                                Rectangle { horizontal-stretch: 1; }
+                                DialogButton {
+                                    text: "Mark Search Results";
+                                    enabled: root.find-counter != "";
+                                    clicked => { root.redact_search(); }
+                                }
+                                DialogButton {
+                                    text: "Apply...";
+                                    primary: true;
+                                    clicked => { root.redact_apply(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if root.props-visible : FocusScope {
                 x: root.mobile ? root.sheet-x : (parent.width - self.width) / 2;
                 y: root.mobile ? root.sheet-bottom - self.height : (parent.height - self.height) / 2;
@@ -1886,6 +1959,7 @@ export component MainWindow inherits Window {
             find-open => { root.find_open(); }
             page-op(op) => { root.page_op(op); }
             crop-tool => { root.crop_tool(); }
+            redact-tool => { root.redact_tool(); }
             toggle-field-highlight => { root.toggle_field_highlight(); }
             reset-field => { root.reset_field(); }
             reset-form => { root.reset_form(); }
@@ -2054,6 +2128,7 @@ export component MainWindow inherits Window {
             choose-colour(index) => { root.choose_colour(index); }
             choose-ink-width(index) => { root.choose_ink_width(index); }
             crop-tool => { root.crop_tool(); }
+            redact-tool => { root.redact_tool(); }
             page-op(op) => { root.page_op(op); }
             toggle-field-highlight => { root.toggle_field_highlight(); }
             reset-field => { root.reset_field(); }

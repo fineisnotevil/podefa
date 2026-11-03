@@ -82,6 +82,7 @@ fn kind_of(annot_type: PdfAnnotationType) -> Option<AnnotKind> {
         T::Squiggly => AnnotKind::Squiggly,
         T::Text => AnnotKind::Note,
         T::Ink => AnnotKind::Ink,
+        T::Redact => AnnotKind::Redaction,
         T::Link | T::Widget | T::Popup => return None,
         _ => AnnotKind::Other,
     })
@@ -335,7 +336,10 @@ pub(crate) fn apply(doc: &PdfDocument, op: &EditOp) -> Result<(), MupdfError> {
         | EditOp::ResetField { .. }
         | EditOp::ResetForm
         | EditOp::ImportForm { .. }
-        | EditOp::FlattenForm => {}
+        | EditOp::FlattenForm
+        | EditOp::MarkRedactions { .. }
+        | EditOp::ApplyRedactions { .. }
+        | EditOp::RemoveOutline { .. } => {}
         EditOp::SetColour { id, colour, .. } => {
             let mut annot =
                 find(&pdf_page, *id).ok_or(MupdfError::AnnotationNotFound { page, id: *id })?;
@@ -435,7 +439,7 @@ pub(crate) fn apply_pages(
 
 /// The page's visible space (points from its top left, after rotation and crop) and the matrix
 /// that leads from it back to the PDF's own coordinates.
-fn visible_space(page: &PdfPage) -> Result<(f32, f32, Matrix), mupdf::Error> {
+pub(crate) fn visible_space(page: &PdfPage) -> Result<(f32, f32, Matrix), mupdf::Error> {
     let bounds = page.bounds()?;
     let mut to_visible = page.ctm()?;
     // `bounds` starts at (0, 0) for a PDF page; anything else would be moved there first.

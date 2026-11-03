@@ -55,6 +55,7 @@ mod convert_ui;
 mod dialogs;
 mod fields_ui;
 pub mod platform;
+mod redact_ui;
 mod stamps_ui;
 mod tabs;
 mod tools_ui;
@@ -191,6 +192,8 @@ enum Tool {
     Ink,
     /// A drag draws the rectangle to crop pages to (Plan 0005 Phase 3).
     Crop,
+    /// A drag marks an area for redaction (Plan 0009 Phase 1).
+    Redact,
 }
 
 /// The note the editor is open for: a new one at a rectangle, or an existing one.
@@ -223,6 +226,7 @@ impl Tool {
             Tool::Note => 5,
             Tool::Ink => 6,
             Tool::Crop => 7,
+            Tool::Redact => 8,
         }
     }
 
@@ -235,6 +239,7 @@ impl Tool {
             5 => Tool::Note,
             6 => Tool::Ink,
             7 => Tool::Crop,
+            8 => Tool::Redact,
             _ => Tool::Select,
         }
     }
@@ -444,6 +449,9 @@ struct AppState {
     ink_shown: Option<u32>,
     /// The Crop tool's rectangle (Plan 0005 Phase 3).
     crop: Option<stamps_ui::CropDraw>,
+    /// The Apply of redaction marks waiting for its outcome: its edit id and the file the
+    /// redacted copy goes to (Plan 0009 Phase 1).
+    redact_pending: Option<(u64, PathBuf)>,
     /// Form fields of the near pages, those asked for, the field being filled, and what the
     /// document's form has (Plan 0006).
     fields: HashMap<u32, Vec<pdf_core::form::FieldInfo>>,
@@ -589,6 +597,7 @@ impl AppState {
             ink_commands: String::new(),
             ink_shown: None,
             crop: None,
+            redact_pending: None,
             fields: HashMap::new(),
             fields_pending: HashSet::new(),
             field_edit: None,
@@ -1213,7 +1222,7 @@ impl AppState {
                 ui.set_note_hover_visible(false);
             }
         }
-        if self.tool == Tool::Crop && self.editable {
+        if matches!(self.tool, Tool::Crop | Tool::Redact) && self.editable {
             self.crop_pointer(ui, kind, x, y);
             return;
         }
@@ -2272,11 +2281,18 @@ impl AppState {
 
     /// The engine applied an edit, or refused it. An applied edit is counted when its `History`
     /// arrives, like an undo or a redo.
-    fn edited(&mut self, ui: &MainWindow, generation: u64, result: Result<(), String>) {
+    fn edited(
+        &mut self,
+        ui: &MainWindow,
+        generation: u64,
+        edit_id: u64,
+        result: Result<(), String>,
+    ) {
         if generation != self.doc_generation {
             return;
         }
         if let Err(message) = result {
+            self.redact_refused(edit_id);
             ui.set_status_text(SharedString::from(format!("Could not edit: {message}")));
             if let Some(page) = self.ink_shown {
                 self.ink_drawn(ui, page);
@@ -2358,7 +2374,7 @@ impl AppState {
     /// A tool button or its key (Plan 0004, §4.2): with text selected, a markup marks it and the
     /// tool stays; with nothing selected, the markup tool is switched on (or off again).
     fn choose_tool(&mut self, ui: &MainWindow, tool: Tool) {
-        if matches!(tool, Tool::Note | Tool::Ink | Tool::Crop) && !self.editable {
+        if matches!(tool, Tool::Note | Tool::Ink | Tool::Crop | Tool::Redact) && !self.editable {
             return;
         }
         if let Tool::Markup(kind) = tool
@@ -4004,10 +4020,18 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
             with_state(|state| state.document_info(ui, generation, info));
         }
         EngineEvent::Edited {
-            generation, result, ..
+            generation,
+            edit_id,
+            result,
         } => {
-            with_state(|state| state.edited(ui, generation, result));
+            with_state(|state| state.edited(ui, generation, edit_id, result));
         }
+        EngineEvent::Redacted {
+            generation,
+            annotations,
+            fields,
+            outline,
+        } => redact_ui::redacted(ui, generation, annotations, fields, outline),
         EngineEvent::History {
             generation,
             change,
@@ -5204,6 +5228,24 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
         main_window.on_crop_cancel(move || {
             if let Some(ui) = weak.upgrade() {
                 with_state(|state| state.crop_cancel(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_redact_tool(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.redact_tool(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_redact_search(move || {
+            if let Some(ui) = weak.upgrade() {
+                with_state(|state| state.redact_search(&ui));
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_redact_apply(move || {
+            if let Some(ui) = weak.upgrade() {
+                redact_ui::apply(&ui);
             }
         });
     }

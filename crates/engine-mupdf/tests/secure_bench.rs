@@ -546,3 +546,180 @@ fn ocr_redaction_bench() {
         ocr_report("   reopened", &back);
     }
 }
+
+/// 200 Letter pages of 40 text lines each; every fourth line names `ACME-4711`, so a search for
+/// it finds 10 hits a page, 2000 in all.
+fn text_200p() -> Vec<u8> {
+    const PAGES: usize = 200;
+    let mut objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        Vec::new(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ];
+    let mut kids = String::new();
+    for p in 0..PAGES {
+        let mut content = String::from(
+            "BT /F1 11 Tf 13 TL 60 740 Td
+",
+        );
+        for line in 0..40 {
+            let text = if line % 4 == 0 {
+                format!(
+                    "Page {p} line {line}: payment to ACME-4711 for invoice {}",
+                    p * 40 + line
+                )
+            } else {
+                format!("Page {p} line {line}: an ordinary line of public text, kept as it is")
+            };
+            content.push_str(&format!(
+                "({text}) Tj T*
+"
+            ));
+        }
+        content.push_str("ET");
+        let page_obj = objects.len() + 1;
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R                  /Resources << /Font << /F1 3 0 R >> >> >>",
+                page_obj + 1
+            )
+            .into_bytes(),
+        );
+        objects.push(
+            format!(
+                "<< /Length {} >>
+stream
+{content}
+endstream",
+                content.len()
+            )
+            .into_bytes(),
+        );
+        kids.push_str(&format!("{page_obj} 0 R "));
+    }
+    objects[1] = format!("<< /Type /Pages /Kids [{kids}] /Count {PAGES} >>").into_bytes();
+    let mut out = b"%PDF-1.7
+"
+    .to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!(
+                "{} 0 obj
+",
+                i + 1
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(body);
+        out.extend_from_slice(
+            b"
+endobj
+",
+        );
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!(
+            "xref
+0 {}
+0000000000 65535 f 
+",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    for o in offsets {
+        out.extend_from_slice(
+            format!(
+                "{o:010} 00000 n 
+"
+            )
+            .as_bytes(),
+        );
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer
+<< /Size {} /Root 1 0 R >>
+startxref
+{xref}
+%%EOF
+",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// Row AZ (Plan 0009 Phase 1): a search-and-mark over [`text_200p`] (every hit, on every page),
+/// then Apply, Undo, Redo and the redacted Save As through the
+/// engine, timed.
+#[test]
+#[ignore = "measurement, run by hand"]
+fn apply_speed_bench() {
+    use engine_mupdf::MupdfEngine;
+    use pdf_core::annot::{EditOp, RedactionMark};
+
+    let source = scratch("apply_speed_200p.pdf");
+    std::fs::write(&source, text_200p()).expect("fixture");
+    let doc = PdfDocument::open(source.to_str().expect("utf-8")).expect("open");
+    let word = "ACME-4711".to_owned();
+    let t = Instant::now();
+    let mut marks = Vec::new();
+    let pages = doc.page_count().expect("count");
+    for p in 0..pages {
+        let page = doc.load_page(p).expect("page");
+        let hits = page.search(&word, 500).expect("search");
+        for q in hits.iter() {
+            let (x0, y0) = (q.ul.x.min(q.ll.x), q.ul.y.min(q.ur.y));
+            let (x1, y1) = (q.ur.x.max(q.lr.x), q.ll.y.max(q.lr.y));
+            marks.push(RedactionMark {
+                page: p as u32,
+                rects: vec![pdf_core::Rect::new(x0, y0, x1 - x0, y1 - y0)],
+            });
+        }
+    }
+    let search_ms = ms(t);
+    let hits = marks.len();
+    drop(doc);
+
+    let mut engine = MupdfEngine::new();
+    engine
+        .open_document_with_password(&source, None)
+        .expect("open");
+    let t = Instant::now();
+    engine
+        .edit(&EditOp::MarkRedactions { marks })
+        .expect("mark");
+    let mark_ms = ms(t);
+    let t = Instant::now();
+    engine
+        .edit(&EditOp::ApplyRedactions { clean: true })
+        .expect("apply");
+    let apply_ms = ms(t);
+    let t = Instant::now();
+    engine.undo().expect("undo").expect("a step");
+    let undo_ms = ms(t);
+    let t = Instant::now();
+    engine.redo().expect("redo").expect("a step");
+    let redo_ms = ms(t);
+    let target = scratch("apply_speed_redacted.pdf");
+    let t = Instant::now();
+    engine.save(Some(&target)).expect("save as");
+    let save_ms = ms(t);
+    let left = PdfDocument::open(target.to_str().expect("utf-8"))
+        .expect("open saved")
+        .load_page(0)
+        .expect("page")
+        .search(&word, 500)
+        .expect("search")
+        .len();
+    println!(
+        "[apply]    \"{word}\": {hits} hits on {pages} pages, found in {search_ms:.0} ms; \
+         mark {mark_ms:.0} ms, apply {apply_ms:.0} ms, undo {undo_ms:.0} ms, redo {redo_ms:.0} ms, \
+         redacted save {save_ms:.0} ms; hits left on page 1: {left}"
+    );
+}

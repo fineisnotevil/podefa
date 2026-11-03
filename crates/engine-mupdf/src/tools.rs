@@ -34,6 +34,9 @@ struct Run {
     current: Option<Arc<Vec<u8>>>,
     /// The open document's password, for a protected one (Plan 0007 Phase 5).
     password: Option<String>,
+    /// The open document had a redaction applied (Plan 0009 §3.6): its snapshot still holds what
+    /// was removed, so it is never written out as it is.
+    redacted: bool,
 }
 
 /// The handle the actor keeps. Dropping it stops and joins the thread.
@@ -72,14 +75,15 @@ impl ToolThread {
         }
     }
 
-    /// Queues a job; `current` is the open document as bytes, for jobs that read it, and
-    /// `password` the one it was opened with.
+    /// Queues a job; `current` is the open document as bytes, for jobs that read it, `password`
+    /// the one it was opened with, and `redacted` whether a redaction was applied to it.
     pub(crate) fn run(
         &self,
         job_id: u64,
         job: ToolJob,
         current: Option<Vec<u8>>,
         password: Option<String>,
+        redacted: bool,
     ) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Run {
@@ -87,6 +91,7 @@ impl ToolThread {
                 job,
                 current: current.map(Arc::new),
                 password,
+                redacted,
             });
         }
     }
@@ -467,8 +472,10 @@ fn execute(
                 let part = write_part(&mut doc, output)?;
                 let after = std::fs::metadata(&part).map_or(u64::MAX, |m| m.len());
                 let before = bytes.len() as u64;
-                // Never a larger file: the input itself is the better copy then.
-                let kept_original = after >= before;
+                // Never a larger file: the input itself is the better copy then - unless it is a
+                // redacted document's snapshot, which still holds what the redaction removed.
+                let redacted_input = run.redacted && *input == MergeInput::Current;
+                let kept_original = after >= before && !redacted_input;
                 if kept_original {
                     if let Err(e) = std::fs::write(&part, &bytes) {
                         let _ = std::fs::remove_file(&part);
@@ -478,7 +485,7 @@ fn execute(
                 written.push((part, output.clone()));
                 sizes = Some(ToolSizes {
                     before,
-                    after: after.min(before),
+                    after: if kept_original { before } else { after },
                     kept_original,
                 });
                 progress(2, 2);

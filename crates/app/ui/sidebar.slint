@@ -85,6 +85,7 @@ export component SidebarColumn inherits Rectangle {
     callback find-open();
     callback page-op(int);
     callback crop-tool();
+    callback redact-tool();
     callback toggle-field-highlight();
     callback reset-field();
     callback reset-form();
@@ -266,6 +267,13 @@ export component SidebarColumn inherits Rectangle {
                         clicked => { root.crop-tool(); }
                     }
                     IconButton {
+                        icon: @image-url("icons/eye-off.svg");
+                        tip: "Redact";
+                        enabled: root.can-edit;
+                        checked: root.tool == 8;
+                        clicked => { root.redact-tool(); }
+                    }
+                    IconButton {
                         icon: @image-url("icons/rotate-ccw.svg");
                         tip: "Rotate Left";
                         enabled: root.can-edit;
@@ -445,7 +453,7 @@ export component SidebarColumn inherits Rectangle {
 
     form-menu := PopupWindow {
         x: commands.x + commands.width + SidebarMetrics.flyout-gap;
-        y: commands.y + 9 * 34px;
+        y: commands.y + 10 * 34px;
         width: 220px;
         MenuSurface {
             VerticalLayout {

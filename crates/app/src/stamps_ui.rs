@@ -189,7 +189,8 @@ impl AppState {
                 }
                 self.rebuild_crop(ui);
             }
-            // Up: a rectangle large enough waits in the crop panel; a click drops it.
+            // Up: a rectangle large enough waits in the crop panel, or with the Redact tool
+            // becomes a mark; a click drops it.
             1 => {
                 let Some(draw) = self.crop.filter(|d| !d.done) else {
                     return;
@@ -197,6 +198,11 @@ impl AppState {
                 let [x0, y0, x1, y1] = draw.rect();
                 if x1 - x0 < CROP_MIN_PT || y1 - y0 < CROP_MIN_PT {
                     self.crop_cancel(ui);
+                    return;
+                }
+                if self.tool == Tool::Redact {
+                    self.crop_cancel(ui);
+                    self.redact_drawn(draw);
                     return;
                 }
                 if let Some(draw) = self.crop.as_mut() {

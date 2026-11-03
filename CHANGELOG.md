@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Redaction** (Plan 0009 Phase 1): Edit's Redact tool marks an area by a drag, and Mark Search
+  Results marks every hit of the current search; marks show on the page and undo like any edit.
+  Apply asks, then writes the redacted copy to a new file (`name-redacted.pdf` proposed), which
+  becomes the open document; the original stays as it was. Under the marks, the text (also an OCR
+  layer's invisible text, clipping text, text in form XObjects, hidden layers, tiling patterns and
+  soft masks), the replacement text of marked content, image pixels and drawing are removed, with
+  the annotations and form fields touching a mark, the page's thumbnail and private data and the
+  resources no longer drawn. "Remove hidden information" (on by default) removes the document's
+  title, author, metadata, attachments, scripts and structure tree too. Outline entries naming the
+  removed text are listed for the user to remove. A redacted document is only written with garbage
+  collection, Save in place asks for a new file, and search, selection and the tools no longer
+  find the removed text. `pdf_core::content` is a content stream tokenizer for this.
 - `docs/plans/0009-v0.5-secure.md`: Phase 0 of the v0.5 Secure plan, at its gate - redaction,
   encryption and permissions, verifying and making digital signatures, with what MuPDF and
   mupdf-rs 0.8 offer verified in source, four phases with acceptance rows, and eight questions for

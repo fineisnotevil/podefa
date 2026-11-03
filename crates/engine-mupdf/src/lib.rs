@@ -16,6 +16,7 @@ mod edit;
 mod fonts;
 mod form;
 mod pool;
+mod redact;
 mod search;
 mod tools;
 
@@ -170,6 +171,15 @@ pub enum MupdfError {
     #[error("Failed to edit page {page}: {source}")]
     EditFailed { page: u32, source: mupdf::Error },
 
+    /// Apply found no redaction mark on any page.
+    #[error("there is no redaction mark to apply")]
+    NothingToRedact,
+
+    /// Text was still found under a redaction mark after both passes (Plan 0009 §4.1): the
+    /// redaction is not applied.
+    #[error("page {}: text under a redaction mark could not be removed", page + 1)]
+    RedactionIncomplete { page: u32 },
+
     /// Non-UTF8 path provided.
     #[error("Path is not valid UTF-8: '{0}'")]
     InvalidPath(PathBuf),
@@ -216,6 +226,12 @@ pub struct MupdfEngine {
     display_lists: Vec<(u32, Arc<DisplayList>)>,
     revisions: Vec<u32>,
     history: Vec<Step>,
+    /// A redaction was applied since the document was opened (Plan 0009 §3.2): until it is
+    /// written to a new file and reopened, every save collects garbage, and none is in place.
+    /// Stays set after an undo, which errs on the safe side.
+    redacted: bool,
+    /// What the last redaction did, for the actor to report.
+    last_redaction: Option<redact::Applied>,
 }
 
 /// What one step of the undo history changed.
@@ -294,6 +310,8 @@ impl MupdfEngine {
             display_lists: Vec::new(),
             revisions: Vec::new(),
             history: Vec::new(),
+            redacted: false,
+            last_redaction: None,
         }
     }
 
@@ -358,6 +376,8 @@ impl MupdfEngine {
         self.display_lists.clear();
         self.revisions = vec![0; count];
         self.history.clear();
+        self.redacted = false;
+        self.last_redaction = None;
 
         Ok(count)
     }
@@ -760,6 +780,36 @@ impl MupdfEngine {
             EditOp::FlattenForm => {
                 return self.fill(0, op.title(), || MupdfError::NoForm, form::flatten);
             }
+            EditOp::MarkRedactions { marks } => {
+                let count = self.revisions.len() as u32;
+                if let Some(bad) = marks.iter().find(|m| m.page >= count) {
+                    return Err(MupdfError::PageOutOfBounds {
+                        page_index: bad.page as usize,
+                        total_pages: count as usize,
+                    });
+                }
+                return self.fill(op.page(), op.title(), unchanged, |pdf| {
+                    redact::mark_all(pdf, marks)
+                });
+            }
+            EditOp::ApplyRedactions { clean } => {
+                let mut applied = None;
+                let change = self.fill(
+                    0,
+                    op.title(),
+                    || MupdfError::NothingToRedact,
+                    |pdf| {
+                        let done = redact::apply(pdf, *clean)?;
+                        let pages = done.pages.clone();
+                        applied = Some(done);
+                        Ok(pages)
+                    },
+                )?;
+                self.redacted = true;
+                self.last_redaction = applied;
+                return Ok(change);
+            }
+            EditOp::RemoveOutline { items } => return self.remove_outline(items),
             _ => {}
         }
         let page = op.page();
@@ -890,6 +940,32 @@ impl MupdfEngine {
         Ok(Change::Document)
     }
 
+    /// Removes outline entries (Plan 0009 Phase 1) as one journal operation.
+    fn remove_outline(&mut self, items: &[u32]) -> Result<Change, MupdfError> {
+        let pdf = self.pdf_mut()?;
+        let journal = |source| MupdfError::EditFailed { page: 0, source };
+        let before = journal_position(pdf);
+        pdf.begin_operation("Remove outline entries")
+            .map_err(journal)?;
+        match redact::remove_outline(pdf, items) {
+            Ok(removed) if removed > 0 => {}
+            Ok(_) => {
+                let _ = pdf.abandon_operation();
+                return Err(MupdfError::Backend("no such outline entry".into()));
+            }
+            Err(source) => {
+                let _ = pdf.abandon_operation();
+                return Err(journal(source));
+            }
+        }
+        pdf.end_operation().map_err(journal)?;
+        if journal_position(pdf) > before {
+            self.history.truncate(before);
+            self.history.push(Step::Document);
+        }
+        Ok(Change::Document)
+    }
+
     /// The open document's information, for the properties dialog.
     pub fn document_info(&self) -> Result<pdf_core::tools::DocumentInfo, MupdfError> {
         match self.doc.as_ref() {
@@ -998,10 +1074,13 @@ impl MupdfEngine {
             .as_deref()
             .is_none_or(|target| same_file(target, &current));
         let startxref = self.startxref;
+        let redacted = self.redacted;
         let pdf = self.pdf_mut().map_err(|_| SaveError::NotEditable)?;
         stamp_producer(pdf);
         if in_place {
-            if !pdf.can_be_saved_incrementally() {
+            // A redacted document is written whole, with garbage collection, to a new file (Plan
+            // 0009 §0 question 1); an incremental update would keep every removed byte.
+            if redacted || !pdf.can_be_saved_incrementally() {
                 return Err(SaveError::NeedsSaveAs);
             }
             let name = current.to_str().ok_or(SaveError::NeedsSaveAs)?;
@@ -1026,8 +1105,14 @@ impl MupdfEngine {
         let name = target
             .to_str()
             .ok_or_else(|| SaveError::Failed(format!("not a UTF-8 path: {}", target.display())))?;
-        pdf.save(name)
-            .map_err(|e| SaveError::Failed(e.to_string()))?;
+        if redacted {
+            let password = self.password.clone();
+            let pdf = self.pdf().map_err(|_| SaveError::NotEditable)?;
+            write_collected(pdf, password.as_deref(), &target)?;
+        } else {
+            pdf.save(name)
+                .map_err(|e| SaveError::Failed(e.to_string()))?;
+        }
         // The copy is the document from now on. Its pages are the edited pages, so they keep their
         // revisions: a tile drawn before the switch then never passes for one drawn after a
         // later edit.
@@ -1076,6 +1161,53 @@ impl MupdfEngine {
         self.display_lists.push((page_index, Arc::clone(&list)));
         Ok(list)
     }
+}
+
+/// Writes a redacted document to `target` with nothing removed left in it (Plan 0009 §3.2): its
+/// current state is written to memory and read as a second document, which is saved with garbage
+/// collection, so objects no page or catalog entry reaches - the content the redaction replaced -
+/// are not written. The open document is not collected itself, which would break its undo
+/// journal (Plan 0005 §3.4). The encryption is kept as it is. Written next to `target` and renamed
+/// over it once complete.
+fn write_collected(
+    pdf: &PdfDocument,
+    password: Option<&str>,
+    target: &Path,
+) -> Result<(), SaveError> {
+    let failed = |e: String| SaveError::Failed(e);
+    let mut bytes = Vec::new();
+    pdf.write_to(&mut bytes)
+        .map_err(|e| failed(format!("write: {e}")))?;
+    let mut copy = PdfDocument::from_bytes(&bytes).map_err(|e| failed(e.to_string()))?;
+    drop(bytes);
+    if copy.needs_password().unwrap_or(false) {
+        let ok = password.is_some_and(|p| copy.authenticate(p).unwrap_or(false));
+        if !ok {
+            return Err(failed(
+                "the document's password did not open its copy".to_owned(),
+            ));
+        }
+    }
+    let mut part = target.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let name = part
+        .to_str()
+        .ok_or_else(|| failed(format!("not a UTF-8 path: {}", target.display())))?;
+    let mut options = PdfWriteOptions::default();
+    options
+        .set_garbage_level(4)
+        .set_compress(true)
+        .set_compress_images(true)
+        .set_compress_fonts(true);
+    let written = copy
+        .save_with_options(name, options)
+        .map_err(|e| failed(e.to_string()))
+        .and_then(|()| std::fs::rename(&part, target).map_err(|e| failed(e.to_string())));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    written
 }
 
 /// Names this app as the document's `/Producer` before a save, as part of the last applied edit:
@@ -1442,6 +1574,9 @@ impl EngineHandle {
                                 generation,
                                 result: result.map_err(|err| err.to_string()),
                             });
+                            if applied && matches!(op, EditOp::ApplyRedactions { .. }) {
+                                Self::redacted(&event_tx, &mut engine, &search, generation);
+                            }
                             if applied {
                                 Self::history(
                                     &event_tx,
@@ -1460,6 +1595,15 @@ impl EngineHandle {
                                         &event_tx, &engine, &search, generation, change,
                                     ) {
                                         Self::report(&event_tx, &err);
+                                    }
+                                    // Text, selection and search come from the search thread's
+                                    // copy, which a redaction's undo or redo has to reach.
+                                    if engine.redacted {
+                                        match engine.snapshot() {
+                                            Ok(bytes) => search
+                                                .document_bytes(bytes, engine.password.clone()),
+                                            Err(err) => Self::report(&event_tx, &err),
+                                        }
                                     }
                                     let change = if undo {
                                         HistoryChange::Undone
@@ -1535,9 +1679,13 @@ impl EngineHandle {
                                         sizes: None,
                                     });
                                 }
-                                (false, Ok(current)) => {
-                                    tools.run(job_id, job, current, engine.password.clone())
-                                }
+                                (false, Ok(current)) => tools.run(
+                                    job_id,
+                                    job,
+                                    current,
+                                    engine.password.clone(),
+                                    engine.redacted,
+                                ),
                             }
                         }
                         EngineCmd::CancelTool { job_id } => tools.cancel(job_id),
@@ -1615,9 +1763,50 @@ impl EngineHandle {
                     generation,
                     info: engine.document_info()?,
                 });
+                // A document-wide edit may have been the outline's (Plan 0009 Phase 1).
+                let _ = events.send(EngineEvent::Outline {
+                    items: engine.outline(),
+                });
             }
         }
         Ok(())
+    }
+
+    /// After a redaction: the search thread reads the document as it is now, so search, text
+    /// lines and selections (and so the clipboard) no longer find the removed text, and the app
+    /// hears what went with the marks and which outline entries name the removed words.
+    fn redacted(
+        events: &Sender<EngineEvent>,
+        engine: &mut MupdfEngine,
+        search: &SearchThread,
+        generation: u64,
+    ) {
+        match engine.snapshot() {
+            Ok(bytes) => search.document_bytes(bytes, engine.password.clone()),
+            Err(err) => Self::report(events, &err),
+        }
+        let Some(applied) = engine.last_redaction.take() else {
+            return;
+        };
+        let outline = engine
+            .outline()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                let title = item.title.to_lowercase();
+                applied
+                    .words
+                    .iter()
+                    .any(|word| title.contains(word.as_str()))
+            })
+            .map(|(index, item)| (index as u32, item.title))
+            .collect();
+        let _ = events.send(EngineEvent::Redacted {
+            generation,
+            annotations: applied.annotations as u32,
+            fields: applied.fields as u32,
+            outline,
+        });
     }
 
     fn history(

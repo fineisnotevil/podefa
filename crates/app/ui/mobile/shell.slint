@@ -248,7 +248,7 @@ export component MobileShell inherits Rectangle {
     in property <length> safe-left;
     in property <length> safe-right;
     in property <length> keyboard-top;
-    // Edit (Plan 0008 Phase 3): the tool (0 select, 1-4 markup, 5 note, 6 ink, 7 crop), the
+    // Edit (Plan 0008 Phase 3): the tool (0 select, 1-4 markup, 5 note, 6 ink, 7 crop, 8 redact), the
     // colour and ink width chosen, and whether the document has form fields.
     in property <int> tool;
     in property <int> colour-index;
@@ -327,6 +327,7 @@ export component MobileShell inherits Rectangle {
     callback choose-colour(int);
     callback choose-ink-width(int);
     callback crop-tool();
+    callback redact-tool();
     callback page-op(int);
     callback toggle-field-highlight();
     callback reset-field();
@@ -890,6 +891,13 @@ export component MobileShell inherits Rectangle {
                     enabled: root.can-edit;
                     checked: root.tool == 7;
                     clicked => { root.crop-tool(); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/eye-off.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 8;
+                    clicked => { root.redact-tool(); }
                 }
                 Rectangle {
                     width: 9px;

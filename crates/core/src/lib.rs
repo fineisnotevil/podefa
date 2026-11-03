@@ -13,11 +13,13 @@
 //! - [`annot`]: annotations, edits and the unsaved-changes state (Plan 0004).
 //! - [`pages`]: structural edits and how they renumber pages (Plan 0005).
 //! - [`tools`]: jobs that write new files, page ranges, document information (Plan 0005).
+//! - [`content`]: content streams as operations, for what a redaction leaves (Plan 0009).
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
 pub mod annot;
+pub mod content;
 pub mod form;
 pub mod form_data;
 pub mod layout;
@@ -398,6 +400,16 @@ pub enum EngineEvent {
     DocumentInfo {
         generation: u64,
         info: tools::DocumentInfo,
+    },
+    /// Redaction marks were applied (Plan 0009 Phase 1), right after their `Edited`: how many
+    /// annotations and form fields touching a mark went with them, and the outline entries whose
+    /// titles hold a word of the removed text, for the user to decide on (§0 question 2): each
+    /// with its index in the outline as `Outline` lists it, for [`annot::EditOp::RemoveOutline`].
+    Redacted {
+        generation: u64,
+        annotations: u32,
+        fields: u32,
+        outline: Vec<(u32, String)>,
     },
     /// An edit was applied, or why it was not.
     Edited {

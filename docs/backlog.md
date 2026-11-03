@@ -595,7 +595,13 @@ Found in Plan 0005 Phase 3 (`docs/benchmarks.md` §11.6):
   the rectangle against the MediaBox height only: it ignores `/Rotate` and a MediaBox that does not
   start at (0, 0).
 
-fa-pdf works around both (`crates/engine-mupdf/src/edit.rs`, `wrap_contents` and `crop`).
+- Plan 0009 Phase 1 met the same cost twice (`docs/benchmarks.md` §15.3): marks made through
+  `create_annotation`, `set_rect` and `set_quad_points` inside one operation (2000 marks: 9.4 s),
+  and MuPDF's own `pdf_redact_page`, which deletes each redaction annotation in an operation of
+  its own (0.27 ms a mark).
+
+fa-pdf works around both (`crates/engine-mupdf/src/edit.rs`, `wrap_contents` and `crop`; for
+redaction, `redact.rs` writes the marks as objects and merges a page's marks before MuPDF's pass).
 
 ### Proposed Solution
 

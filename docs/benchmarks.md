@@ -1973,3 +1973,71 @@ mask's fills reach past the box. A control run puts the box where nothing is.
 - A first version of the fixture painted its clipping text without `q`/`Q`, which clipped
   everything after it, so MuPDF's filter dropped the pattern and mask fills as invisible and P and
   M looked removed. With the clip in its own `q`/`Q` they are not.
+
+### 15.3 Phase 1: redaction (rows AY, AZ)
+
+**Row AY, nothing left.** `crates/engine-mupdf/tests/redact_test.rs` (10 tests, in the suite) and
+two unit tests in `crates/engine-mupdf/src/redact.rs`. The fixture is §15.2's page with its 13
+secrets under one box, plus a highlight (A) and a text field (W) over the box, a note away from it,
+the title (N), XMP (X), an attachment (E), a document script (J) and an outline entry (Q):
+
+- After Apply (with the clean-up) and the redacted Save As, none of the 18 secrets of the box and
+  the hidden information is in the saved bytes, decompressed, nor in the page's text; the image is
+  blanked and boxed under the mark and keeps its grey `0x11` beside it; the public line and the
+  note stay; the original file is unchanged. The open document still holds the removed objects
+  until that save (checked), and a Save in place is refused with `NeedsSaveAs`.
+- The search thread reads the redacted document: the public line is found, no secret is. The
+  `Redacted` event counts 1 annotation and 1 field, and names outline entry 1 ("Chapter SECRET-Q")
+  of four; removing it takes the entry under it too (two left), and undo and redo move both.
+- Extract, Merge and Compress of the redacted, unsaved document: no secret in any output.
+- Without the clean-up, the hidden information (X, E, J, N) stays and the rest goes.
+- A turned page (`/Rotate 90`): a mark of one rectangle and a mark of two lands where it was
+  given, and both secrets go.
+- One undo brings back the text, the marks and the touching annotation; redo removes them again.
+- **Mutation checks** (each made a test fail, then was undone): no second pass (P, M left); no
+  stripping of inline replacement text (T); no removal of idle graphics state (M); no pruning of
+  resources (P, M); no removal of `/Thumb` and `/PieceInfo` (U, I); no removal of touching
+  annotations and fields (W, A); the plain save instead of the garbage-collecting one (most
+  letters); marks written in the PDF's own coordinates instead of the visible space (the `/Rect`
+  and the quads each); the merged mark keeping only its first area (the second pass runs).
+- **Not caught by a test:** Compress keeping its input when the output is not smaller: for a
+  redacted document the output is always smaller (the removed objects go), so that path does not
+  run; the rule that a redacted input is never kept stays as a guard.
+- **Not tested:** a PDF made by Tesseract or another OCR tool (the fixture writes its layer as
+  Tesseract does: render mode 3, `Tz`), and a real document of the maintainer's.
+
+**Row AZ, speed and undo.** `apply_speed_bench` in `crates/engine-mupdf/tests/secure_bench.rs`
+(ignored), release build, 2026-11-03, the §1 machine:
+
+```powershell
+cargo test --release -p engine-mupdf --test secure_bench apply_speed -- --ignored --nocapture
+```
+
+A generated document of 200 Letter pages, 40 lines each, every fourth naming `ACME-4711`: 2000
+hits, one mark each, marked in one step, applied with the clean-up, undone, redone and saved as
+the redacted copy. Three runs:
+
+| Step | Run 1 | Run 2 | Run 3 |
+| :--- | ---: | ---: | ---: |
+| Mark 2000 hits (one step) | 36 ms | 35 ms | 36 ms |
+| Apply | 754 ms | 718 ms | 716 ms |
+| Undo | 16 ms | 15 ms | 15 ms |
+| Redo | 4 ms | 4 ms | 3 ms |
+| Redacted save | 62 ms | 60 ms | 58 ms |
+
+No hit is left on the saved first page. **Pass** (Apply <= 1 s; one undo).
+
+Found on the way, both the journal cost of `docs/backlog.md` item 15:
+
+- Marks made through mupdf-rs' `create_annotation`, `set_rect` and `set_quad_points` (each a
+  journal operation of its own, merged into the step's) cost n^3: 100 marks in one step 4 ms, 500
+  116 ms, 1000 1071 ms, 2000 9.4 s. Written as objects inside the one operation: 3, 9, 17 and 36
+  ms.
+- MuPDF's `pdf_redact_page` takes each mark away by itself (`pdf_delete_annot`, an operation of its
+  own, `pdf-clean.c:1144-1155`): about 0.27 ms a mark (200 marks on 200 pages applied in 471 ms,
+  2000 in 1034 ms, linear in pages). The engine now merges a page's marks into one mark with a
+  quad for each before MuPDF's pass; MuPDF tests every glyph, image and drawing against each quad
+  as against each mark. 2000 marks: 1034 to 692 ms.
+- Where Apply's time goes (2000 marks, 200 pages, merged): MuPDF's pass 375 ms, the text under the
+  marks before (for the outline's words) and the content snapshot 118 ms, the text check after
+  MuPDF's pass 106 ms, the replacement text and resources 63 ms, the rest 25 ms.

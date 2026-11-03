@@ -21,6 +21,8 @@ pub enum AnnotKind {
     /// A sticky note (PDF `Text` annotation).
     Note,
     Ink,
+    /// A redaction mark (Plan 0009): an area to remove when the marks are applied.
+    Redaction,
     /// Anything else the document has (stamps, shapes, free text, ...): drawn, selectable and
     /// deletable, but not created by the app.
     Other,
@@ -251,6 +253,30 @@ pub enum EditOp {
     },
     /// Draws every field into its page and removes the form (Plan 0006 Phase 3); undoable.
     FlattenForm,
+    /// Adds redaction marks (Plan 0009 Phase 1): one per entry, on its page, covering its
+    /// rectangles (a dragged area, or the line boxes of a search hit). Several pages are one step.
+    MarkRedactions {
+        marks: Vec<RedactionMark>,
+    },
+    /// Applies every page's redaction marks (Plan 0009, §4.1): removes what is under them, the
+    /// annotations and fields that touch them, and with `clean` the document's hidden information.
+    /// Undoable until the document is saved, which writes a new file.
+    ApplyRedactions {
+        clean: bool,
+    },
+    /// Removes outline entries, each with the entries under it, by their index in the outline as
+    /// [`crate::EngineEvent::Outline`] lists it (Plan 0009, §0 question 2: the entries that name
+    /// redacted text, when the user says so).
+    RemoveOutline {
+        items: Vec<u32>,
+    },
+}
+
+/// One redaction mark to add: its page and the rectangles it covers, page space.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RedactionMark {
+    pub page: u32,
+    pub rects: Vec<Rect>,
 }
 
 impl EditOp {
@@ -276,6 +302,9 @@ impl EditOp {
             Self::ResetForm => "Reset form",
             Self::ImportForm { .. } => "Import form data",
             Self::FlattenForm => "Flatten form",
+            Self::MarkRedactions { .. } => "Mark for redaction",
+            Self::ApplyRedactions { .. } => "Apply redactions",
+            Self::RemoveOutline { .. } => "Remove outline entries",
         }
     }
 
@@ -286,7 +315,10 @@ impl EditOp {
             Self::SetMetadata(_)
             | Self::ResetForm
             | Self::ImportForm { .. }
-            | Self::FlattenForm => 0,
+            | Self::FlattenForm
+            | Self::ApplyRedactions { .. }
+            | Self::RemoveOutline { .. } => 0,
+            Self::MarkRedactions { marks } => marks.first().map_or(0, |m| m.page),
             Self::AddMarkup { page, .. }
             | Self::Delete { page, .. }
             | Self::SetColour { page, .. }
