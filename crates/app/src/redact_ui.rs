@@ -110,6 +110,15 @@ pub(crate) fn apply(ui: &MainWindow) {
              tree are removed too.",
         );
     }
+    // A redaction cannot keep a signature over what it removes (§3.5).
+    let signed = with_state_ret(|state| state.security.signed).unwrap_or(0);
+    if signed > 0 {
+        text.push_str(&format!(
+            "\n\nThe document has {} signature{}, which will not be valid in the new file.",
+            signed,
+            if signed == 1 { "" } else { "s" }
+        ));
+    }
     let weak = ui.as_weak();
     MessageDialog::new(text)
         .level(Level::Warning)

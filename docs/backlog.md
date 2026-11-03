@@ -928,3 +928,36 @@ A plan of its own, after the roadmap's current releases, whose Phase 0 builds a 
 Stamp with a Markdown appearance drawn by Story (Turkish text, file size), moved and edited in
 the app, then saved in Preview and Acrobat to see what survives; and the `/EmbeddedFiles` tree
 carried through Split, Extract and Merge, with a PDF/A check.
+
+## 31. Upstream: mupdf-rs reads permissions with `from_bits`
+
+**Labels:** `upstream`, `engine`
+
+### Problem Statement
+
+`PdfDocument::permissions` and `PdfWriteOptions::permissions` in mupdf-rs 0.8 read MuPDF's
+permission bits with `Permission::from_bits`, which refuses the reserved bits a real `/P` (and
+MuPDF's default `~0`) has set: the first falls back to every permission for any encrypted
+document, the second panics (Plan 0009 §3.3 flaw 1, found 2026-11-03). `patches/mupdf/src/pdf/document.rs` reads
+both with `from_bits_truncate`. The password setters still `assert!` the length; the app checks
+it first (`pdf_core::secure::MAX_PASSWORD_BYTES`).
+
+### Proposed Solution
+
+A pull request to messense/mupdf-rs with the two `from_bits_truncate` reads (and a typed error
+for over-long passwords instead of the `assert!`), opened once the maintainer agrees; the patch
+goes when a release carries it.
+
+## 32. Printing
+
+**Labels:** `feature`, `app`
+
+### Problem Statement
+
+PODEFA has no Print command, so a document's print permissions (`print`, `print_hq`) are read and
+shown in the Protection dialog but follow nothing.
+
+### Proposed Solution
+
+When printing comes, it follows them: no print without `print`, and a low-resolution raster
+without `print_hq`.

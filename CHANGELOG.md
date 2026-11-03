@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Protection and permissions** (Plan 0009 Phase 2): Save > Protection (and the lock beside the
+  page number, and Protection in the phone's More menu) writes the open document with AES-256: a
+  password to open, a permissions password, and what is allowed without it (printing, copying,
+  comments, filling forms, changing pages, editing the content); the same dialog changes or
+  removes the protection. Turkish passwords work. A protected document's permissions are read
+  correctly (mupdf-rs reported every permission for any encrypted document; `patches/mupdf` reads
+  `/P` with `from_bits_truncate`) and followed: what they withhold is refused by the app and the
+  engine with the reason, and the permissions password, typed in the lock's dialog, unlocks them.
+  Extract, Split, Merge and the exports need the copy permission; Compress keeps the encryption.
+  Before a signed document is written anew (Save As, Protection, a redaction), the app says its
+  signatures will not be valid in what is written; the first change a certifying signature does
+  not allow is asked about. `pdf_core::secure` holds the permissions, the protection and their
+  checks.
 - **Redaction** (Plan 0009 Phase 1): Edit's Redact tool marks an area by a drag, and Mark Search
   Results marks every hit of the current search; marks show on the page and undo like any edit.
   Apply asks, then writes the redacted copy to a new file (`name-redacted.pdf` proposed), which

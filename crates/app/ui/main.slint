@@ -12,7 +12,7 @@
 import { ComboBox, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
 import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem } from "types.slint";
 import { Theme } from "theme.slint";
-import { Field, Island, IconButton, DialogButton, DialogSurface, Dialog } from "widgets.slint";
+import { Field, Island, IconButton, DialogButton, DialogSurface, Dialog, MenuRow } from "widgets.slint";
 import { TitleRow } from "title.slint";
 import { SidebarColumn, Drawer } from "sidebar.slint";
 import { StatusIsland, MessageIsland } from "statusbar.slint";
@@ -485,6 +485,33 @@ export component MainWindow inherits Window {
     in property <int> password-tries;
     callback password_submit(string);
     callback password_cancel();
+    // The password dialog asks for the permissions password of the open document instead
+    // (Plan 0009 Phase 2).
+    in-out property <bool> password-unlock: false;
+
+    // Plan 0009 Phase 2: the document's protection. Rust fills the summary and the choices when
+    // the dialog opens and reads them back on Protect.
+    in property <bool> protectable: false;
+    in property <bool> secure-encrypted: false;
+    in property <bool> secure-restricted: false;
+    in-out property <bool> protect-visible: false;
+    in property <string> protect-summary;
+    in property <string> protect-error;
+    in property <bool> protect-busy: false;
+    in-out property <string> protect-user;
+    in-out property <string> protect-user-again;
+    in-out property <string> protect-owner;
+    in-out property <string> protect-owner-again;
+    in-out property <bool> protect-print: true;
+    in-out property <bool> protect-copy: true;
+    in-out property <bool> protect-pages: true;
+    in-out property <bool> protect-edit: true;
+    in-out property <bool> protect-comment: true;
+    in-out property <bool> protect-fill: true;
+    callback protect_open();
+    callback protect_apply();
+    callback protect_remove();
+    callback protect_unlock();
     callback quit();
     // A drag over the window: whether it carries a document we can open.
     callback can_open_drop(data-transfer) -> bool;
@@ -1893,6 +1920,8 @@ export component MainWindow inherits Window {
             active-tab: root.active-tab;
             editable: root.editable;
             repaired: root.repaired;
+            protectable: root.protectable;
+            protection => { root.protect_open(); }
             can-undo: root.can-undo;
             can-redo: root.can-redo;
             recent-files: root.recent-files;
@@ -2056,6 +2085,9 @@ export component MainWindow inherits Window {
             is-loading: root.is_loading;
             zoom-percent: root.zoom_percent;
             page-input <=> root.page-input;
+            secured: root.secure-encrypted;
+            restricted: root.secure-restricted;
+            security => { root.protect_open(); }
             prev-page => { root.prev_page(); }
             next-page => { root.next_page(); }
             go-to-page(text) => {
@@ -2160,6 +2192,7 @@ export component MainWindow inherits Window {
             reduce-motion-changed(on) => { root.set_reduce_motion(on); }
             about => { root.about-visible = true; }
             props-open => { root.props_open(); }
+            protection-open => { root.protect_open(); }
             stamp-open(mode) => { root.stamp_open(mode); }
             convert-open(mode) => { root.convert_open(mode); }
             find-open => { root.find_open(); }
@@ -2347,7 +2380,7 @@ export component MainWindow inherits Window {
             width: root.width;
             height: root.height;
             z: 2;
-            title: "Protected Document";
+            title: root.password-unlock ? "Unlock Permissions" : "Protected Document";
             card-width: 340px;
             closed => { root.password_cancel(); }
             property <bool> show: false;
@@ -2392,6 +2425,7 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     text: root.password-wrong ? "That password is not right. Try again."
+                        : root.password-unlock ? "Type the permissions password to allow everything the document withholds."
                         : "This document is protected. Type its password to open it.";
                     wrap: word-wrap;
                     font-size: 12px;
@@ -2403,7 +2437,7 @@ export component MainWindow inherits Window {
                     password-field := Field {
                         horizontal-stretch: 1;
                         input-type: show ? InputType.text : InputType.password;
-                        placeholder-text: "Password";
+                        placeholder-text: root.password-unlock ? "Permissions password" : "Password";
                         enabled: !root.password-busy;
                         init => { self.focus(); }
                         accepted(text) => { root.password_submit(text); }
@@ -2425,7 +2459,7 @@ export component MainWindow inherits Window {
                     }
                     DialogButton {
                         horizontal-stretch: 1;
-                        text: root.password-busy ? "Opening..." : "Unlock";
+                        text: root.password-busy ? (root.password-unlock ? "Unlocking..." : "Opening...") : "Unlock";
                         icon: root.password-busy ? @image-url("") : @image-url("icons/arrow-right.svg");
                         primary: true;
                         enabled: !root.password-busy;
@@ -2440,6 +2474,174 @@ export component MainWindow inherits Window {
                     shake.running = true;
                 }
                 password-field.select-all();
+            }
+        }
+
+        // The document's protection (Plan 0009 Phase 2): what it allows now; with every permission,
+        // the passwords and permissions to write over the open file, or Remove Protection.
+        if root.protect-visible : Dialog {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            z: 2;
+            title: "Protection";
+            card-width: 400px;
+            closed => { root.protect-visible = false; }
+            property <bool> show: false;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+                Text {
+                    text: root.protect-summary;
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                }
+                if root.secure-restricted : HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    DialogButton {
+                        text: "Close";
+                        clicked => { root.protect-visible = false; }
+                    }
+                    DialogButton {
+                        text: "Unlock...";
+                        icon: @image-url("icons/lock-open.svg");
+                        primary: true;
+                        init => { self.focus(); }
+                        clicked => { root.protect_unlock(); }
+                    }
+                }
+                if !root.secure-restricted : VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Password to open (empty: opens without one)";
+                            font-size: 11px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        IconButton {
+                            width: 28px;
+                            height: 28px;
+                            icon: show ? @image-url("icons/eye-off.svg") : @image-url("icons/eye.svg");
+                            tip: show ? "Hide the passwords" : "Show the passwords";
+                            checked: show;
+                            clicked => { show = !show; }
+                        }
+                    }
+                    Field {
+                        text <=> root.protect-user;
+                        input-type: show ? InputType.text : InputType.password;
+                        placeholder-text: "Password to open";
+                        enabled: !root.protect-busy;
+                        init => { self.focus(); }
+                    }
+                    Field {
+                        text <=> root.protect-user-again;
+                        input-type: show ? InputType.text : InputType.password;
+                        placeholder-text: "The same again";
+                        enabled: !root.protect-busy;
+                    }
+                    Text {
+                        text: "Permissions password (needed to withhold a permission)";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    Field {
+                        text <=> root.protect-owner;
+                        input-type: show ? InputType.text : InputType.password;
+                        placeholder-text: "Permissions password";
+                        enabled: !root.protect-busy;
+                    }
+                    Field {
+                        text <=> root.protect-owner-again;
+                        input-type: show ? InputType.text : InputType.password;
+                        placeholder-text: "The same again";
+                        enabled: !root.protect-busy;
+                    }
+                    Text {
+                        text: "Allowed without the permissions password";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    GridLayout {
+                        spacing: 0px;
+                        Row {
+                            MenuRow {
+                                label: "Printing";
+                                checkable: true;
+                                checked: root.protect-print;
+                                activated => { root.protect-print = !root.protect-print; }
+                            }
+                            MenuRow {
+                                label: "Copying text and images";
+                                checkable: true;
+                                checked: root.protect-copy;
+                                activated => { root.protect-copy = !root.protect-copy; }
+                            }
+                        }
+                        Row {
+                            MenuRow {
+                                label: "Comments";
+                                checkable: true;
+                                checked: root.protect-comment;
+                                activated => { root.protect-comment = !root.protect-comment; }
+                            }
+                            MenuRow {
+                                label: "Filling forms";
+                                checkable: true;
+                                checked: root.protect-fill;
+                                activated => { root.protect-fill = !root.protect-fill; }
+                            }
+                        }
+                        Row {
+                            MenuRow {
+                                label: "Changing pages";
+                                checkable: true;
+                                checked: root.protect-pages;
+                                activated => { root.protect-pages = !root.protect-pages; }
+                            }
+                            MenuRow {
+                                label: "Editing the content";
+                                checkable: true;
+                                checked: root.protect-edit;
+                                activated => { root.protect-edit = !root.protect-edit; }
+                            }
+                        }
+                    }
+                    if root.protect-error != "" : Text {
+                        text: root.protect-error;
+                        wrap: word-wrap;
+                        font-size: 12px;
+                        color: Theme.danger;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        if root.secure-encrypted : DialogButton {
+                            text: "Remove Protection";
+                            enabled: !root.protect-busy;
+                            clicked => { root.protect_remove(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        DialogButton {
+                            text: "Cancel";
+                            clicked => { root.protect-visible = false; }
+                        }
+                        DialogButton {
+                            text: root.protect-busy ? "Writing..." : "Protect";
+                            icon: root.protect-busy ? @image-url("") : @image-url("icons/lock.svg");
+                            primary: true;
+                            enabled: !root.protect-busy;
+                            clicked => { root.protect_apply(); }
+                        }
+                    }
+                }
             }
         }
 

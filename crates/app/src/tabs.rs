@@ -939,6 +939,7 @@ impl AppState {
         ui.set_can_undo(self.editable && self.can_undo);
         ui.set_can_redo(self.editable && self.can_redo);
         ui.set_repaired(self.repaired);
+        self.show_security(ui);
         ui.set_form_fields(self.form.fields);
         ui.set_tool_running(self.running_tool.is_some());
         ui.set_status_text(SharedString::from(

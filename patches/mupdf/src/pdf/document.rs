@@ -186,7 +186,8 @@ impl PdfWriteOptions {
     }
 
     pub fn permissions(&self) -> Permission {
-        Permission::from_bits(self.inner.permissions as u32).unwrap()
+        // MuPDF's default is `~0`, reserved bits included (fa-pdf patch, Plan 0009 §3.3).
+        Permission::from_bits_truncate(self.inner.permissions as u32)
     }
 
     pub fn set_permissions(&mut self, value: Permission) -> &mut Self {
@@ -840,7 +841,9 @@ impl PdfDocument {
 
     pub fn permissions(&self) -> Permission {
         let bits = unsafe { pdf_document_permissions(context(), self.inner) };
-        Permission::from_bits(bits as u32).unwrap_or_else(Permission::all)
+        // A real `/P` has reserved bits set, which `from_bits` refused, reporting every
+        // permission (fa-pdf patch, Plan 0009 §3.3 flaw 1).
+        Permission::from_bits_truncate(bits as u32)
     }
 
     pub fn save(&self, filename: &str) -> Result<(), Error> {

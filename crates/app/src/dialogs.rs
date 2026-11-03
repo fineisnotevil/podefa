@@ -70,13 +70,22 @@ pub(crate) fn wire(ui: &MainWindow, reduce_motion: bool) {
     let weak = ui.as_weak();
     ui.on_password_submit(move |text| {
         if let Some(ui) = weak.upgrade() {
-            password_submit(&ui, text.as_str());
+            // The same dialog unlocks the open document's permissions (Plan 0009 Phase 2).
+            if ui.get_password_unlock() {
+                crate::secure_ui::unlock_submit(&ui, text.as_str());
+            } else {
+                password_submit(&ui, text.as_str());
+            }
         }
     });
     let weak = ui.as_weak();
     ui.on_password_cancel(move || {
         if let Some(ui) = weak.upgrade() {
-            password_cancel(&ui);
+            if ui.get_password_unlock() {
+                crate::secure_ui::unlock_cancel(&ui);
+            } else {
+                password_cancel(&ui);
+            }
         }
     });
 }
@@ -125,6 +134,7 @@ pub(crate) fn needs_password(ui: &MainWindow, wrong: bool) {
         return;
     };
     ui.set_is_loading(false);
+    ui.set_password_unlock(false);
     ui.set_password_file(SharedString::from(name.as_str()));
     ui.set_password_busy(false);
     ui.set_password_wrong(wrong);

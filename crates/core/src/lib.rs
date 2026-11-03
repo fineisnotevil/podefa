@@ -27,6 +27,7 @@ pub mod nav;
 pub mod pages;
 pub mod scheduler;
 pub mod search;
+pub mod secure;
 pub mod select;
 pub mod settings;
 pub mod stamp;
@@ -212,6 +213,17 @@ pub enum EngineCmd {
     /// Write the document: `None` appends an incremental update to the open file, `Some(path)`
     /// writes a full copy there and switches to it (Plan 0004, §4.4).
     Save { path: Option<PathBuf> },
+    /// Write the document with new protection (Plan 0009 Phase 2): a full copy to `path`, or over
+    /// the open file for `None`, which is then reopened with the new password. Answered with
+    /// [`EngineEvent::Saved`] and, once written, [`EngineEvent::Security`].
+    Protect {
+        path: Option<PathBuf>,
+        protection: secure::Protection,
+        generation: u64,
+    },
+    /// Unlock the document's permissions with its permissions password (Plan 0009 §0 question 4).
+    /// Answered with [`EngineEvent::Security`].
+    Unlock { password: String, generation: u64 },
     /// Undo the last edit (Plan 0004 Phase 2): answered with [`EngineEvent::PageChanged`] for the
     /// page it touched, then [`EngineEvent::History`]. Nothing to undo is not an error.
     Undo { generation: u64 },
@@ -283,6 +295,8 @@ pub enum EngineEvent {
         repaired: bool,
         /// What its form has (Plan 0006).
         form: form::FormSummary,
+        /// Its encryption, permissions and signatures (Plan 0009 Phase 2).
+        security: secure::Security,
     },
     /// One tile has been rendered.
     ///
@@ -441,6 +455,13 @@ pub enum EngineEvent {
     /// The document asked to open is password-protected: [`EngineCmd::Open`] again with its
     /// password. `wrong` when the password given was not right (Plan 0007 Phase 5).
     NeedsPassword { wrong: bool },
+    /// The document's protection changed: an unlock (`wrong` when the password did not unlock
+    /// it) or a save with new protection (Plan 0009 Phase 2).
+    Security {
+        generation: u64,
+        security: secure::Security,
+        wrong: bool,
+    },
     /// An error occurred.
     Error { message: String },
 }

@@ -52,12 +52,23 @@ export component StatusIsland inherits Island {
     // Book mode (Plan 0008 Phase 5 review): one page at a time.
     in property <bool> book;
     callback book-changed(bool);
+    // Plan 0009 Phase 2: a lock for a protected document, open once its permissions are unlocked.
+    in property <bool> secured;
+    in property <bool> restricted;
+    callback security();
 
     property <bool> ready: root.total-pages > 0 && !root.is-loading;
 
     HorizontalLayout {
         padding: 4px;
         spacing: 2px;
+        if root.secured : IconButton {
+            width: 28px;
+            icon: root.restricted ? @image-url("icons/lock.svg") : @image-url("icons/lock-open.svg");
+            icon-size: 14px;
+            tip: root.restricted ? "Protected: some permissions withheld" : "Protected";
+            clicked => { root.security(); }
+        }
         IconButton {
             width: 28px;
             icon: @image-url("icons/chevron-left.svg");

@@ -18,6 +18,7 @@ mod form;
 mod pool;
 mod redact;
 mod search;
+mod secure;
 mod tools;
 
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
@@ -25,6 +26,7 @@ use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
 use pdf_core::annot::{AnnotInfo, EditOp};
 use pdf_core::form_data;
 use pdf_core::pages::{self, PageMap, PageOp};
+use pdf_core::secure::{Protection, Security};
 use pdf_core::tools::{MergeInput, ToolJob};
 use pdf_core::{
     Bitmap, EngineCmd, EngineEvent, HistoryChange, OutlineItem, PageGeometry, PageSize, PdfEngine,
@@ -170,6 +172,10 @@ pub enum MupdfError {
     /// MuPDF refused an edit.
     #[error("Failed to edit page {page}: {source}")]
     EditFailed { page: u32, source: mupdf::Error },
+
+    /// The document's permissions do not allow the edit or the job (Plan 0009 §0 question 4).
+    #[error("the document's permissions do not allow {}", .0.words())]
+    NotPermitted(pdf_core::secure::Need),
 
     /// Apply found no redaction mark on any page.
     #[error("there is no redaction mark to apply")]
@@ -743,6 +749,10 @@ impl MupdfEngine {
     /// cutting old markup included - is undone by one undo, and an edit that fails is rolled back
     /// whole (`pdf_abandon_operation`).
     pub fn edit(&mut self, op: &EditOp) -> Result<Change, MupdfError> {
+        let need = op.need();
+        if !secure::permissions(self.pdf()?).allows(need) {
+            return Err(MupdfError::NotPermitted(need));
+        }
         if let EditOp::Pages(pages) = op {
             return self.restructure(pages);
         }
@@ -1108,7 +1118,7 @@ impl MupdfEngine {
         if redacted {
             let password = self.password.clone();
             let pdf = self.pdf().map_err(|_| SaveError::NotEditable)?;
-            write_collected(pdf, password.as_deref(), &target)?;
+            write_copy(pdf, password.as_deref(), &target, true, &Protection::Keep)?;
         } else {
             pdf.save(name)
                 .map_err(|e| SaveError::Failed(e.to_string()))?;
@@ -1125,6 +1135,92 @@ impl MupdfEngine {
         }
         let len = file_len(&target);
         Ok((target, len))
+    }
+
+    /// The open document's encryption, permissions and signatures (Plan 0009 Phase 2).
+    pub fn security(&self) -> Security {
+        self.pdf().map(secure::security).unwrap_or_default()
+    }
+
+    /// Unlocks the document's permissions with its permissions password (Plan 0009 §0 question
+    /// 4). On a wrong password the document is authenticated again with the password it was
+    /// opened with (a failed try leaves MuPDF without the keys, `pdf-crypt.c:803-815`) and
+    /// `false` comes back.
+    pub fn unlock(&mut self, password: &str) -> Result<bool, MupdfError> {
+        let opened_with = self.password.clone().unwrap_or_default();
+        let pdf = self.pdf_mut()?;
+        let fail = |e: mupdf::Error| MupdfError::Backend(format!("unlock: {e}"));
+        if !password.is_empty()
+            && pdf.authenticate(password).map_err(fail)?
+            && secure::permissions(pdf).is_all()
+        {
+            self.password = Some(password.to_owned());
+            return Ok(true);
+        }
+        pdf.authenticate(&opened_with).map_err(fail)?;
+        Ok(false)
+    }
+
+    /// Writes the document with new protection and opens what was written (Plan 0009 Phase 2):
+    /// a full copy, since MuPDF changes the encryption only in a full save (§3.3).
+    ///
+    /// `None` writes over the open file: its unsaved changes are saved in place first, so the file
+    /// holds them if the replace fails; the document lets go of the file (MuPDF reads from it, and
+    /// Windows renames nothing open) and opens the new one, or the old one again on a failure.
+    /// Changing the protection needs every permission (§8: no removal of a password the user does
+    /// not have).
+    pub fn protect(
+        &mut self,
+        path: Option<&Path>,
+        protection: &Protection,
+    ) -> Result<(PathBuf, u64), SaveError> {
+        let current = self.path.clone().ok_or(SaveError::NotEditable)?;
+        let pdf = self.pdf().map_err(|_| SaveError::NotEditable)?;
+        if !secure::permissions(pdf).is_all() {
+            return Err(SaveError::Failed(
+                "the permissions password is needed to change the protection".to_owned(),
+            ));
+        }
+        let target = path.map_or_else(|| current.clone(), Path::to_path_buf);
+        let in_place = same_file(&target, &current);
+        if in_place && pdf.has_unsaved_changes() {
+            self.save(None)?;
+        }
+        let redacted = self.redacted;
+        let password = self.password.clone();
+        let pdf = self.pdf_mut().map_err(|_| SaveError::NotEditable)?;
+        stamp_producer(pdf);
+        let pdf = self.pdf().map_err(|_| SaveError::NotEditable)?;
+        let part = write_copy_part(pdf, password.as_deref(), &target, redacted, protection)?;
+        let reopen = match protection {
+            Protection::Keep => password.clone(),
+            Protection::Remove => None,
+            Protection::Encrypt(encryption) => encryption
+                .clone()
+                .checked()
+                .ok()
+                .and_then(|e| e.reopen_password().map(str::to_owned)),
+        };
+        let revisions = std::mem::take(&mut self.revisions);
+        if in_place {
+            // Lets go of the file.
+            self.doc = None;
+            self.display_lists.clear();
+        }
+        if let Err(e) = std::fs::rename(&part, &target) {
+            let _ = std::fs::remove_file(&part);
+            if in_place {
+                let _ = self.open_document_with_password(&current, password.as_deref());
+            }
+            self.revisions = revisions;
+            return Err(SaveError::Failed(format!("{}: {e}", target.display())));
+        }
+        self.open_document_with_password(&target, reopen.as_deref())
+            .map_err(|e| SaveError::Failed(e.to_string()))?;
+        if revisions.len() == self.revisions.len() {
+            self.revisions = revisions;
+        }
+        Ok((target.clone(), file_len(&target)))
     }
 
     /// Returns the cached display list for a page, building it on a miss and evicting the least
@@ -1163,17 +1259,21 @@ impl MupdfEngine {
     }
 }
 
-/// Writes a redacted document to `target` with nothing removed left in it (Plan 0009 §3.2): its
-/// current state is written to memory and read as a second document, which is saved with garbage
-/// collection, so objects no page or catalog entry reaches - the content the redaction replaced -
-/// are not written. The open document is not collected itself, which would break its undo
-/// journal (Plan 0005 §3.4). The encryption is kept as it is. Written next to `target` and renamed
-/// over it once complete.
-fn write_collected(
+/// Writes the open document's current state to `target` through a second document: written to
+/// memory and read again, then saved with `protection` and, when `collect`, garbage collection.
+///
+/// A redacted document is written so (Plan 0009 §3.2): objects no page or catalog entry reaches -
+/// the content the redaction replaced - are not written. The open document is not collected
+/// itself, which would break its undo journal (Plan 0005 §3.4). New protection is written so too
+/// (Phase 2), since MuPDF changes the encryption only in a full save. Written next to `target`
+/// (`.part`, returned) and left there for the caller to rename.
+fn write_copy_part(
     pdf: &PdfDocument,
     password: Option<&str>,
     target: &Path,
-) -> Result<(), SaveError> {
+    collect: bool,
+    protection: &Protection,
+) -> Result<PathBuf, SaveError> {
     let failed = |e: String| SaveError::Failed(e);
     let mut bytes = Vec::new();
     pdf.write_to(&mut bytes)
@@ -1195,19 +1295,34 @@ fn write_collected(
         .to_str()
         .ok_or_else(|| failed(format!("not a UTF-8 path: {}", target.display())))?;
     let mut options = PdfWriteOptions::default();
-    options
-        .set_garbage_level(4)
-        .set_compress(true)
-        .set_compress_images(true)
-        .set_compress_fonts(true);
-    let written = copy
-        .save_with_options(name, options)
-        .map_err(|e| failed(e.to_string()))
-        .and_then(|()| std::fs::rename(&part, target).map_err(|e| failed(e.to_string())));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&part);
+    options.set_compress(true);
+    if collect {
+        options
+            .set_garbage_level(4)
+            .set_compress_images(true)
+            .set_compress_fonts(true);
     }
-    written
+    secure::apply(&mut options, protection).map_err(|e| failed(e.to_string()))?;
+    if let Err(e) = copy.save_with_options(name, options) {
+        let _ = std::fs::remove_file(&part);
+        return Err(failed(e.to_string()));
+    }
+    Ok(part)
+}
+
+/// [`write_copy_part`], renamed over `target` once complete.
+fn write_copy(
+    pdf: &PdfDocument,
+    password: Option<&str>,
+    target: &Path,
+    collect: bool,
+    protection: &Protection,
+) -> Result<(), SaveError> {
+    let part = write_copy_part(pdf, password, target, collect, protection)?;
+    std::fs::rename(&part, target).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        SaveError::Failed(e.to_string())
+    })
 }
 
 /// Names this app as the document's `/Producer` before a save, as part of the last applied edit:
@@ -1403,6 +1518,7 @@ impl EngineHandle {
                                         editable: engine.is_editable(),
                                         repaired: engine.was_repaired(),
                                         form: engine.form_summary(),
+                                        security: engine.security(),
                                     });
                                     let _ = event_tx.send(EngineEvent::Outline {
                                         items: engine.outline(),
@@ -1641,7 +1757,61 @@ impl EngineHandle {
                                 Self::history(&event_tx, &engine, 0, HistoryChange::None);
                             }
                         }
+                        EngineCmd::Protect {
+                            path,
+                            protection,
+                            generation,
+                        } => {
+                            let result = engine.protect(path.as_deref(), &protection);
+                            let saved_to = match &result {
+                                Ok((file, _)) => file.clone(),
+                                Err(_) => path.clone().or_else(|| engine.path.clone()).unwrap_or_default(),
+                            };
+                            let written = result.is_ok();
+                            if written {
+                                search.document(saved_to.clone(), engine.password.clone());
+                            }
+                            let _ = event_tx.send(EngineEvent::Saved {
+                                path: saved_to,
+                                result: result.map(|(_, bytes)| bytes),
+                            });
+                            if written {
+                                Self::history(&event_tx, &engine, 0, HistoryChange::None);
+                                let _ = event_tx.send(EngineEvent::Security {
+                                    generation,
+                                    security: engine.security(),
+                                    wrong: false,
+                                });
+                            }
+                        }
+                        EngineCmd::Unlock {
+                            password,
+                            generation,
+                        } => match engine.unlock(&password) {
+                            Ok(unlocked) => {
+                                let _ = event_tx.send(EngineEvent::Security {
+                                    generation,
+                                    security: engine.security(),
+                                    wrong: !unlocked,
+                                });
+                            }
+                            Err(err) => Self::report(&event_tx, &err),
+                        },
                         EngineCmd::RunTool { job_id, mut job } => {
+                            // A job that writes the open document's content into another file
+                            // follows its permissions (Plan 0009 §0 question 4).
+                            if let Some(need) = job.need()
+                                && !engine
+                                    .pdf()
+                                    .is_ok_and(|pdf| secure::permissions(pdf).allows(need))
+                            {
+                                let _ = event_tx.send(EngineEvent::ToolDone {
+                                    job_id,
+                                    result: Err(MupdfError::NotPermitted(need).to_string()),
+                                    sizes: None,
+                                });
+                                continue;
+                            }
                             // Compressing a document with no unsaved changes reads its file, so
                             // "before" is the size the user knows and a result that is not smaller
                             // is the file itself.

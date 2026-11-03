@@ -2041,3 +2041,67 @@ Found on the way, both the journal cost of `docs/backlog.md` item 15:
 - Where Apply's time goes (2000 marks, 200 pages, merged): MuPDF's pass 375 ms, the text under the
   marks before (for the outline's words) and the content snapshot 118 ms, the text check after
   MuPDF's pass 106 ms, the replacement text and resources 63 ms, the rest 25 ms.
+
+### 15.4 Phase 2: encryption and permissions (rows BA, BB)
+
+**Metrics.** *Protect time*: `MupdfEngine::protect` from call to return, writing the open
+document to a new file with AES-256 (the current state written to memory, read again, saved with
+the protection, renamed, and the new file opened), against `MupdfEngine::save(Some(path))`, the
+plain Save As. *Open with password*: `open_document_with_password` of the protected file with its
+password to open (AES-256's key derivation, §15.1).
+
+**Row BA, encryption.** `crates/engine-mupdf/tests/secure_test.rs` (10 tests, in the suite):
+
+- A plain document protected with AES-256, the password to open `açık-ğüşiöç` and the permissions
+  password `Sahip-İı-ŞĞ`, print only: the file asks for a password, refuses one without the
+  Turkish letters, opens with the password to open as print-only and with the permissions
+  password with everything; its text is not in the file's bytes; the engine goes on with the new
+  file and every permission; the original file is not encrypted.
+- In place: protected, then the password changed (the old one is refused, the new one opens),
+  then the protection removed (the file opens without a password, not encrypted).
+- Unsaved changes (a note) are in the protected file. A file another program holds without
+  sharing a rename (Windows): Protect fails, the document is opened again with the note, which
+  was saved in place first, and the file is not encrypted.
+- A password over 127 bytes is refused and writes nothing, not even a `.part` file.
+- Opening in another reader is the maintainer's to check.
+
+Speed, `protect_speed_bench` in `crates/engine-mupdf/tests/secure_bench.rs` (ignored), release
+build, 2026-11-03, the §1 machine:
+
+```powershell
+cargo test --release -p engine-mupdf --test secure_bench protect_speed -- --ignored --nocapture
+```
+
+A generated document of 1000 Letter pages, 40 lines each (3032 KB):
+
+| Step | Run 1 | Run 2 | Run 3 |
+| :--- | ---: | ---: | ---: |
+| Save As (plain) | 47 ms | 54 ms | 52 ms |
+| Protect, AES-256 | 135 ms | 142 ms | 141 ms |
+| Open with password | 45 ms | 37 ms | 108 ms |
+
+The protected file is 530 KB: Protect compresses the streams the generator wrote raw.
+
+**Row BB, permissions.** A document MuPDF protected print-only (an empty password to open, a
+permissions password) reads as print-only (`permissions.print`, nothing else); one without
+encryption reads as everything. An annotation on it is refused (`NotPermitted(Annotate)`) and
+nothing is added; a wrong permissions password, the empty one and the password to open unlock
+nothing, and the page still draws (MuPDF drops its keys at a failed try; the engine authenticates
+again); the permissions password unlocks everything and the annotation goes in. Changing or
+removing the protection is refused until then, and the file is left as it was. Without the copy
+permission, Extract and Merge of the open document are refused and write nothing; Compress runs and
+its output still asks for a password; unlocked, Extract runs. The app refuses first, with the
+reason in the status bar: the tools for comments, crop and redaction, filling a field, copying the
+selection; with no permission to change anything, every edit button is off.
+
+**Mutation checks** (each made a test fail, then was undone): `from_bits` instead of
+`from_bits_truncate` in `patches/mupdf` (5 tests: every permission reported); no permission check
+in `MupdfEngine::edit`; no authentication again after a failed unlock (the page draws blank); no
+permission check before a tool job; no save in place before Protect over the open file (the held
+file loses the note); no "every permission" check before Protect; an unlock that takes any right
+password (the password to open unlocks).
+
+**Signatures.** A signed signature field is counted and a certifying signature's DocMDP level (1, 2,
+3) is read (`signatures_and_certification_are_read`); the app asks before Save As, Protection and
+a redaction of a signed document, and before the first change a certifying signature does not
+allow. These questions are not covered by a test; they need the window.

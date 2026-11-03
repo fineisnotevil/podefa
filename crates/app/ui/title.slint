@@ -209,6 +209,8 @@ export component TitleRow inherits Rectangle {
     in property <int> active-tab;
     in property <bool> editable;
     in property <bool> repaired;
+    // Plan 0009 Phase 2: a PDF is open, so Protection can be shown.
+    in property <bool> protectable;
     in property <bool> can-undo;
     in property <bool> can-redo;
     in property <[string]> recent-files;
@@ -218,6 +220,7 @@ export component TitleRow inherits Rectangle {
     callback open-recent(int);
     callback save();
     callback save-as();
+    callback protection();
     callback undo();
     callback redo();
     callback choose-theme(int);
@@ -452,7 +455,7 @@ export component TitleRow inherits Rectangle {
                     icon: @image-url("icons/chevron-down.svg");
                     icon-size: 12px;
                     tip: "Save Options";
-                    enabled: root.editable || root.repaired;
+                    enabled: root.editable || root.repaired || root.protectable;
                     checked: save-menu.is-open;
                     clicked => {
                         root.menu-from-keyboard = self.has-focus;
@@ -594,6 +597,15 @@ export component TitleRow inherits Rectangle {
                             activated => {
                                 save-menu.close();
                                 root.save-as();
+                            }
+                        }
+                        MenuRow {
+                            icon: @image-url("icons/lock.svg");
+                            label: "Protection...";
+                            enabled: root.protectable;
+                            activated => {
+                                save-menu.close();
+                                root.protection();
                             }
                         }
                         if root.repaired : MenuRow {

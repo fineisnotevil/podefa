@@ -550,14 +550,18 @@ fn ocr_redaction_bench() {
 /// 200 Letter pages of 40 text lines each; every fourth line names `ACME-4711`, so a search for
 /// it finds 10 hits a page, 2000 in all.
 fn text_200p() -> Vec<u8> {
-    const PAGES: usize = 200;
+    text_pages(200)
+}
+
+/// `pages` pages of 40 lines, every fourth naming `ACME-4711`.
+fn text_pages(pages: usize) -> Vec<u8> {
     let mut objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         Vec::new(),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
     ];
     let mut kids = String::new();
-    for p in 0..PAGES {
+    for p in 0..pages {
         let mut content = String::from(
             "BT /F1 11 Tf 13 TL 60 740 Td
 ",
@@ -597,7 +601,7 @@ endstream",
         );
         kids.push_str(&format!("{page_obj} 0 R "));
     }
-    objects[1] = format!("<< /Type /Pages /Kids [{kids}] /Count {PAGES} >>").into_bytes();
+    objects[1] = format!("<< /Type /Pages /Kids [{kids}] /Count {pages} >>").into_bytes();
     let mut out = b"%PDF-1.7
 "
     .to_vec();
@@ -722,4 +726,57 @@ fn apply_speed_bench() {
          mark {mark_ms:.0} ms, apply {apply_ms:.0} ms, undo {undo_ms:.0} ms, redo {redo_ms:.0} ms, \
          redacted save {save_ms:.0} ms; hits left on page 1: {left}"
     );
+}
+
+/// Row BA (Plan 0009 Phase 2): a 1000-page document written with AES-256 and Turkish passwords
+/// through the engine's Protect, against a plain Save As, and opened again with the password.
+#[test]
+#[ignore = "measurement, run by hand"]
+fn protect_speed_bench() {
+    use engine_mupdf::MupdfEngine;
+    use pdf_core::secure::{Encryption as Aes, Permissions, Protection};
+
+    let source = scratch("protect_1000p.pdf");
+    std::fs::write(&source, text_pages(1000)).expect("fixture");
+    println!(
+        "source {} KB",
+        std::fs::metadata(&source).expect("len").len() / 1024
+    );
+    for run in 1..=3 {
+        let mut engine = MupdfEngine::new();
+        engine
+            .open_document_with_password(&source, None)
+            .expect("open");
+        let plain = scratch(&format!("protect_plain_{run}.pdf"));
+        let t = Instant::now();
+        engine.save(Some(&plain)).expect("save as");
+        let plain_ms = ms(t);
+        let mut engine = MupdfEngine::new();
+        engine
+            .open_document_with_password(&source, None)
+            .expect("open");
+        let target = scratch(&format!("protect_aes_{run}.pdf"));
+        let t = Instant::now();
+        let (_, bytes) = engine
+            .protect(
+                Some(&target),
+                &Protection::Encrypt(Aes {
+                    user: "açık-ğüşiöç".to_owned(),
+                    owner: "Sahip-İı-ŞĞ".to_owned(),
+                    permissions: Permissions::ALL,
+                }),
+            )
+            .expect("protect");
+        let protect_ms = ms(t);
+        let t = Instant::now();
+        let mut reader = MupdfEngine::new();
+        reader
+            .open_document_with_password(&target, Some("açık-ğüşiöç"))
+            .expect("reopen");
+        let open_ms = ms(t);
+        println!(
+            "run {run}: Save As {plain_ms:.0} ms, Protect AES-256 {protect_ms:.0} ms ({} KB), open with password {open_ms:.0} ms",
+            bytes / 1024
+        );
+    }
 }

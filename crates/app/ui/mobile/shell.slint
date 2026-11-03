@@ -303,6 +303,8 @@ export component MobileShell inherits Rectangle {
     callback reduce-motion-changed(bool);
     callback about();
     callback props-open();
+    // Plan 0009 Phase 2: the document's protection.
+    callback protection-open();
     callback stamp-open(int);
     callback convert-open(int);
     callback find-open();
@@ -1347,6 +1349,15 @@ export component MobileShell inherits Rectangle {
                     clicked => {
                         root.more-menu = false;
                         root.props-open();
+                    }
+                }
+                SheetRow {
+                    icon: @image-url("../icons/lock.svg");
+                    label: "Protection";
+                    enabled: root.has-doc;
+                    clicked => {
+                        root.more-menu = false;
+                        root.protection-open();
                     }
                 }
                 SheetRow {

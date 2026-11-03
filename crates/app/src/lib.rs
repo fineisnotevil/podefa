@@ -24,6 +24,7 @@ use pdf_core::nav::{
 };
 use pdf_core::pages::{PageMap, PageOp, follow, kept_rows};
 use pdf_core::search::{SearchHit, SearchResults};
+use pdf_core::secure::Need;
 use pdf_core::select::{PagePoint, PageSelection, SelectMode};
 use pdf_core::settings::{Settings, Theme};
 use pdf_core::{
@@ -56,6 +57,7 @@ mod dialogs;
 mod fields_ui;
 pub mod platform;
 mod redact_ui;
+mod secure_ui;
 mod stamps_ui;
 mod tabs;
 mod tools_ui;
@@ -452,6 +454,12 @@ struct AppState {
     /// The Apply of redaction marks waiting for its outcome: its edit id and the file the
     /// redacted copy goes to (Plan 0009 Phase 1).
     redact_pending: Option<(u64, PathBuf)>,
+    /// Plan 0009 Phase 2: the document's encryption, permissions and signatures; whether it is a
+    /// PDF (`editable` is that and a permission to edit something); whether the user was told an
+    /// edit is a change the certifying signature does not allow.
+    security: pdf_core::secure::Security,
+    pdf_editable: bool,
+    certified_warned: bool,
     /// Form fields of the near pages, those asked for, the field being filled, and what the
     /// document's form has (Plan 0006).
     fields: HashMap<u32, Vec<pdf_core::form::FieldInfo>>,
@@ -598,6 +606,9 @@ impl AppState {
             ink_shown: None,
             crop: None,
             redact_pending: None,
+            security: pdf_core::secure::Security::default(),
+            pdf_editable: false,
+            certified_warned: false,
             fields: HashMap::new(),
             fields_pending: HashSet::new(),
             field_edit: None,
@@ -2266,6 +2277,16 @@ impl AppState {
         if !self.editable {
             return;
         }
+        // The first edit a certifying signature does not allow is asked about (Plan 0009 §3.5).
+        // An edit the permissions withhold goes on to the engine, whose refusal says why.
+        if !self.certified_warned
+            && !self.security.certification_allows(op.need())
+            && !matches!(op, EditOp::ApplyRedactions { .. })
+        {
+            self.certified_warned = true;
+            secure_ui::warn_certified(op);
+            return;
+        }
         self.next_edit_id += 1;
         if matches!(op, EditOp::Pages(_)) {
             self.bench.restructure_sent();
@@ -2375,6 +2396,18 @@ impl AppState {
     /// tool stays; with nothing selected, the markup tool is switched on (or off again).
     fn choose_tool(&mut self, ui: &MainWindow, tool: Tool) {
         if matches!(tool, Tool::Note | Tool::Ink | Tool::Crop | Tool::Redact) && !self.editable {
+            return;
+        }
+        // A tool the document's permissions withhold (Plan 0009 Phase 2).
+        let need = match tool {
+            Tool::Markup(_) | Tool::Note | Tool::Ink => Some(Need::Annotate),
+            Tool::Crop | Tool::Redact => Some(Need::Modify),
+            _ => None,
+        };
+        if let Some(need) = need
+            && self.tool != tool
+            && !self.permits(ui, need)
+        {
             return;
         }
         if let Tool::Markup(kind) = tool
@@ -2523,7 +2556,7 @@ impl AppState {
 
     /// Ctrl+C: the selected text to the clipboard (Plan 0003, §3.3).
     fn copy_selection(&mut self, ui: &MainWindow) {
-        if self.sel_text.is_empty() {
+        if self.sel_text.is_empty() || !self.permits(ui, Need::Copy) {
             return;
         }
         let copied = platform::copy_text(&self.sel_text);
@@ -3816,6 +3849,7 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
             editable,
             repaired,
             form,
+            security,
         } => {
             dialogs::password_done(ui);
             ui.set_has_error(false);
@@ -3854,9 +3888,19 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
                      Save > Save Repaired Copy writes a clean copy",
                 );
             }
+            // A protected document (Plan 0009 Phase 2).
+            if !security.permissions.is_all() {
+                status.push_str(" - its permissions withhold some actions; the lock unlocks them");
+            }
+            if security.certified.is_some() {
+                status.push_str(" - certified: changes may show as not allowed in other readers");
+            }
             ui.set_status_text(SharedString::from(status));
             with_state(|state| {
                 state.set_document(ui, page_sizes, editable);
+                state.pdf_editable = editable;
+                state.certified_warned = false;
+                state.set_security(ui, security);
                 state.document_opened(ui);
                 state.warm_pending = true;
             });
@@ -4044,7 +4088,10 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
             if result.is_ok() {
                 platform::written(&path);
             }
-            match with_state_ret(|state| state.saved(ui, path, result)).flatten() {
+            let ok = result.is_ok();
+            let next = with_state_ret(|state| state.saved(ui, path, result)).flatten();
+            secure_ui::saved(ui, ok);
+            match next {
                 Some(SavedNext::Then(then)) => run_after(ui, then),
                 Some(SavedNext::SaveAs) => save_as(ui),
                 None => {}
@@ -4054,6 +4101,11 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
             with_state(|state| state.bench.aborted(ms));
         }
         EngineEvent::NeedsPassword { wrong } => dialogs::needs_password(ui, wrong),
+        EngineEvent::Security {
+            generation,
+            security,
+            wrong,
+        } => secure_ui::security_changed(ui, generation, security, wrong),
         EngineEvent::Error { message } => {
             dialogs::password_done(ui);
             ui.set_has_error(true);
@@ -4147,6 +4199,30 @@ fn save(ui: &MainWindow) {
 
 /// File > Save As: the platform's save dialog, then a full copy that becomes the document.
 fn save_as(ui: &MainWindow) {
+    // A full copy breaks the signatures in it (Plan 0009 §3.5): asked first.
+    let signed = with_state_ret(|state| state.security.signed).unwrap_or(0);
+    if signed > 0 {
+        let weak = ui.as_weak();
+        platform::MessageDialog::new(secure_ui::signed_warning(signed, "Save As"))
+            .level(platform::Level::Warning)
+            .buttons(platform::Buttons::YesNo)
+            .show(move |answer| {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                if answer == platform::Answer::Yes {
+                    choose_save_as(&ui);
+                } else {
+                    with_state(|state| state.after_save = None);
+                }
+            });
+        return;
+    }
+    choose_save_as(ui);
+}
+
+/// The file dialog of Save As.
+fn choose_save_as(ui: &MainWindow) {
     let Some((dir, name)) = with_state_ret(|state| {
         let current = state.doc_path.clone().filter(|_| state.editable)?;
         // A document made from pages starts where the pages came from, under its tab's name.
@@ -5246,6 +5322,33 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
         main_window.on_redact_apply(move || {
             if let Some(ui) = weak.upgrade() {
                 redact_ui::apply(&ui);
+            }
+        });
+    }
+    // Protection (Plan 0009 Phase 2).
+    {
+        let weak = main_window.as_weak();
+        main_window.on_protect_open(move || {
+            if let Some(ui) = weak.upgrade() {
+                secure_ui::open(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_protect_apply(move || {
+            if let Some(ui) = weak.upgrade() {
+                secure_ui::apply(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_protect_remove(move || {
+            if let Some(ui) = weak.upgrade() {
+                secure_ui::remove(&ui);
+            }
+        });
+        let weak = main_window.as_weak();
+        main_window.on_protect_unlock(move || {
+            if let Some(ui) = weak.upgrade() {
+                secure_ui::unlock(&ui);
             }
         });
     }

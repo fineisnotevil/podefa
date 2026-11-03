@@ -207,6 +207,10 @@ impl AppState {
             self.set_field_focus(ui, None);
             return false;
         };
+        // A form the document's permissions keep from being filled (Plan 0009 Phase 2).
+        if !self.permits(ui, pdf_core::secure::Need::Fill) {
+            return true;
+        }
         self.clear_selection(ui);
         self.select_annotation(ui, None);
         self.set_field_focus(ui, Some((page, index)));
