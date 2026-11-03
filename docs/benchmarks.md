@@ -1915,3 +1915,61 @@ password, both with Turkish letters, and print-only permissions. Two runs each:
   (`patches/mupdf/src/pdf/document.rs:841-844`).
 - The cost of AES-256 is its key derivation (once per save and per password tried), not the
   streams: the file is small. A large file's stream encryption is measured in Phase 2.
+
+### 15.2 Phase 1 start: text and OCR under a mark
+
+`ocr_redaction_bench` in `crates/engine-mupdf/tests/secure_bench.rs` (ignored), release build,
+2026-11-03, the §1 machine. Asked at Phase 0's gate: make sure the text under a box and an OCR
+layer are gone.
+
+```powershell
+cargo test --release -p engine-mupdf --test secure_bench ocr -- --ignored --nocapture
+```
+
+A generated page puts a different secret (`SECRET-<letter>`) in each place a page can keep text
+under a box, over a scanned image (57 x 6 pixels of grey `0x11`, uncompressed):
+
+| Letter | Where |
+| :--- | :--- |
+| V | visible text |
+| O | an OCR layer: invisible text (render mode 3) |
+| Z | an OCR layer horizontally scaled (`60 Tz`), as Tesseract writes it |
+| K | clipping text (render mode 7) |
+| C | text with zero fill alpha |
+| T | a marked-content sequence's inline `/ActualText` |
+| F | invisible text in a form XObject |
+| P | text in a tiling pattern that fills a rectangle under the box |
+| M | text in a soft mask's group, the mask applied to a fill under the box |
+| H | text in an optional-content layer that is hidden |
+| S | a structure element's `/ActualText` for a marked sequence (`/MCID`) under the box |
+| U | the page's embedded thumbnail (`/Thumb`), its samples spelling the secret |
+| I | the page's private application data (`/PieceInfo`) |
+
+One redaction annotation covers the band; MuPDF applies it (text removed, image pixels blanked,
+black boxes), then the document is saved with garbage collection (level 4) and decompressed, and
+the bytes are searched for each secret, literal or hex. "Spilling" makes the pattern's and the
+mask's fills reach past the box. A control run puts the box where nothing is.
+
+| Run | Text after Apply | Bytes after the garbage-collecting save | Image under the box |
+| :--- | :--- | :--- | :--- |
+| Control (box away from everything) | all but U, I (not text) | all 13 | `0x11` |
+| Line art kept (MuPDF's default), no boxes | P, M | T, P, M, U, I | white |
+| Line art kept, black boxes | P, M | T, P, M, U, I | black |
+| Line art removed if covered | none | T, P, M, U, I | black |
+| Spilling, line art removed if covered | P, M | T, P, M, U, I | black |
+| Spilling, line art removed if touched | none | T, P, M, U, I | black |
+
+- **Gone in every run:** visible text, both OCR layers, clipping text, zero-alpha text, the form
+  XObject's text (MuPDF filters an instanced copy), the hidden layer's text, and the structure
+  element's `/ActualText` (MuPDF edits the `/MCID`'s element). The image's pixels under the box
+  are blanked; outside it they stay `0x11`. The public line stays in every run.
+- **Left for the app:**
+  - an inline `/ActualText` (so also `/Alt` and `/E`) stays in the content stream even when every
+    glyph of its sequence is removed;
+  - MuPDF does not filter inside patterns and soft masks (`recurse = 0`, `pdf-clean.c:1089`): their
+    text is still drawn under the box (and extracted) while the fill using them stays, and their
+    objects stay in the page's resources, so in the file, even after the fill is removed;
+  - the page's `/Thumb` and `/PieceInfo` are untouched.
+- A first version of the fixture painted its clipping text without `q`/`Q`, which clipped
+  everything after it, so MuPDF's filter dropped the pattern and mask fills as invisible and P and
+  M looked removed. With the clip in its own `q`/`Q` they are not.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
 
-//! Plan 0009 Phase 0 measurement: what mupdf-rs 0.8 and MuPDF 1.27.2 do with redaction and
+//! Plan 0009 measurements: what mupdf-rs 0.8 and MuPDF 1.27.2 do with redaction and
 //! encryption (ignored by default; not part of CI).
 //!
 //! A generated page holds a public line and a secret one (`SECRET-42`, uncompressed, so the saved
@@ -15,7 +15,7 @@ use mupdf::pdf::{
     PdfAnnotationType, PdfDocument, PdfRedactOptions, PdfWriteOptions,
     document::{Encryption, Permission},
 };
-use mupdf::{MetadataName, Rect, TextPageFlags};
+use mupdf::{Colorspace, Matrix, MetadataName, Rect, TextPageFlags};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -324,4 +324,225 @@ fn redaction_undo_bench() {
     );
     doc.redo().expect("redo");
     report("undo-only after redo", &doc);
+}
+
+/// Every place a scanned or tagged page keeps text under a box: visible text, an OCR layer
+/// (invisible, render mode 3, also horizontally scaled as Tesseract writes it), clipping text,
+/// text with zero alpha, a marked-content `/ActualText`, text in a form XObject, in a tiling
+/// pattern and in a soft mask, in a hidden layer, a structure element's `/ActualText`, the page's
+/// thumbnail and its private application data; and a scanned image under the box. Each secret has its own letter so
+/// a leak names its place. The box covers PDF y 332-462 and x 50-560 (fitz y 330-460).
+/// With `spill`, the pattern and soft-mask fills reach past the box (to x 600).
+fn ocr_fixture(spill: bool) -> Vec<u8> {
+    let (pw, mw) = if spill { (528, 300) } else { (200, 200) };
+    let content = format!(
+        "BT /F1 14 Tf 72 700 Td (PUBLIC-LINE) Tj ET\n\
+        q 570 0 0 60 20 340 cm /Im1 Do Q\n\
+        BT /F1 12 Tf 72 450 Td (SECRET-V visible) Tj ET\n\
+        BT 3 Tr /F1 12 Tf 72 430 Td (SECRET-O ocr) Tj ET\n\
+        BT 3 Tr /F1 10 Tf 1 0 0 1 300 430 Tm 60 Tz (SECRET-Z scaled) Tj ET\n\
+        q BT 7 Tr /F1 12 Tf 72 410 Td (SECRET-K clip) Tj ET Q\n\
+        q /GS0 gs BT /F1 12 Tf 300 410 Td (SECRET-C alpha) Tj ET Q\n\
+        /Span << /ActualText (SECRET-T) >> BDC BT 3 Tr /F1 12 Tf 72 390 Td (xxxx) Tj ET EMC\n\
+        q 1 0 0 1 300 385 cm /Fm1 Do Q\n\
+        q /Pattern cs /P1 scn 72 345 {pw} 30 re f Q\n\
+        q /GSm gs 0 0 1 rg 300 345 {mw} 30 re f Q
+        /OC /oc1 BDC BT /F1 12 Tf 72 360 Td (SECRET-H hidden) Tj ET EMC
+        /P << /MCID 0 >> BDC BT /F1 12 Tf 300 360 Td (yyyy) Tj ET EMC"
+    );
+    let form = "BT 3 Tr /F1 12 Tf 0 5 Td (SECRET-F form) Tj ET";
+    let pattern = "BT /F1 10 Tf 2 10 Td (SECRET-P pattern) Tj ET";
+    let mask = "1 g 0 0 612 792 re f BT 0 g /F1 12 Tf 300 350 Td (SECRET-M mask) Tj ET";
+    let font = "/Resources << /Font << /F1 4 0 R >> >>";
+    let pixels = vec![0x11u8; 57 * 6 * 3];
+    let stream = |dict: String, data: &[u8]| -> Vec<u8> {
+        let mut v = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+        v.extend_from_slice(data);
+        v.extend_from_slice(b"\nendstream");
+        v
+    };
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [13 0 R] /D << /OFF [13 0 R] >> >>           /StructTreeRoot 14 0 R /MarkInfo << /Marked true >> >>"
+            .to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R \
+          /Resources << /Font << /F1 4 0 R >> /XObject << /Im1 6 0 R /Fm1 7 0 R >> \
+          /Pattern << /P1 8 0 R >> /ExtGState << /GS0 9 0 R /GSm 10 0 R >>           /Properties << /oc1 13 0 R >> >> /Thumb 12 0 R /StructParents 0           /PieceInfo << /Illustrator << /Private (SECRET-I) >> >> >>"
+            .to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        stream(String::new(), content.as_bytes()),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 57 /Height 6 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8"
+                .into(),
+            &pixels,
+        ),
+        stream(
+            format!("/Type /XObject /Subtype /Form /BBox [0 0 300 50] {font}"),
+            form.as_bytes(),
+        ),
+        stream(
+            format!(
+                "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 200 30] \
+                 /XStep 200 /YStep 30 /Matrix [1 0 0 1 72 345] {font}"
+            ),
+            pattern.as_bytes(),
+        ),
+        b"<< /Type /ExtGState /ca 0 >>".to_vec(),
+        b"<< /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G 11 0 R >> >>".to_vec(),
+        stream(
+            format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 612 792] \
+                 /Group << /S /Transparency /CS /DeviceGray >> {font}"
+            ),
+            mask.as_bytes(),
+        ),
+        // 12 thumbnail (its samples spell a secret), 13 hidden layer, 14-15 structure tree.
+        stream(
+            "/Width 3 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8".into(),
+            b"SECRET-UX",
+        ),
+        b"<< /Type /OCG /Name (Layer) >>".to_vec(),
+        b"<< /Type /StructTreeRoot /K 15 0 R /ParentTree << /Nums [0 [15 0 R]] >> >>".to_vec(),
+        b"<< /Type /StructElem /S /P /P 14 0 R /Pg 3 0 R /K 0 /ActualText (SECRET-S) >>".to_vec(),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The secrets of `ocr_fixture` found in `bytes`, literal or hex-encoded.
+fn leaks(bytes: &[u8]) -> Vec<char> {
+    "VOZKCTFPMHSUI"
+        .chars()
+        .filter(|c| {
+            let token = format!("SECRET-{c}");
+            let hex: String = token.bytes().map(|b| format!("{b:02x}")).collect();
+            count(bytes, token.as_bytes()) > 0
+                || count(&bytes.to_ascii_lowercase(), hex.as_bytes()) > 0
+        })
+        .collect()
+}
+
+/// The text MuPDF extracts from page 1, the image's colour left of the box (x 30) and under it
+/// (x 300), at fitz y 400, rendered.
+fn ocr_report(label: &str, doc: &PdfDocument) {
+    let text = page_text(doc);
+    let page = doc.load_page(0).expect("page");
+    let pix = page
+        .to_pixmap(&Matrix::IDENTITY, &Colorspace::device_rgb(), false, false)
+        .expect("pixmap");
+    let px = |x| pix.pixel(x, 400).expect("pixel").components().to_vec();
+    println!(
+        "[ocr] {label}: text leaks {:?}, public {}; image left {:?}, under {:?}",
+        leaks(text.as_bytes()),
+        text.contains("PUBLIC-LINE"),
+        px(30),
+        px(300)
+    );
+}
+
+#[test]
+#[ignore = "measurement, run by hand"]
+fn ocr_redaction_bench() {
+    use mupdf::pdf::PdfRedactLineArtMethod as LineArt;
+    const BOX: Rect = Rect {
+        x0: 50.0,
+        y0: 330.0,
+        x1: 560.0,
+        y1: 460.0,
+    };
+    println!("[ocr] fixture bytes leak {:?}", leaks(&ocr_fixture(false)));
+    for (name, spill, line_art, black_boxes, mark) in [
+        (
+            "control, box away from everything",
+            true,
+            LineArt::None,
+            false,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+        ),
+        (
+            "covered, line art kept, no boxes",
+            false,
+            LineArt::None,
+            false,
+            BOX,
+        ),
+        ("covered, line art kept", false, LineArt::None, true, BOX),
+        (
+            "covered, line art if covered",
+            false,
+            LineArt::RemoveIfCovered,
+            true,
+            BOX,
+        ),
+        (
+            "spilling, line art if covered",
+            true,
+            LineArt::RemoveIfCovered,
+            true,
+            BOX,
+        ),
+        (
+            "spilling, line art if touched",
+            true,
+            LineArt::RemoveIfTouched,
+            true,
+            BOX,
+        ),
+    ] {
+        let source = ocr_fixture(spill);
+        let mut doc = PdfDocument::from_bytes(&source).expect("open");
+        doc.enable_journal().expect("journal");
+        ocr_report(&format!("{name} before"), &doc);
+        let mut page = doc.load_pdf_page(0).expect("page");
+        doc.begin_operation("Mark").expect("begin");
+        let mut annot = page
+            .create_annotation(PdfAnnotationType::Redact)
+            .expect("redact");
+        annot.set_rect(mark).expect("rect");
+        doc.end_operation().expect("end");
+        let options = PdfRedactOptions {
+            black_boxes,
+            line_art,
+            ..PdfRedactOptions::default()
+        };
+        assert!(page.redact_with_options(options).expect("apply"));
+        drop(page);
+        ocr_report(&format!("{name} after"), &doc);
+        let mut gc = PdfWriteOptions::default();
+        gc.set_garbage_level(4).set_decompress(true);
+        let bytes = save(
+            &doc,
+            &format!("secure_ocr_{}.pdf", name.replace([' ', ','], "_")),
+            gc,
+        )
+        .expect("save");
+        println!(
+            "[ocr]   gc save, decompressed: bytes leak {:?}",
+            leaks(&bytes)
+        );
+        let back = PdfDocument::from_bytes(&bytes).expect("reopen");
+        ocr_report("   reopened", &back);
+    }
 }
