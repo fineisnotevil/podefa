@@ -32,3 +32,4 @@ Each ADR follows a standardized format:
 - [0012: A Platform Layer, and Documents on Android as Cache Copies of `content://` URIs](0012-platform-layer-and-android-files.md)
 - [0013: Printing - Pixels to Windows, a PDF to CUPS and Android](0013-printing.md)
 - [0014: Verifying Signatures in Rust from the File's Bytes](0014-verifying-signatures-from-the-file.md)
+- [0015: Signing Through MuPDF with Our Own CMS, as a Save, and a Reopen After It](0015-signing-with-mupdf-and-our-own-cms.md)

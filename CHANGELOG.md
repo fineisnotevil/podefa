@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sign** (Plan 0009 Phase 4, ADR 0015): the Sign tool in Edit (and the phone's edit strip) draws
+  the box a signature goes in, and a click on an empty signature field signs that field. The
+  dialog takes a `.p12`/`.pfx` key file and its password (modern AES and the legacy 3DES/RC2
+  files), a reason and a location, and shows the appearance with the signer's name. The signature
+  is PAdES baseline B-B (`ETSI.CAdES.detached`, signing-certificate-v2), RSA, ECDSA P-256 or
+  P-384, added as an incremental update after the document's changes are saved; a second
+  signature keeps the first intact. A certified document that allows no change, a repaired or a
+  redacted file are refused with the reason.
 - Signatures are read and verified (Plan 0009 Phase 3, ADR 0014): `adbe.pkcs7.detached` and
   `ETSI.CAdES.detached`, RSA and ECDSA, the certificate chain against the system's roots, and
   changes after signing under DocMDP and FieldMDP. A shield beside the page number, a Signatures

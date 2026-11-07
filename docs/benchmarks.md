@@ -2150,6 +2150,57 @@ that thread, so it costs no memory with size, but no large file signed by anothe
 | An unknown changed object counts as free | `new_page_contents_after_level_3_are_forbidden` |
 | The comparison skipped, anything saved after is allowed | seven tests |
 
+### 15.6 Phase 4: signing (row BD)
+
+**Metrics, defined before the runs.** `t_key`: `engine_mupdf::signer_name` in a release build, the
+key file read and opened with its password, as the sign dialog does on Enter. `t_sign`:
+`MupdfEngine::sign` in a release build on page 1 of a 200-page document with no unsaved changes,
+from the call to its return: the checks, the key file, the signature, the save in place and the
+reopen. Growth: the file's size after the signature minus before. `app.exe`: the release binary's
+size in bytes against Phase 3's (`db31925`; `310d2c1`, the commit before, changed only docs), same toolchain. Each signing run is three
+runs, each on a fresh copy.
+
+**Results** (2026-11-07, Windows 11, release build; `signing_timings` in
+`crates/engine-mupdf/tests/sign_test.rs`, page 1 of the Save As copy of `large_200p.pdf`):
+
+| Key file | `t_key` (3 runs) | `t_sign` (3 runs) | Growth |
+| :--- | :--- | :--- | :--- |
+| `signer_rsa.p12` (RSA 2048, PBES2) | 3.6 / 2.8 / 2.8 ms | 17.8 / 15.2 / 15.4 ms | 42,491 / 42,491 / 42,490 B |
+| `signer_legacy.p12` (RSA 2048, 3DES/RC2) | 1.4 / 1.3 / 1.4 ms | 15.3 / 14.5 / 13.9 ms | 42,490 B |
+| `signer_ec.p12` (P-256) | 3.0 / 2.9 / 2.8 ms | 15.3 / 15.5 / 15.3 ms | 41,752 B |
+| `signer_p384.p12` (P-384) | 3.2 / 3.0 / 3.1 ms | 16.6 / 15.0 / 16.2 ms | 41,817 B |
+
+Of the growth, about 27 KB is MuPDF's Nimbus Sans in the appearance (backlog item 34), and the
+rest is mostly the `/Contents` room reserved for the CMS (the certificates, the signature and
+2 KiB more, written as hex). `app.exe`: 21,147,136 bytes against 20,829,184 (+317,952 bytes,
++310.5 KiB: the PKCS#12 reader, the CMS builder, the dialog).
+
+**Row BD, another reader.** `openssl cms -verify -binary -purpose any` against
+`signer_root.pem`, over every signature the tests left in `target/tmp/sign_*.pdf`: 30 of 30
+verify, each with content type, message digest and signing-certificate-v2 and no signing time;
+the file signed from the window verifies too. Poppler draws the appearances, Turkish names
+included.
+
+**Mutations** (each alone, `sign_test` run, the file put back; 10 of 10 caught):
+
+| Mutation | Fails |
+| :--- | :--- |
+| `disallow_new_increments` not set in `sign.c` | 7 tests, among them `a_signature_made_here_verifies_here`, `a_second_signature_keeps_the_first` |
+| `/Producer` stamped after signing, not before | `a_file_without_our_producer_is_signed_whole` |
+| No reopen after signing | `a_save_after_signing_keeps_the_signature`, `a_second_signature_keeps_the_first` |
+| Key file read after the save before signing | `a_wrong_password_changes_nothing` |
+| No signing-certificate-v2 | `the_signature_is_pades_baseline` |
+| `adbe.pkcs7.detached` written | `the_signature_is_pades_baseline` |
+| The MAC not checked | `a_key_file_with_a_damaged_mac_is_refused` |
+| A wrong message digest | 6 tests |
+| Level 1 not refused | `a_certified_document_that_allows_no_change_is_not_signed` |
+| The legacy key derivation with SHA-256 | `legacy_and_empty_password_key_files_sign_too`, `the_key_is_matched_to_its_own_certificate` |
+
+Not covered by a mutation: the save before signing as a recovery (a failed signature after it
+leaves the saved changes in the file, which the reopen shows), and the RSA key's match to its
+certificate when the key file lists the signer's certificate first (only the EC fixture lists
+another first).
+
 ## 16. Printing
 
 ADR 0013. **`t_print_to_pdf`** is the time for `crates/app/tests/print_test.rs`'s

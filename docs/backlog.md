@@ -993,3 +993,29 @@ Plan 0009 Phase 3 checks `adbe.pkcs7.detached` and `ETSI.CAdES.detached` signatu
 
 The old formats when a real document needs them; revocation and timestamps as a decision of their
 own, since they need the network or the document's validation data. Report the upstream bug.
+
+## 34. Signing: what Phase 4 leaves out
+
+### Problem
+
+Plan 0009 Phase 4 signs with a key from a `.p12`/`.pfx` file, in the PAdES B-B form, with MuPDF's
+appearance (ADR 0015).
+
+- Other key sources: a PKCS#11 token or smart card (Turkish qualified e-signatures, e-İmza), the
+  Windows certificate store, Android's KeyChain, the macOS keychain. The plan's §9 question 5 left
+  them to Phase 4's gate.
+- No timestamp (PAdES B-T, RFC 3161) and no validation data (B-LT, the DSS): both need the network.
+- No certifying signature (a first signature with a DocMDP level) and no choice of fields to lock;
+  MuPDF writes a FieldMDP reference that locks nothing unless the field's `/Lock` says so.
+- The appearance is MuPDF's text layout; no image, no hand-drawn signature, no choice of what it
+  shows. The dialog's preview is drawn by the app to look like it, not by MuPDF
+  (`pdf_preview_signature_as_*` would need the signer on the engine thread before the dialog's
+  Sign, one more round trip).
+- MuPDF embeds its built-in Nimbus Sans in each signature's appearance (about 27 KB), also for a
+  name in plain ASCII.
+
+### Proposed Solution
+
+Each key source is a `CmsSigner` of its own (`patches/mupdf/src/pdf/sign.rs`): the CMS needs only
+a digest's signature and the certificates. Timestamps and validation data as a decision of their
+own with revocation (item 33). A certifying signature and locks when a user needs them.
