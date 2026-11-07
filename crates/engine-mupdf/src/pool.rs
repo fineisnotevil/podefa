@@ -274,7 +274,7 @@ fn run_into(
 /// The component count comes from the pixmap rather than a constant, and every pixmap this crate
 /// rasterizes into is created alpha-free - so the buffer is 3 bytes per pixel, the format
 /// [`Bitmap`] declares, and the page's white paper is `0xff` rather than a transparent hole.
-fn tight_copy(source: &Pixmap, at: (usize, usize), w: u32, h: u32) -> Bitmap {
+pub(crate) fn tight_copy(source: &Pixmap, at: (usize, usize), w: u32, h: u32) -> Bitmap {
     let stride = source.stride().max(0) as usize;
     let n = source.n() as usize;
     debug_assert_eq!(n, PixelFormat::Rgb8.bytes_per_pixel(), "alpha pixmap");

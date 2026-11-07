@@ -944,9 +944,9 @@ it first (`pdf_core::secure::MAX_PASSWORD_BYTES`).
 
 ### Proposed Solution
 
-A pull request to messense/mupdf-rs with the two `from_bits_truncate` reads (and a typed error
-for over-long passwords instead of the `assert!`), opened once the maintainer agrees; the patch
-goes when a release carries it.
+messense/mupdf-rs#279 (opened 2026-11-07) has the two `from_bits_truncate` reads and a test. A
+typed error for over-long passwords instead of the `assert!` is left for a later pull request. The
+patch goes when a release carries the reads.
 
 ## 32. Printing
 
@@ -954,10 +954,17 @@ goes when a release carries it.
 
 ### Problem Statement
 
-PODEFA has no Print command, so a document's print permissions (`print`, `print_hq`) are read and
-shown in the Protection dialog but follow nothing.
+Print exists since 2026-11-07 (ADR 0013, `docs/benchmarks.md` §16) and follows the permissions.
+What is left:
+
+- MuPDF draws annotations with its "View" usage, so one marked for print only does not print and
+  one marked not to print does.
+- No choice of scale, no n-up, no duplex or paper in the app's dialog (on Windows the driver's
+  Properties has them; through `lp` the printer's defaults apply).
+- `lp` was not run against a queue: the argument list and `lpstat`'s output are tested, and CI
+  builds it. Android's `PrintManager` path is built and not yet run on the phone.
 
 ### Proposed Solution
 
-When printing comes, it follows them: no print without `print`, and a low-resolution raster
-without `print_hq`.
+Add the print usage when mupdf-rs exposes `fz_run_page` with a usage string or a shim is justified,
+and the rest as people ask for them.

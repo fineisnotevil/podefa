@@ -437,6 +437,23 @@ pub fn written(path: &Path) {
     });
 }
 
+/// Hands a PDF to the system's print dialog (`PrintManager`); the activity deletes it when the
+/// dialog has finished with it.
+pub fn print_file(file: &Path, title: &str) -> Result<(), String> {
+    with_env(|env, activity| {
+        let path = env.new_string(file.to_string_lossy())?;
+        let title = env.new_string(title)?;
+        env.call_method(
+            activity,
+            "printFile",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(&path), JValue::Object(&title)],
+        )?;
+        Ok(())
+    })
+    .ok_or_else(|| "the system's print dialog did not start".to_owned())
+}
+
 /// `Activity.finish()`, the way Slint's backend closes the app on an unhandled Back
 /// (`i-slint-backend-android-activity-1.18.1/javahelper.rs:569-575`).
 pub fn close_app() {

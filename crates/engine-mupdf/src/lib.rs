@@ -1812,6 +1812,15 @@ impl EngineHandle {
                                 });
                                 continue;
                             }
+                            // Without high-quality printing a page goes out at low resolution,
+                            // whatever was asked (ISO 32000-1 table 22).
+                            if let ToolJob::Print { low_res, .. } = &mut job
+                                && !engine
+                                    .pdf()
+                                    .is_ok_and(|pdf| secure::permissions(pdf).print_hq)
+                            {
+                                *low_res = true;
+                            }
                             // Compressing a document with no unsaved changes reads its file, so
                             // "before" is the size the user knows and a result that is not smaller
                             // is the file itself.

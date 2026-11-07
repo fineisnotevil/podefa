@@ -25,6 +25,7 @@ pub mod form_data;
 pub mod layout;
 pub mod nav;
 pub mod pages;
+pub mod print;
 pub mod scheduler;
 pub mod search;
 pub mod secure;

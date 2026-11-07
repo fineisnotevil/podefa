@@ -12,6 +12,13 @@ import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
+import android.print.PageRange;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintDocumentInfo;
+import android.print.PrintManager;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import java.io.File;
@@ -304,6 +311,53 @@ public class PodefaActivity extends NativeActivity {
             // Without the names the app just does not warn before replacing.
         }
         return dir.getAbsolutePath();
+    }
+
+    /**
+     * The system's print dialog for a PDF the app wrote. It asks for the printer, pages and copies,
+     * and reads the file when it needs to; the file is deleted when it has finished.
+     */
+    public void printFile(final String path, final String title) {
+        runOnUiThread(() -> {
+            PrintManager manager = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+            if (manager == null) {
+                new File(path).delete();
+                return;
+            }
+            manager.print(title, new PrintDocumentAdapter() {
+                @Override
+                public void onLayout(PrintAttributes before, PrintAttributes after,
+                        CancellationSignal cancel, LayoutResultCallback callback, Bundle extras) {
+                    if (cancel.isCanceled()) {
+                        callback.onLayoutCancelled();
+                        return;
+                    }
+                    PrintDocumentInfo info = new PrintDocumentInfo.Builder(title + ".pdf")
+                            .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                            .build();
+                    callback.onLayoutFinished(info, !after.equals(before));
+                }
+
+                @Override
+                public void onWrite(PageRange[] pages, ParcelFileDescriptor to,
+                        CancellationSignal cancel, WriteResultCallback callback) {
+                    io.execute(() -> {
+                        try (InputStream in = new FileInputStream(path);
+                                OutputStream out = new FileOutputStream(to.getFileDescriptor())) {
+                            pipe(in, out);
+                            callback.onWriteFinished(new PageRange[] {PageRange.ALL_PAGES});
+                        } catch (IOException | RuntimeException e) {
+                            callback.onWriteFailed(e.toString());
+                        }
+                    });
+                }
+
+                @Override
+                public void onFinish() {
+                    new File(path).delete();
+                }
+            }, null);
+        });
     }
 
     /** Copies a file the app wrote back to its document. Queued: returns at once. */

@@ -56,6 +56,7 @@ mod convert_ui;
 mod dialogs;
 mod fields_ui;
 pub mod platform;
+mod print_ui;
 mod redact_ui;
 mod secure_ui;
 mod stamps_ui;
@@ -4412,6 +4413,7 @@ enum KeyCommand {
     Copy,
     Save,
     SaveAs,
+    Print,
     Mark(MarkupKind),
     NoteTool,
     InkTool,
@@ -4438,6 +4440,7 @@ impl KeyCommand {
             KeyCommand::Open
                 | KeyCommand::Save
                 | KeyCommand::SaveAs
+                | KeyCommand::Print
                 | KeyCommand::Close
                 | KeyCommand::NewTab
                 | KeyCommand::NextTab
@@ -4477,6 +4480,7 @@ fn key_command(text: &str, ctrl: bool, shift: bool) -> Option<KeyCommand> {
             '-' => Some(KeyCommand::ZoomOut),
             '0' => Some(KeyCommand::ZoomReset),
             'o' | 'O' => Some(KeyCommand::Open),
+            'p' | 'P' => Some(KeyCommand::Print),
             'b' | 'B' => Some(KeyCommand::ToggleSidebar),
             'f' | 'F' => Some(KeyCommand::Find),
             'c' | 'C' => Some(KeyCommand::Copy),
@@ -4821,6 +4825,10 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
                     save_as(&ui);
                     return true;
                 }
+                KeyCommand::Print => {
+                    print_ui::open(&ui);
+                    return true;
+                }
                 KeyCommand::Close => {
                     tabs::close_active(&ui);
                     return true;
@@ -4876,6 +4884,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
                 | KeyCommand::NewTab
                 | KeyCommand::Save
                 | KeyCommand::SaveAs
+                | KeyCommand::Print
                 | KeyCommand::Close
                 | KeyCommand::NextTab
                 | KeyCommand::PreviousTab => {}
@@ -5325,6 +5334,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
             }
         });
     }
+    print_ui::connect(&main_window);
     // Protection (Plan 0009 Phase 2).
     {
         let weak = main_window.as_weak();

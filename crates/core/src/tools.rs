@@ -6,6 +6,7 @@
 //! on documents of their own, never on the open one (§3.4); this module describes the jobs and
 //! parses what the user types for them.
 
+use crate::print::PrintTarget;
 use std::path::PathBuf;
 
 /// One document a merge takes its pages from.
@@ -51,6 +52,15 @@ pub enum ToolJob {
     /// The open document, as it is now, as a Word (DOCX) file through MuPDF's DOCX writer
     /// (Phase 5).
     ExportWord { output: PathBuf },
+    /// Pages of the open document, as it is now, to a printer (ADR 0013), in this order, a page
+    /// named again for each copy. `low_res` draws them at
+    /// [`LOW_RES_DPI`](crate::print::LOW_RES_DPI); the engine sets it when the document withholds
+    /// high-quality printing, whatever the app asked.
+    Print {
+        pages: Vec<u32>,
+        target: PrintTarget,
+        low_res: bool,
+    },
 }
 
 /// The file format of exported pages.
@@ -120,6 +130,7 @@ impl ToolJob {
             Self::ImagesToPdf { .. } => "Making a PDF of images",
             Self::Compress { .. } => "Compressing",
             Self::ExportWord { .. } => "Exporting as Word",
+            Self::Print { .. } => "Printing",
         }
     }
 
@@ -134,6 +145,10 @@ impl ToolJob {
             Self::ImagesToPdf { output, .. }
             | Self::Compress { output, .. }
             | Self::ExportWord { output } => vec![output.clone()],
+            Self::Print { target, .. } => match target {
+                PrintTarget::File(path) => vec![path.clone()],
+                PrintTarget::Device(_) => Vec::new(),
+            },
         }
     }
 }

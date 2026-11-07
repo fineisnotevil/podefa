@@ -11,6 +11,9 @@ targets = [
 
 [advisories]
 ignore = [
+    # pin-utils was archived upstream on 2026-10-01, pulled transitively by slint 1.18.1 -> spin_on
+    # at build time. No upgrade is available yet; drop this once spin_on moves off it.
+    "RUSTSEC-2026-0441",
     # ttf-parser is unmaintained upstream, pulled transitively by winit -> sctk-adwaita on Linux
     "RUSTSEC-2026-0192",
     # zvariant, zvariant_derive and zbus_names are deprecated upstream (merged into zbus 6), pulled

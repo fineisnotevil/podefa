@@ -17,6 +17,11 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+pub mod printing;
+
+#[cfg(windows)]
+pub mod print_win;
+
 #[cfg(not(target_os = "android"))]
 mod desktop;
 #[cfg(not(target_os = "android"))]

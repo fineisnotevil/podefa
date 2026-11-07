@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Print** (ADR 0013): Ctrl+P, Save's menu and the phone's More menu. On the desktop a dialog asks
+  for the printer, the pages and the copies (with the driver's Properties on Windows); on Android
+  the system's dialog does. Windows gets the pages as bitmaps at the printer's resolution, up to
+  600 dpi, in bands of at most 32 MiB; Linux and macOS give `lp` a PDF, and Android's
+  `PrintManager` takes one too. A page goes on the sheet at its own size, shrunk to fit if it must,
+  turned if it lies the other way, centred. The document's permissions hold in the engine: no print
+  without `print`; without `print_hq`, 150 dpi, and any PDF handed to a queue holds images of the
+  pages, with no text.
 - **Protection and permissions** (Plan 0009 Phase 2): Save > Protection (and the lock beside the
   page number, and Protection in the phone's More menu) writes the open document with AES-256: a
   password to open, a permissions password, and what is allowed without it (printing, copying,

@@ -18,9 +18,10 @@ use mupdf::pdf::{
     InsertImageOptions, InsertPdfOptions, PageImageSource, PageSelection, PdfDocument,
     PdfWriteOptions,
 };
-use mupdf::{Colorspace, Image, Matrix, Rect, Size};
-use pdf_core::EngineEvent;
+use mupdf::{Colorspace, Device, Image, Matrix, Pixmap, Rect, Size};
+use pdf_core::print::{self, PrintBand, PrintSink, PrintTarget};
 use pdf_core::tools::{ImageFormat, MergeInput, ToolJob, ToolSizes};
+use pdf_core::{EngineEvent, TILE_BLEED_PX};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -116,7 +117,10 @@ impl Drop for ToolThread {
 pub(crate) fn needs_current(job: &ToolJob) -> bool {
     match job {
         ToolJob::Merge { inputs, .. } => inputs.contains(&MergeInput::Current),
-        ToolJob::Extract { .. } | ToolJob::ExportImages { .. } | ToolJob::ExportWord { .. } => true,
+        ToolJob::Extract { .. }
+        | ToolJob::ExportImages { .. }
+        | ToolJob::ExportWord { .. }
+        | ToolJob::Print { .. } => true,
         ToolJob::ImagesToPdf { .. } => false,
         ToolJob::Compress { input, .. } => *input == MergeInput::Current,
     }
@@ -281,6 +285,157 @@ fn export_word(
     }
 }
 
+/// Copies pages of the open document, with their annotations, into a new document.
+fn copy_pages(source: &PdfDocument, pages: &[u32]) -> Result<PdfDocument, String> {
+    let mut part = PdfDocument::new();
+    let options = InsertPdfOptions {
+        source_pages: PageSelection::Pages(pages.iter().map(|&p| p as usize).collect()),
+        ..InsertPdfOptions::default()
+    };
+    part.insert_pdf(source, options)
+        .map_err(|e| e.to_string())?;
+    // Links to pages left out of the part are dropped.
+    let pairs: Vec<(i32, i32)> = pages
+        .iter()
+        .enumerate()
+        .map(|(to, &from)| (from as i32, to as i32))
+        .collect();
+    crate::edit::copy_annotations(&mut part, Some(source), &pairs, &|p| {
+        pages.iter().position(|&q| q as i32 == p).map(|i| i as i32)
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(part)
+}
+
+/// Makes a new PDF of the images of `pages` at [`print::LOW_RES_DPI`], for a system that prints
+/// PDFs when the document withholds high-quality printing: the pages themselves would hand it what
+/// the permission keeps back.
+fn raster_copy(
+    source: &PdfDocument,
+    pages: &[u32],
+    stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(usize, usize),
+) -> Result<PdfDocument, String> {
+    let mut out = PdfDocument::new();
+    let scale = print::LOW_RES_DPI as f32 / 72.0;
+    for (done, &p) in pages.iter().enumerate() {
+        if stop() {
+            return Err("cancelled".to_owned());
+        }
+        let fail = |e: mupdf::Error| format!("page {}: {e}", p + 1);
+        let page = source.load_page(p as i32).map_err(fail)?;
+        let bounds = page.bounds().map_err(fail)?;
+        let pixmap = page
+            .to_pixmap(
+                &Matrix::new_scale(scale, scale),
+                &Colorspace::device_rgb(),
+                false,
+                true,
+            )
+            .map_err(fail)?;
+        let image = Image::from_pixmap(&pixmap).map_err(fail)?;
+        let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+        let mut sheet = out.new_page(Size::new(w, h)).map_err(fail)?;
+        sheet
+            .insert_image(
+                &mut out,
+                Rect::new(0.0, 0.0, w, h),
+                PageImageSource::Image(&image),
+                InsertImageOptions::default(),
+            )
+            .map_err(fail)?;
+        progress(done + 1, pages.len() + 1);
+    }
+    Ok(out)
+}
+
+/// Draws one page into the sink, band by band. Each band is drawn with bleed rows, as a tile is,
+/// so an anti-aliased clip edge does not show as a line where two bands meet.
+fn print_page(
+    source: &PdfDocument,
+    p: u32,
+    sink: &mut dyn PrintSink,
+    sheet: &print::Sheet,
+    dpi_limit: u32,
+    stop: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let fail = |e: mupdf::Error| format!("page {}: {e}", p + 1);
+    let page = source.load_page(p as i32).map_err(fail)?;
+    let bounds = page.bounds().map_err(fail)?;
+    let at = print::place(
+        (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0),
+        sheet,
+        dpi_limit,
+    )
+    .ok_or_else(|| format!("page {} has no size", p + 1))?;
+    let list = page.to_display_list(true).map_err(fail)?;
+    let [a, b, c, d, e, f] = at.matrix((bounds.x0, bounds.y0, bounds.x1, bounds.y1));
+    sink.begin_page()?;
+    let colorspace = Colorspace::device_rgb();
+    let width = at.render.0;
+    for span in at.bands(print::BAND_BYTES) {
+        if stop() {
+            return Err("cancelled".to_owned());
+        }
+        let bleed = TILE_BLEED_PX as u32;
+        let top = span.y.min(bleed);
+        let bottom = bleed.min(at.render.1 - span.y - span.height);
+        let rows = span.height + top + bottom;
+        let mut pixmap =
+            Pixmap::new(&colorspace, 0, 0, width as i32, rows as i32, false).map_err(fail)?;
+        pixmap.clear().map_err(fail)?;
+        let device = Device::from_pixmap(&pixmap).map_err(fail)?;
+        let ctm = Matrix::new(a, b, c, d, e, f - (span.y - top) as f32);
+        list.run(
+            &device,
+            &ctm,
+            Rect::new(0.0, 0.0, width as f32, rows as f32),
+        )
+        .map_err(fail)?;
+        drop(device);
+        let band = crate::pool::tight_copy(&pixmap, (0, top as usize), width, span.height);
+        sink.band(PrintBand {
+            rgb: &band.data,
+            width,
+            height: span.height,
+            dest: (at.dest.0, span.dest_y, at.dest.2, span.dest_height),
+        })?;
+    }
+    sink.end_page()
+}
+
+/// Sends `pages` to the sink; a failure or a stop aborts the printer's job, so nothing half done
+/// comes out of it.
+fn print_to_sink(
+    source: &PdfDocument,
+    pages: &[u32],
+    sink: &mut dyn PrintSink,
+    low_res: bool,
+    stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(usize, usize),
+) -> Result<(), String> {
+    let sheet = sink.start()?;
+    let limit = if low_res {
+        print::LOW_RES_DPI
+    } else {
+        print::MAX_DPI
+    };
+    let printed = (|| {
+        for (done, &p) in pages.iter().enumerate() {
+            if stop() {
+                return Err("cancelled".to_owned());
+            }
+            print_page(source, p, sink, &sheet, limit, stop)?;
+            progress(done + 1, pages.len());
+        }
+        sink.finish()
+    })();
+    if printed.is_err() {
+        sink.abort();
+    }
+    printed
+}
+
 fn open(
     input: &MergeInput,
     current: Option<&Arc<Vec<u8>>>,
@@ -384,25 +539,7 @@ fn execute(
                     if stop() {
                         return Err("cancelled".to_owned());
                     }
-                    let mut part = PdfDocument::new();
-                    let options = InsertPdfOptions {
-                        source_pages: PageSelection::Pages(
-                            pages.iter().map(|&p| p as usize).collect(),
-                        ),
-                        ..InsertPdfOptions::default()
-                    };
-                    part.insert_pdf(&source, options)
-                        .map_err(|e| e.to_string())?;
-                    // Links to pages left out of the part are dropped.
-                    let pairs: Vec<(i32, i32)> = pages
-                        .iter()
-                        .enumerate()
-                        .map(|(to, &from)| (from as i32, to as i32))
-                        .collect();
-                    crate::edit::copy_annotations(&mut part, Some(&source), &pairs, &|p| {
-                        pages.iter().position(|&q| q as i32 == p).map(|i| i as i32)
-                    })
-                    .map_err(|e| e.to_string())?;
+                    let mut part = copy_pages(&source, pages)?;
                     written.push((write_part(&mut part, output)?, output.clone()));
                     progress(done + 1, parts.len());
                 }
@@ -489,6 +626,43 @@ fn execute(
                     kept_original,
                 });
                 progress(2, 2);
+            }
+            ToolJob::Print {
+                pages,
+                target,
+                low_res,
+            } => {
+                if pages.is_empty() {
+                    return Err("no pages to print".to_owned());
+                }
+                let source = open(
+                    &MergeInput::Current,
+                    run.current.as_ref(),
+                    run.password.as_deref(),
+                )?;
+                match target {
+                    PrintTarget::Device(sink) => {
+                        let mut sink = sink
+                            .0
+                            .lock()
+                            .map_err(|_| "the printer's job failed before".to_owned())?;
+                        print_to_sink(&source, pages, sink.as_mut(), *low_res, &stop, &|d, t| {
+                            progress(d, t);
+                        })?;
+                    }
+                    PrintTarget::File(output) => {
+                        let mut copy = if *low_res {
+                            raster_copy(&source, pages, &stop, &|d, t| progress(d, t))?
+                        } else {
+                            copy_pages(&source, pages)?
+                        };
+                        if stop() {
+                            return Err("cancelled".to_owned());
+                        }
+                        written.push((write_part(&mut copy, output)?, output.clone()));
+                        progress(pages.len() + 1, pages.len() + 1);
+                    }
+                }
             }
             #[cfg(not(feature = "docx"))]
             ToolJob::ExportWord { .. } => {

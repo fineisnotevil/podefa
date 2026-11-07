@@ -96,6 +96,7 @@ impl Permissions {
     /// standard puts under it (annotating includes filling, modifying includes assembling).
     pub fn allows(self, need: Need) -> bool {
         match need {
+            Need::Print => self.print,
             Need::Copy => self.copy,
             Need::Annotate => self.annotate,
             Need::Fill => self.fill || self.annotate,
@@ -141,6 +142,8 @@ impl Permissions {
 /// What an action needs the document to allow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
+    /// Printing, at low resolution without `print_hq`.
+    Print,
     /// Copying text, or writing the document's pages into another file.
     Copy,
     /// Annotations: markup, notes, ink, and deleting or changing them.
@@ -157,6 +160,7 @@ impl Need {
     /// The action in words, for a refusal: "The document's permissions do not allow {words}".
     pub fn words(self) -> &'static str {
         match self {
+            Self::Print => "printing it",
             Self::Copy => "copying its content",
             Self::Annotate => "comments",
             Self::Fill => "filling its form",
@@ -212,6 +216,7 @@ impl ToolJob {
             Self::Extract { .. } | Self::ExportImages { .. } | Self::ExportWord { .. } => {
                 Some(Need::Copy)
             }
+            Self::Print { .. } => Some(Need::Print),
             Self::ImagesToPdf { .. } | Self::Compress { .. } => None,
         }
     }

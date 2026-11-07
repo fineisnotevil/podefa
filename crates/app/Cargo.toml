@@ -41,6 +41,17 @@ arboard = { version = "3.6", default-features = false, features = ["wayland-data
 [target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
 arboard = { version = "3.6", default-features = false }
 
+# Printing on Windows (ADR 0013): GDI and winspool. The version Slint's and rfd's dependencies
+# already bring in.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Storage_Xps",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
 # Android (Plan 0008 Phase 1, ADR 0012): Slint's backend for the activity, and JNI for the
 # activity's pickers, message boxes and clipboard (`platform::android`).
 [target.'cfg(target_os = "android")'.dependencies]

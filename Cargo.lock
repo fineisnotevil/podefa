@@ -252,6 +252,7 @@ dependencies = [
  "rfd",
  "slint",
  "slint-build",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

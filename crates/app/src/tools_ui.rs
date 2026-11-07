@@ -31,6 +31,8 @@ pub(crate) struct RunningTool {
     pub(crate) tab: Option<crate::tabs::TabAction>,
     /// The files the job writes, for the platform to pass on (Plan 0008).
     pub(crate) outputs: Vec<PathBuf>,
+    /// A print job: what happens when its pages are ready.
+    pub(crate) print: Option<crate::print_ui::Printing>,
 }
 
 impl AppState {
@@ -71,6 +73,7 @@ impl AppState {
             offer_open,
             tab: None,
             outputs: job.outputs(),
+            print: None,
         });
         ui.set_tool_running(true);
         ui.set_status_text(SharedString::from(format!("{title}...")));
@@ -93,6 +96,7 @@ impl AppState {
             offer_open: false,
             tab: Some(action),
             outputs: job.outputs(),
+            print: None,
         };
         if self
             .cmd_tx
@@ -127,6 +131,12 @@ impl AppState {
         self.bench
             .tool_done(tool.title, tool.started.elapsed(), &result);
         match result {
+            Ok(files) if tool.print.is_some() => {
+                if let Some(printing) = tool.print {
+                    crate::print_ui::finished(ui, printing, files);
+                }
+                None
+            }
             Ok(files) => {
                 let message = match (files.as_slice(), sizes) {
                     (_, Some(sizes)) => crate::convert_ui::compress_message(sizes),

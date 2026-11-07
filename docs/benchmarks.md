@@ -2105,3 +2105,23 @@ password (the password to open unlocks).
 3) is read (`signatures_and_certification_are_read`); the app asks before Save As, Protection and
 a redaction of a signed document, and before the first change a certifying signature does not
 allow. These questions are not covered by a test; they need the window.
+
+## 16. Printing
+
+ADR 0013. **`t_print_to_pdf`** is the time for `crates/app/tests/print_test.rs`'s
+`a_document_prints_through_a_real_driver`: the fixture `large_format_a0.pdf` printed twice, on the
+tool thread, through "Microsoft Print to PDF" with a file name in the job (no paper, no dialog),
+until the spooler's file opens.
+
+| Row | Result |
+| :--- | :--- |
+| Print through a real driver | Passes; `t_print_to_pdf` 5.1-5.9 s over three debug runs on this machine, most of it the spooler. Two sheets of ink in the file. A one-off landscape page with a red and a blue block came back upright, with its colours and its corners in place (checked by eye, not a test). An unknown printer fails with the reason. |
+| Bands (`print_test.rs`, 4245 x 6000 at 600 dpi, 3 bands, `dense_vector.pdf`) | Against one raster of the page: at most 4 channel levels within 3 rows of a seam (3 measured), elsewhere at most 32 on at most 0.01% of the bytes (804 bytes at most 18 measured: MuPDF's flattening moves with the translation on this fixture's overlapping curves). |
+| Permissions | No `print`: refused, the sink never starts. No `print_hq`: raster at most 150 dpi on a 600 dpi sheet, and a PDF for a queue holds no text. |
+
+**Mutation checks** (each failed a test, then was undone): no bleed rows; no forced `low_res` in the
+actor (2 tests); `need()` without `Need::Print`; no `abort` after a failure; the pages themselves
+instead of their images in the low-resolution file.
+
+Not measured: memory while printing beyond the 32 MiB bound on a band, and speed on a physical
+printer. No job was sent to a physical printer.

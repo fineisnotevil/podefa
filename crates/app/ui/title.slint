@@ -221,6 +221,7 @@ export component TitleRow inherits Rectangle {
     callback save();
     callback save-as();
     callback protection();
+    callback print();
     callback undo();
     callback redo();
     callback choose-theme(int);
@@ -597,6 +598,16 @@ export component TitleRow inherits Rectangle {
                             activated => {
                                 save-menu.close();
                                 root.save-as();
+                            }
+                        }
+                        MenuRow {
+                            icon: @image-url("icons/printer.svg");
+                            label: "Print...";
+                            shortcut: "Ctrl+P";
+                            enabled: root.protectable;
+                            activated => {
+                                save-menu.close();
+                                root.print();
                             }
                         }
                         MenuRow {
