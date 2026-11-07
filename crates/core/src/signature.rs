@@ -138,6 +138,63 @@ impl SignatureInfo {
     }
 }
 
+/// Where a new signature goes (Plan 0009 Phase 4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignPlace {
+    /// An empty signature field already in the document: its page and its full name.
+    Field { page: u32, name: String },
+    /// A new signature field on `page` over `rect` (page space, points from the top left).
+    New { page: u32, rect: Rect },
+}
+
+/// A signature to make: the key file (`.p12`/`.pfx`) and its password, what the signature says,
+/// and where it goes.
+#[derive(Clone, PartialEq)]
+pub struct SignRequest {
+    pub key_file: std::path::PathBuf,
+    pub password: String,
+    pub reason: String,
+    pub location: String,
+    pub place: SignPlace,
+}
+
+impl std::fmt::Debug for SignRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the password.
+        f.debug_struct("SignRequest")
+            .field("key_file", &self.key_file)
+            .field("reason", &self.reason)
+            .field("location", &self.location)
+            .field("place", &self.place)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a signature was not made. The document is as it was before, saved or not.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SignError {
+    #[error("the key file's password is wrong")]
+    WrongPassword,
+    /// The key file could not be read or used, and why.
+    #[error("{0}")]
+    KeyFile(String),
+    /// The document's permissions do not allow filling its fields.
+    #[error("the document's permissions do not allow signing it")]
+    NotPermitted,
+    /// A certifying signature allows no change at all (DocMDP level 1), a new signature included.
+    #[error("the document is certified with no changes allowed, not even a signature")]
+    Certified,
+    /// The document cannot take an incremental update (repaired at open, redacted, not written by
+    /// a save in place), which a signature needs: it is saved as a copy first.
+    #[error("the document has to be saved as a copy before it can be signed")]
+    NeedsSaveAs,
+    /// The field to sign is gone, signed already, or locked.
+    #[error("{0}")]
+    Field(String),
+    #[error("{0}")]
+    Failed(String),
+}
+
 /// The worst verdict of a document's signatures: what the status bar's mark shows.
 pub fn overall(signatures: &[SignatureInfo]) -> Option<Verdict> {
     signatures.iter().map(SignatureInfo::verdict).max()

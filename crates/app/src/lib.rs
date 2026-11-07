@@ -59,6 +59,7 @@ pub mod platform;
 mod print_ui;
 mod redact_ui;
 mod secure_ui;
+mod sign_ui;
 mod signature_ui;
 mod stamps_ui;
 mod tabs;
@@ -198,6 +199,8 @@ enum Tool {
     Crop,
     /// A drag marks an area for redaction (Plan 0009 Phase 1).
     Redact,
+    /// A drag draws the box a new signature goes in (Plan 0009 Phase 4).
+    Sign,
 }
 
 /// The note the editor is open for: a new one at a rectangle, or an existing one.
@@ -231,6 +234,7 @@ impl Tool {
             Tool::Ink => 6,
             Tool::Crop => 7,
             Tool::Redact => 8,
+            Tool::Sign => 9,
         }
     }
 
@@ -244,6 +248,7 @@ impl Tool {
             6 => Tool::Ink,
             7 => Tool::Crop,
             8 => Tool::Redact,
+            9 => Tool::Sign,
             _ => Tool::Select,
         }
     }
@@ -462,6 +467,8 @@ struct AppState {
     security: pdf_core::secure::Security,
     /// What the file's signatures say (Plan 0009 Phase 3); empty until the engine has checked.
     signatures: Vec<pdf_core::signature::SignatureInfo>,
+    /// The sign dialog's key file, reason and location, and where its signature goes (Phase 4).
+    sign_memory: sign_ui::SignMemory,
     pdf_editable: bool,
     certified_warned: bool,
     /// Form fields of the near pages, those asked for, the field being filled, and what the
@@ -612,6 +619,7 @@ impl AppState {
             redact_pending: None,
             security: pdf_core::secure::Security::default(),
             signatures: Vec::new(),
+            sign_memory: sign_ui::SignMemory::default(),
             pdf_editable: false,
             certified_warned: false,
             fields: HashMap::new(),
@@ -1249,13 +1257,25 @@ impl AppState {
                 ui.set_note_hover_visible(false);
             }
         }
-        if matches!(self.tool, Tool::Crop | Tool::Redact) && self.editable {
+        // With the Sign tool a click on an empty signature field signs it; a drag draws a box.
+        if self.tool == Tool::Sign
+            && self.editable
+            && kind == 0
+            && !touch
+            && self.sign_field_pressed(ui, self.page_point(ui, x, y))
+        {
+            return;
+        }
+        if matches!(self.tool, Tool::Crop | Tool::Redact | Tool::Sign) && self.editable {
             self.crop_pointer(ui, kind, x, y);
             return;
         }
         let point = self.page_point(ui, x, y);
         // A press on a form field fills it (Plan 0006); any press commits an open field editor.
         // A finger fills it on a tap instead, so a pan that starts on a field only pans.
+        if kind == 0 && !shift && !touch && self.sign_field_pressed(ui, point) {
+            return;
+        }
         if kind == 0 && !shift && !touch && self.field_pressed(ui, point) {
             return;
         }
@@ -1511,6 +1531,9 @@ impl AppState {
     /// selected note opens it, as a double-click does: a finger's double tap zooms). Anywhere
     /// else it clears the selection and returns false, so it may be the first of a double tap.
     fn touch_tap(&mut self, ui: &MainWindow, point: Option<PagePoint>) -> bool {
+        if self.sign_field_pressed(ui, point) {
+            return true;
+        }
         if self.field_pressed(ui, point) {
             return true;
         }
@@ -2411,13 +2434,18 @@ impl AppState {
     /// A tool button or its key (Plan 0004, §4.2): with text selected, a markup marks it and the
     /// tool stays; with nothing selected, the markup tool is switched on (or off again).
     fn choose_tool(&mut self, ui: &MainWindow, tool: Tool) {
-        if matches!(tool, Tool::Note | Tool::Ink | Tool::Crop | Tool::Redact) && !self.editable {
+        if matches!(
+            tool,
+            Tool::Note | Tool::Ink | Tool::Crop | Tool::Redact | Tool::Sign
+        ) && !self.editable
+        {
             return;
         }
         // A tool the document's permissions withhold (Plan 0009 Phase 2).
         let need = match tool {
             Tool::Markup(_) | Tool::Note | Tool::Ink => Some(Need::Annotate),
             Tool::Crop | Tool::Redact => Some(Need::Modify),
+            Tool::Sign => Some(Need::Fill),
             _ => None,
         };
         if let Some(need) = need
@@ -4126,6 +4154,9 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
         EngineEvent::Signatures { path, signatures } => {
             with_state(|state| state.set_signatures(ui, &path, signatures));
         }
+        EngineEvent::Signed { generation, result } => {
+            with_state(|state| state.signed(ui, generation, result));
+        }
         EngineEvent::Error { message } => {
             dialogs::password_done(ui);
             ui.set_has_error(true);
@@ -5354,6 +5385,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
         });
     }
     print_ui::connect(&main_window);
+    sign_ui::connect(&main_window);
     // Protection (Plan 0009 Phase 2).
     {
         let weak = main_window.as_weak();

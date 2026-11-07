@@ -389,12 +389,17 @@ fn is_signer(cert: &Certificate, info: &SignerInfo) -> bool {
 
 /// A subject's common name; the string types certificates use.
 fn common_name(cert: &Certificate) -> Option<String> {
+    subject_part(cert, ID_COMMON_NAME)
+}
+
+/// One part of a subject's name (`oid`: the common name, the organization...), as text.
+pub(crate) fn subject_part(cert: &Certificate, oid: Oid) -> Option<String> {
     cert.tbs_certificate
         .subject
         .0
         .iter()
         .flat_map(|rdn| rdn.0.iter())
-        .find(|attr| attr.oid == ID_COMMON_NAME)
+        .find(|attr| attr.oid == oid)
         .and_then(|attr| {
             let value = attr.value.value();
             match attr.value.tag() {

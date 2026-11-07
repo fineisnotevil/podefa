@@ -13,6 +13,7 @@ fn main() {
     cc::Build::new()
         .file("journal/journal.c")
         .file("journal/tools.c")
+        .file("journal/sign.c")
         .include("journal/include")
         .warnings(false)
         .compile("fa-pdf-journal");

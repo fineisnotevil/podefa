@@ -205,6 +205,11 @@ impl AppState {
                     self.redact_drawn(draw);
                     return;
                 }
+                if self.tool == Tool::Sign {
+                    self.crop_cancel(ui);
+                    self.sign_drawn(ui, draw);
+                    return;
+                }
                 if let Some(draw) = self.crop.as_mut() {
                     draw.done = true;
                 }

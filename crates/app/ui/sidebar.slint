@@ -87,6 +87,7 @@ export component SidebarColumn inherits Rectangle {
     callback page-op(int);
     callback crop-tool();
     callback redact-tool();
+    callback sign-tool();
     callback toggle-field-highlight();
     callback reset-field();
     callback reset-form();
@@ -279,6 +280,13 @@ export component SidebarColumn inherits Rectangle {
                         enabled: root.can-edit;
                         checked: root.tool == 8;
                         clicked => { root.redact-tool(); }
+                    }
+                    IconButton {
+                        icon: @image-url("icons/signature.svg");
+                        tip: "Sign";
+                        enabled: root.can-edit;
+                        checked: root.tool == 9;
+                        clicked => { root.sign-tool(); }
                     }
                     IconButton {
                         icon: @image-url("icons/rotate-ccw.svg");

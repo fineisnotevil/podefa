@@ -12,10 +12,14 @@
 //!   [`worker_count`] threads, which never touch the document because the actor hands them
 //!   *resolved* jobs (page display list included) instead of commands.
 
+mod cms_sign;
 mod edit;
 mod fonts;
 mod form;
 mod mdp;
+pub mod p12;
+mod sign;
+pub use sign::signer_name;
 mod pool;
 mod redact;
 mod search;
@@ -1813,6 +1817,38 @@ impl EngineHandle {
                             }
                             Err(err) => Self::report(&event_tx, &err),
                         },
+                        EngineCmd::Sign {
+                            request,
+                            generation,
+                        } => {
+                            let result = engine.sign(&request);
+                            if let Ok((path, len, page)) = &result {
+                                search.document(path.clone(), engine.password.clone());
+                                let _ = event_tx.send(EngineEvent::Saved {
+                                    path: path.clone(),
+                                    result: Ok(*len),
+                                });
+                                let revision = engine.revisions.get(*page as usize).copied().unwrap_or(0);
+                                let _ = Self::changed(
+                                    &event_tx,
+                                    &engine,
+                                    &search,
+                                    generation,
+                                    Change::Page { page: *page, revision },
+                                );
+                                Self::history(&event_tx, &engine, generation, HistoryChange::None);
+                                let _ = event_tx.send(EngineEvent::Security {
+                                    generation,
+                                    security: engine.security(),
+                                    wrong: false,
+                                });
+                                Self::verify_signatures(&event_tx, &engine);
+                            }
+                            let _ = event_tx.send(EngineEvent::Signed {
+                                generation,
+                                result: result.map(|(_, len, _)| len),
+                            });
+                        }
                         EngineCmd::RunTool { job_id, mut job } => {
                             // A job that writes the open document's content into another file
                             // follows its permissions (Plan 0009 §0 question 4).

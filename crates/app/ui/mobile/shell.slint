@@ -334,6 +334,7 @@ export component MobileShell inherits Rectangle {
     callback choose-ink-width(int);
     callback crop-tool();
     callback redact-tool();
+    callback sign-tool();
     callback page-op(int);
     callback toggle-field-highlight();
     callback reset-field();
@@ -904,6 +905,13 @@ export component MobileShell inherits Rectangle {
                     enabled: root.can-edit;
                     checked: root.tool == 8;
                     clicked => { root.redact-tool(); }
+                }
+                TouchButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/signature.svg");
+                    enabled: root.can-edit;
+                    checked: root.tool == 9;
+                    clicked => { root.sign-tool(); }
                 }
                 Rectangle {
                     width: 9px;

@@ -19,6 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const FIELD_DEPTH: u32 = 16;
 const FIELD_LIMIT: usize = 100_000;
+/// Pages looked through for a widget with no `/P`.
+const PAGE_SCAN_LIMIT: i32 = 100_000;
 
 /// A field under `/Fields`, with its full name.
 pub(crate) struct Field {
@@ -125,16 +127,38 @@ fn place(doc: &PdfDocument, field: &PdfObject) -> (Option<u32>, Option<Rect>) {
     let Some(widget) = widget else {
         return (None, None);
     };
-    let Some(page_obj) = widget.get_dict("P").ok().flatten() else {
-        return (None, None);
+    let page = match widget.get_dict("P").ok().flatten() {
+        Some(page_obj) => doc
+            .lookup_page_number(&page_obj)
+            .ok()
+            .and_then(|page| u32::try_from(page).ok()),
+        // `/P` is optional (ISO 32000-1 table 164), and MuPDF's new signature fields have none.
+        None => page_listing(doc, &widget),
     };
-    let Ok(page) = doc.lookup_page_number(&page_obj) else {
-        return (None, None);
-    };
-    let Ok(page) = u32::try_from(page) else {
+    let Some(page) = page else {
         return (None, None);
     };
     (Some(page), rect(doc, page, &widget))
+}
+
+/// The page whose `/Annots` lists `widget`.
+fn page_listing(doc: &PdfDocument, widget: &PdfObject) -> Option<u32> {
+    let number = widget.as_indirect().ok().filter(|&n| n > 0)?;
+    let count = doc.page_count().ok()?.min(PAGE_SCAN_LIMIT);
+    (0..count).find_map(|page| {
+        let annots = doc.find_page(page).ok()?.get_dict("Annots").ok()??;
+        let len = annots.len().ok()?.min(FIELD_LIMIT) as i32;
+        (0..len)
+            .any(|i| {
+                annots
+                    .get_array(i)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|annot| annot.as_indirect().ok() == Some(number))
+            })
+            .then(|| u32::try_from(page).ok())
+            .flatten()
+    })
 }
 
 fn rect(doc: &PdfDocument, page: u32, widget: &PdfObject) -> Option<Rect> {

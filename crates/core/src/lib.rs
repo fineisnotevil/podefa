@@ -226,6 +226,14 @@ pub enum EngineCmd {
     /// Unlock the document's permissions with its permissions password (Plan 0009 §0 question 4).
     /// Answered with [`EngineEvent::Security`].
     Unlock { password: String, generation: u64 },
+    /// Sign the document (Plan 0009 Phase 4): its unsaved changes are saved in place, the
+    /// signature is added as an incremental update and the file is opened again. Answered with
+    /// [`EngineEvent::Signed`] and, once written, [`EngineEvent::Saved`], the page's
+    /// [`EngineEvent::PageChanged`] and [`EngineEvent::Signatures`].
+    Sign {
+        request: Box<signature::SignRequest>,
+        generation: u64,
+    },
     /// Undo the last edit (Plan 0004 Phase 2): answered with [`EngineEvent::PageChanged`] for the
     /// page it touched, then [`EngineEvent::History`]. Nothing to undo is not an error.
     Undo { generation: u64 },
@@ -289,6 +297,11 @@ pub enum EngineEvent {
     Signatures {
         path: PathBuf,
         signatures: Vec<signature::SignatureInfo>,
+    },
+    /// A signature was made (the file's size) or why not (Plan 0009 Phase 4).
+    Signed {
+        generation: u64,
+        result: Result<u64, signature::SignError>,
     },
     Opened {
         page_count: usize,

@@ -24,6 +24,13 @@ ring = { version = "0.17", default-features = false, features = ["alloc"] }
 cms = { version = "0.2", default-features = false, features = ["std"] }
 x509-cert = { version = "0.2", default-features = false, features = ["std"] }
 der = { version = "0.7", default-features = false, features = ["std", "oid"] }
+pkcs12 = { version = "0.1", default-features = false, features = ["kdf"] }
+pkcs5 = { version = "0.7", default-features = false, features = ["pbes2", "sha1-insecure", "alloc"] }
+des = { version = "0.8", default-features = false }
+rc2 = { version = "0.8", default-features = false }
+cbc = { version = "0.1", default-features = false, features = ["alloc", "block-padding"] }
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 
 # The computer's trusted roots (`verify::Roots`).
 [target.'cfg(windows)'.dependencies]

@@ -88,7 +88,7 @@ fn kind_of(annot_type: PdfAnnotationType) -> Option<AnnotKind> {
     })
 }
 
-fn load(doc: &PdfDocument, page: u32) -> Result<PdfPage, MupdfError> {
+pub(crate) fn load(doc: &PdfDocument, page: u32) -> Result<PdfPage, MupdfError> {
     let loaded = doc
         .load_page(page as i32)
         .map_err(|source| MupdfError::PageLoadFailed {
