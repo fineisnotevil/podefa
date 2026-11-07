@@ -16,7 +16,7 @@
 //!   the top-left pixel of a full-page render. Tile keys use *page-raster* cells, which is why
 //!   a key never depends on where the page is placed in the canvas.
 
-use crate::Rect;
+use crate::{PixelFormat, Rect};
 
 /// Minimum zoom: 10%.
 pub const ZOOM_MIN_MILLI: u32 = 100;
@@ -42,9 +42,39 @@ pub const TILE_BLEED_PX: i32 = 2;
 /// Edge of the reusable scratch raster: [`TILE_SIZE_PX`] plus the bleed on both sides.
 pub const TILE_STRIDE_PX: u32 = TILE_SIZE_PX + 2 * TILE_BLEED_PX as u32;
 
+/// Long-side pixel budget of the stretched base layer (Plan 0001, §5 Phase 2).
+pub const BASE_LONG_PX: u32 = 1024;
+
 /// Converts a scale in permille to a scale factor.
 pub fn scale_from_milli(milli: u32) -> f32 {
     milli as f32 / 1000.0
+}
+
+/// Permille scale that renders a page's long side at about [`BASE_LONG_PX`] pixels.
+///
+/// The base layer is one low-resolution raster of a whole page, stretched under the tiles while
+/// they are in flight, so it is a *page* property rather than a zoom level: deriving its scale
+/// from the page size gives one bitmap per page that serves every zoom level, and bounds that
+/// bitmap at about 2.3 MiB of RGB8 whatever the page size (A0, 3370 pt, lands at 304 permille and
+/// 1024 px; Letter, 792 pt, at 1293 permille and 1023 px).
+///
+/// The result is clamped to the zoom range so the engine can rasterize it with the same
+/// geometry code as a tile.
+pub fn base_scale_milli(long_pt: f32) -> u32 {
+    if !long_pt.is_finite() || long_pt <= 0.0 {
+        return ZOOM_MIN_MILLI;
+    }
+    clamp_zoom_milli((BASE_LONG_PX as f32 * 1000.0 / long_pt).round() as u32)
+}
+
+/// Permille scale that renders a page `width_pt` wide at about `width_px` device pixels, for a
+/// thumbnail (Plan 0003, §4.3); clamped to the zoom range, so a page wider than
+/// `width_px * 10` points comes out wider than asked.
+pub fn thumb_scale_milli(width_pt: f32, width_px: u32) -> u32 {
+    if !width_pt.is_finite() || width_pt <= 0.0 {
+        return ZOOM_MIN_MILLI;
+    }
+    clamp_zoom_milli((width_px as f32 * 1000.0 / width_pt).floor() as u32)
 }
 
 /// Clamps a scale in permille to the supported range.
@@ -115,12 +145,12 @@ impl TileRect {
         self.w == 0 || self.h == 0
     }
 
-    /// Width in bytes of one tightly packed RGBA8 row.
+    /// Width in bytes of one tightly packed [`PixelFormat::Rgb8`] row.
     pub fn row_bytes(&self) -> usize {
-        self.w as usize * 4
+        self.w as usize * PixelFormat::Rgb8.bytes_per_pixel()
     }
 
-    /// Total size in bytes of a tightly packed RGBA8 buffer.
+    /// Total size in bytes of a tightly packed RGB8 buffer of this tile.
     pub fn byte_len(&self) -> usize {
         self.row_bytes() * self.h as usize
     }
@@ -304,6 +334,19 @@ mod tests {
     }
 
     #[test]
+    fn thumb_scale_fits_the_width_and_stays_in_range() {
+        // Letter at 160 px: 261 permille, 160 px wide (floor keeps it at or under the width).
+        let milli = thumb_scale_milli(612.0, 160);
+        assert_eq!(milli, 261);
+        let geo = PageGeometry::new(0, Rect::new(0.0, 0.0, 612.0, 792.0), milli);
+        assert!(geo.device_size().0 <= 160);
+        // A0 at 160 px would be 67 permille; the zoom floor is 100.
+        assert_eq!(thumb_scale_milli(2384.0, 160), ZOOM_MIN_MILLI);
+        assert_eq!(thumb_scale_milli(0.0, 160), ZOOM_MIN_MILLI);
+        assert_eq!(thumb_scale_milli(f32::NAN, 160), ZOOM_MIN_MILLI);
+    }
+
+    #[test]
     fn device_size_follows_the_mupdf_rounding_rule() {
         // floor(x0 + 0.001) .. ceil(x1 - 0.001): 100.5 pt at 1.1 is 110.55 px -> 111 px wide.
         let geo = PageGeometry::new(0, Rect::new(0.0, 0.0, 100.5, 10.0), 1_100);
@@ -422,6 +465,30 @@ mod tests {
 
         // Zooming out around the viewport origin keeps the content origin.
         assert_eq!(zoom_anchor(-300.0, 0.0, 2_000, 1_000), -150.0);
+    }
+
+    #[test]
+    fn base_scale_keeps_the_long_side_near_the_budget() {
+        // Whatever the page, the base raster's long side lands within a pixel or two of the
+        // budget, which is what bounds its memory (Plan 0001, §5 Phase 2).
+        for long_pt in [792.0, 1191.0, 2384.0, 3370.0] {
+            let geo = PageGeometry::new(
+                0,
+                Rect::new(0.0, 0.0, long_pt / 2.0, long_pt),
+                base_scale_milli(long_pt),
+            );
+            let (_, h) = geo.device_size();
+            assert!(
+                (h as i32 - BASE_LONG_PX as i32).abs() <= 2,
+                "{long_pt} pt -> {h} px"
+            );
+        }
+
+        // Degenerate sizes clamp into the supported zoom range instead of escaping it.
+        assert_eq!(base_scale_milli(40_000.0), ZOOM_MIN_MILLI);
+        assert_eq!(base_scale_milli(1.0), ZOOM_MAX_MILLI);
+        assert_eq!(base_scale_milli(0.0), ZOOM_MIN_MILLI);
+        assert_eq!(base_scale_milli(f32::NAN), ZOOM_MIN_MILLI);
     }
 
     #[test]

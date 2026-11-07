@@ -48,7 +48,7 @@ bitflags::bitflags! {
 
 #[derive(Debug)]
 pub struct PdfWidget {
-    annot: PdfAnnotation,
+    pub(crate) annot: PdfAnnotation,
 }
 
 impl PdfWidget {

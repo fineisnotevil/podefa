@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+SPDX-License-Identifier: AGPL-3.0-or-later
+SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+The "P" of the brand mark on the adaptive icon's 108 dp canvas, inside its 66 dp safe circle:
+a stem and a bowl with its counter cut out.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#F4F4F5"
+        android:fillType="evenOdd"
+        android:pathData="M38.5,34 H56.5 A13,13 0 0 1 56.5,60 H47.5 V74 H38.5 Z M47.5,42 H55.5 A5,5 0 0 1 55.5,52 H47.5 Z" />
+</vector>

@@ -7,6 +7,7 @@ members = [
     "crates/core",
     "crates/engine-mupdf",
     "crates/app",
+    "crates/android",
 ]
 
 [workspace.package]
@@ -22,6 +23,8 @@ pdf-core = { path = "crates/core" }
 engine-mupdf = { path = "crates/engine-mupdf" }
 mupdf = "0.8.0"
 slint = "1.18.1"
+slint-build = "1.18.1"
+rfd = "0.17"
 thiserror = "2.0"
 
 # Upstream mupdf 0.8.0 on crates.io misses a `max_align_t` binding on Windows MSVC
@@ -36,6 +39,16 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(have_max_align_t)'] }
 [workspace.lints.clippy]
 all = "warn"
 correctness = "deny"
+
+# Debug builds keep file:line in backtraces and panics but no variable info: the PDBs and
+# rlibs stay small, so `target/` does not grow to tens of GB (CLAUDE.md §3). For a debugger
+# session, set `CARGO_PROFILE_DEV_DEBUG=full` for that build.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies (MuPDF's C sources included) carry no debug info at all.
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 opt-level = "z"

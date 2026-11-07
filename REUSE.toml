@@ -33,3 +33,25 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 FINE Association <su@fa.org.tr>"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
 
+
+# MuPDF 1.27.2's headers, copied from mupdf-sys 0.8.0 for the undo-journal wrappers (ADR 0008).
+[[annotations]]
+path = "patches/mupdf/journal/include/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2004-2025 Artifex Software, Inc."
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# Lucide icons (lucide-react 0.460.0; save-pen from Lucide 1.19.0), turned into SVG files for the
+# window's islands (Plan 0007 Phase 2). Lucide is ISC; the parts that come from Feather are MIT.
+[[annotations]]
+path = "crates/app/ui/icons/**"
+precedence = "override"
+SPDX-FileCopyrightText = ["2022 Lucide Contributors", "2013-2022 Cole Bemis"]
+SPDX-License-Identifier = "ISC AND MIT"
+
+# PODEFA's patch to mupdf-sys for Android (Plan 0008 Phase 1): a diff cannot carry a header.
+[[annotations]]
+path = "patches/mupdf-sys-android.patch"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 FINE Association <su@fa.org.tr>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

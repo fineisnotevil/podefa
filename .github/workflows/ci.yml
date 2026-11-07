@@ -33,7 +33,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang libclang-dev pkg-config libxkbcommon-dev libfontconfig1-dev
+          sudo apt-get install -y build-essential clang libclang-dev pkg-config libxkbcommon-dev libfontconfig1-dev gdb
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -59,13 +59,42 @@ jobs:
       - name: Clippy lints
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # On Linux a test binary that crashes leaves a core file, and its backtraces are printed:
+      # form_test died of SIGSEGV twice on this runner (e7efd43, 809a049) and never elsewhere
+      # (docs/backlog.md item 29).
       - name: Run tests
         run: |
-          if command -v cargo-nextest >/dev/null 2>&1; then
-            cargo nextest run --workspace
-          else
-            cargo test --workspace
+          if [ "$RUNNER_OS" = Linux ]; then
+            ulimit -c unlimited
+            sudo sysctl -q -w kernel.core_pattern=/tmp/core.%E.%p
           fi
+          status=0
+          if command -v cargo-nextest >/dev/null 2>&1; then
+            cargo nextest run --workspace || status=$?
+          else
+            cargo test --workspace || status=$?
+          fi
+          if [ "$status" -ne 0 ] && ls /tmp/core.* >/dev/null 2>&1; then
+            for core in /tmp/core.*; do
+              exe=$(basename "$core" | sed 's/^core\.//; s/\.[0-9]*$//' | tr '!' '/')
+              gdb -batch -ex "thread apply all bt" "$exe" "$core"
+            done
+          fi
+          exit "$status"
+        shell: bash
+
+      # Export as Word is off by default (the `docx` feature); it is still built and tested here so
+      # it keeps working until it is switched on.
+      - name: Clippy and tests with the docx feature
+        run: |
+          cargo clippy -p engine-mupdf -p app --all-targets --features engine-mupdf/docx,app/docx -- -D warnings
+          cargo test -p engine-mupdf --features docx --test word_test
+        shell: bash
+
+      # The phone's shell on the desktop (`--mobile`) is behind the `mobile` feature; without it the
+      # desktop binary carries stubs (crates/app/build.rs). The Android job builds the real one too.
+      - name: Clippy with the mobile feature
+        run: cargo clippy -p app --all-targets --features mobile -- -D warnings
         shell: bash
 
       - name: Cargo deny check
@@ -73,6 +102,49 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # The Android APK (Plan 0008 Phase 1, ADR 0012), built as scripts/android-build.sh builds it on
+  # the maintainer's machine; signed with a throwaway debug key.
+  android:
+    name: Android APK (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install the NDK, platform and build tools
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$sdkmanager" --install "ndk;28.2.13676358" "platforms;android-35" "build-tools;35.0.1" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+
+      - name: Build the APK
+        run: scripts/android-build.sh
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: podefa-android-arm64
+          path: target/android/podefa.apk
 
   reuse-lint:
     name: REUSE Compliance Lint

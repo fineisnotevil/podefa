@@ -11,7 +11,7 @@ PODEFA is developed and maintained by FINE Association (FINE, FA).
 
 ## Status
 
-**Early development**: The workspace, the tiled viewport rendering pipeline, and a Slint desktop UI are in place. PODEFA currently opens documents and supports zooming (up to 6400%), panning, and page-by-page navigation, with memory bounded by the tile cache. Continuous multi-page scrolling, text selection, and document editing are under active development.
+**Early development**: The workspace, the tiled viewport rendering pipeline, and a Slint desktop UI are in place. PODEFA currently opens documents and scrolls through them continuously, page after page, with zooming up to 6400%; tiles and other render memory are held only for the pages near the viewport. It opens documents from a File menu with the platform's file dialog or a recent-files list, shows page thumbnails and the document outline in a sidebar, finds text with a find bar, selects and copies text, highlights, underlines and strikes out text and saves the annotations into the PDF, follows a light or dark theme, and navigates with the keyboard, ctrl+wheel, a page field, fit-width/fit-page and a document scrollbar. Text selection, search, and document editing are under active development.
 
 ## Goals and Non-Goals
 
@@ -71,8 +71,8 @@ cargo run -p app
 ## Repository Structure
 
 - `crates/core`: Engine-agnostic domain traits (`PdfEngine`, `Command`) and geometry/buffer types (`Rect`, `Bitmap`), plus the pure tile geometry (`tiling`) and tile cache/request scheduler (`scheduler`). Free of UI or engine dependencies.
-- `crates/engine-mupdf`: Implementation of `PdfEngine` wrapping MuPDF, including tiled rendering.
-- `crates/app`: Declarative desktop frontend powered by Slint.
+- `crates/engine-mupdf`: Implementation of `PdfEngine` wrapping MuPDF, including tiled rendering on a worker pool (`clamp(cores - 1, 1, 4)` threads), epoch cancellation through MuPDF's cancel cookie, and a low-resolution base layer per page for the frames while a new scale's tiles are in flight.
+- `crates/app`: Declarative desktop frontend powered by Slint, plus a `--bench-*` harness that drives zoom and pan through the real window and reports per-phase blank-frame and process-memory traces (`docs/benchmarks.md` §7.5-7.6).
 
 ## Licensing
 

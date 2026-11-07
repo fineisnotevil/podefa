@@ -18,3 +18,34 @@ workspace = true
 pdf-core = { workspace = true }
 mupdf = { workspace = true }
 thiserror = { workspace = true }
+# Verifying signatures (Plan 0009 Phase 3, its §0 question 6): ring for the arithmetic, RustCrypto
+# for the structures.
+ring = { version = "0.17", default-features = false, features = ["alloc"] }
+cms = { version = "0.2", default-features = false, features = ["std"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+der = { version = "0.7", default-features = false, features = ["std", "oid"] }
+pkcs12 = { version = "0.1", default-features = false, features = ["kdf"] }
+pkcs5 = { version = "0.7", default-features = false, features = ["pbes2", "sha1-insecure", "alloc"] }
+des = { version = "0.8", default-features = false }
+rc2 = { version = "0.8", default-features = false }
+cbc = { version = "0.1", default-features = false, features = ["alloc", "block-padding"] }
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+# The computer's trusted roots (`verify::Roots`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
+
+[features]
+# Export as Word through MuPDF's DOCX writer (Plan 0005 Phase 5). Off: MuPDF's writer keeps neither
+# columns nor tables (plan §5, Phase 5 gate), so it waits for a writer that does; without the
+# feature no document writer is linked into the app.
+docx = []
+
+[[test]]
+name = "word_test"
+required-features = ["docx"]
+
+[[test]]
+name = "docx_bench"
+required-features = ["docx"]

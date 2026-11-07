@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+
+// The search island under the title row (Plan 0007 Phase 2): Enter or F3 finds the next match,
+// Shift+Enter or Shift+F3 the previous one, Esc closes it.
+
+import { Theme } from "theme.slint";
+import { Island, IconButton, Separator } from "widgets.slint";
+
+export component SearchIsland inherits Island {
+    in-out property <string> find-text;
+    in property <string> find-counter;
+    callback find-changed(string);
+    callback find-next();
+    callback find-previous();
+    callback find-close();
+
+    keys := FocusScope {
+        capture-key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.find-close();
+                return accept;
+            }
+            if (event.text == Key.Return && event.modifiers.shift) {
+                root.find-previous();
+                return accept;
+            }
+            if (event.text == Key.F3) {
+                if (event.modifiers.shift) { root.find-previous(); } else { root.find-next(); }
+                return accept;
+            }
+            return reject;
+        }
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 4px;
+            padding-top: 4px;
+            padding-bottom: 4px;
+            spacing: 6px;
+            VerticalLayout {
+                alignment: center;
+                Image {
+                    source: @image-url("icons/search.svg");
+                    width: 14px;
+                    height: 14px;
+                    colorize: Theme.text-muted;
+                }
+            }
+            Rectangle {
+                width: 220px;
+                input := TextInput {
+                    width: parent.width;
+                    vertical-alignment: center;
+                    single-line: true;
+                    font-size: 12px;
+                    color: Theme.text;
+                    selection-background-color: Theme.selection;
+                    selection-foreground-color: Theme.selection-text;
+                    text <=> root.find-text;
+                    init => { self.focus(); }
+                    edited => { root.find-changed(self.text); }
+                    accepted => { root.find-next(); }
+                }
+                if root.find-text == "" : Text {
+                    x: 0px;
+                    text: "Find in document (F3)";
+                    font-size: 12px;
+                    color: Theme.text-faint;
+                    vertical-alignment: center;
+                }
+            }
+            if root.find-counter != "" : VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    height: 20px;
+                    width: counter.preferred-width + 12px;
+                    border-radius: 4px;
+                    background: Theme.shell;
+                    counter := Text {
+                        text: root.find-counter;
+                        font-size: 11px;
+                        color: Theme.text-muted;
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Separator { vertical: true; height: 16px; }
+            }
+            IconButton {
+                width: 28px;
+                icon: @image-url("icons/chevron-up.svg");
+                icon-size: 14px;
+                tip: "Previous Match (Shift+F3)";
+                clicked => { root.find-previous(); }
+            }
+            IconButton {
+                width: 28px;
+                icon: @image-url("icons/chevron-down.svg");
+                icon-size: 14px;
+                tip: "Next Match (F3)";
+                clicked => { root.find-next(); }
+            }
+            IconButton {
+                width: 28px;
+                icon: @image-url("icons/x.svg");
+                icon-size: 14px;
+                tip: "Close (Esc)";
+                clicked => { root.find-close(); }
+            }
+        }
+    }
+}

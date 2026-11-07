@@ -7,7 +7,8 @@ use crate::{context, Device, Error, FilePath, Rect};
 
 #[derive(Debug)]
 pub struct DocumentWriter {
-    inner: *mut fz_document_writer,
+    // pub(crate) for `DocumentWriter::close` (fa-pdf addition, src/pdf/tools.rs).
+    pub(crate) inner: *mut fz_document_writer,
 }
 
 impl DocumentWriter {

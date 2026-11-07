@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+SPDX-License-Identifier: AGPL-3.0-or-later
+SPDX-FileCopyrightText: 2026 FINE Association <su@fa.org.tr>
+-->
+<resources>
+    <!-- Theme.text of the light theme, the brand mark's tile (crates/app/ui/theme.slint). -->
+    <color name="ic_launcher_background">#18181B</color>
+</resources>

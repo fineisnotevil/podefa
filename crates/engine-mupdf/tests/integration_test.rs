@@ -38,15 +38,16 @@ fn test_render_dimensions_scale_1_and_2() {
     let bmp_1 = engine.render_page(0, 1.0).unwrap();
     assert_eq!(bmp_1.width, 100);
     assert_eq!(bmp_1.height, 100);
-    assert_eq!(bmp_1.format, PixelFormat::Rgba8);
-    assert_eq!(bmp_1.data.len(), 100 * 100 * 4);
+    assert_eq!(bmp_1.format, PixelFormat::Rgb8);
+    assert_eq!(bmp_1.stride, 100 * 3);
+    assert_eq!(bmp_1.data.len(), 100 * 100 * 3);
 
     // Render at scale 2.0 (expected 200x200)
     let bmp_2 = engine.render_page(0, 2.0).unwrap();
     assert_eq!(bmp_2.width, 200);
     assert_eq!(bmp_2.height, 200);
-    assert_eq!(bmp_2.format, PixelFormat::Rgba8);
-    assert_eq!(bmp_2.data.len(), 200 * 200 * 4);
+    assert_eq!(bmp_2.format, PixelFormat::Rgb8);
+    assert_eq!(bmp_2.data.len(), 200 * 200 * 3);
 }
 
 #[test]
@@ -57,27 +58,26 @@ fn test_golden_image_pixel_tolerance() {
 
     let bmp = engine.render_page(0, 1.0).unwrap();
 
-    let center_offset = (50 * bmp.stride) + (50 * 4);
+    let n = PixelFormat::Rgb8.bytes_per_pixel();
+    let center_offset = (50 * bmp.stride) + (50 * n);
     let r = bmp.data[center_offset];
     let g = bmp.data[center_offset + 1];
     let b = bmp.data[center_offset + 2];
-    let a = bmp.data[center_offset + 3];
 
     assert!(r > 200, "Expected red > 200, got {r}");
     assert!(g < 50, "Expected green < 50, got {g}");
     assert!(b < 50, "Expected blue < 50, got {b}");
-    assert_eq!(a, 255, "Expected alpha = 255, got {a}");
 
-    let corner_offset = (2 * bmp.stride) + (2 * 4);
+    let corner_offset = (2 * bmp.stride) + (2 * n);
     let cr = bmp.data[corner_offset];
     let cg = bmp.data[corner_offset + 1];
     let cb = bmp.data[corner_offset + 2];
-    let ca = bmp.data[corner_offset + 3];
 
+    // The paper is white and there is no alpha channel to carry it: the raster is opaque by
+    // construction, which is why the tiles dropped from RGBA8 to RGB8.
     assert!(cr > 240, "Expected corner white red > 240, got {cr}");
     assert!(cg > 240, "Expected corner white green > 240, got {cg}");
     assert!(cb > 240, "Expected corner white blue > 240, got {cb}");
-    assert_eq!(ca, 255, "Expected alpha = 255, got {ca}");
 }
 
 #[test]
