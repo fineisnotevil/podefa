@@ -10,7 +10,7 @@
 // canvas keeps its size and place, so no tile is rendered while it moves (plan row AT).
 
 import { ComboBox, ListView, Palette, Slider, TextEdit } from "std-widgets.slint";
-import { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem } from "types.slint";
+import { TileView, PageView, ThumbRow, OutlineRow, SigRow, HitView, FieldView, TabItem } from "types.slint";
 import { Theme } from "theme.slint";
 import { Field, Island, IconButton, DialogButton, DialogSurface, Dialog, MenuRow } from "widgets.slint";
 import { TitleRow } from "title.slint";
@@ -24,7 +24,7 @@ export { Theme as UiTheme }
 import { MobileGallery } from "@mobile/gallery.slint";
 
 // Re-exported so the Rust side sees the row types under the generated module.
-export { TileView, PageView, ThumbRow, OutlineRow, HitView, FieldView, TabItem }
+export { TileView, PageView, ThumbRow, OutlineRow, SigRow, HitView, FieldView, TabItem }
 
 export component MainWindow inherits Window {
     title: root.doc-title == "" ? "PODEFA - PDF Viewer"
@@ -173,6 +173,10 @@ export component MainWindow inherits Window {
     in-out property <int> sidebar-tab: 0;
     in-out property <[ThumbRow]> thumbs;
     in-out property <[OutlineRow]> outline-rows;
+    // Plan 0009 Phase 3: a signed document's signatures, and the worst verdict, -1 without any.
+    in property <[SigRow]> signature-rows;
+    in property <int> signature-verdict: -1;
+    callback signature_clicked(int);
     // The thumbnail list's scroll position, bound both ways like the viewport's.
     in-out property <length> thumb-scroll-y: 0px;
     // Dragging thumbnails to reorder pages: the payload (opaque, Rust knows what moves), and
@@ -1985,6 +1989,7 @@ export component MainWindow inherits Window {
             form-fields: root.form-fields;
             has-field-focus: root.has-field-focus;
             word-export: root.word-export;
+            signature-verdict: root.signature-verdict;
             choose-tool(tool) => { root.choose_tool(tool); }
             choose-colour(index) => { root.choose_colour(index); }
             choose-ink-width(index) => { root.choose_ink_width(index); }
@@ -2033,6 +2038,8 @@ export component MainWindow inherits Window {
             sidebar-tab: root.sidebar-tab;
             thumbs: root.thumbs;
             outline-rows: root.outline-rows;
+            signature-rows: root.signature-rows;
+            signature-clicked(index) => { root.signature_clicked(index); }
             thumb-scroll-y <=> root.thumb-scroll-y;
             page-drag-data: root.page-drag-data;
             drop-row <=> root.drop-row;
@@ -2104,6 +2111,16 @@ export component MainWindow inherits Window {
             secured: root.secure-encrypted;
             restricted: root.secure-restricted;
             security => { root.protect_open(); }
+            signature-verdict: root.signature-verdict;
+            signatures => {
+                if (root.sidebar-tab != 2) {
+                    root.sidebar-tab = 2;
+                    root.sidebar_tab_changed();
+                }
+                if (!root.sidebar-visible) {
+                    root.toggle_sidebar();
+                }
+            }
             prev-page => { root.prev_page(); }
             next-page => { root.next_page(); }
             go-to-page(text) => {
@@ -2152,6 +2169,9 @@ export component MainWindow inherits Window {
             active-tab: root.active-tab;
             thumbs: root.thumbs;
             outline-rows: root.outline-rows;
+            signature-rows: root.signature-rows;
+            signature-verdict: root.signature-verdict;
+            signature-clicked(index) => { root.signature_clicked(index); }
             has-error: root.has_error;
             error-text: root.error_text;
             mode <=> root.mode;

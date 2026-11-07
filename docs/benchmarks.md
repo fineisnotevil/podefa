@@ -2106,6 +2106,50 @@ password (the password to open unlocks).
 a redaction of a signed document, and before the first change a certifying signature does not
 allow. These questions are not covered by a test; they need the window.
 
+### 15.5 Phase 3: signatures read and verified (row BC)
+
+**Metrics, defined before the runs.** `t_verify`: `verify_file` in a release build on one signature
+in a small file, roots already loaded, including opening its own document. `t_roots`:
+`Roots::system()` once. Both are on the signature thread, so neither holds up the window; a document
+with no signed field starts neither. `app.exe`: the release binary's size in bytes against the
+commit before (`bf3c75c`), each built from a clean tree with the same toolchain.
+
+`cargo test --release -p engine-mupdf --test signature_test signature_timings -- --ignored --nocapture`,
+one machine, 2026-11-07:
+
+| Metric | Result |
+| :--- | :--- |
+| `t_roots`, Windows' `ROOT` store, 77 roots | 8.9 ms |
+| `t_verify`, `signed_rsa.pdf`, three runs | 4.3, 0.83, 1.09 ms |
+| `t_verify`, `signed_pss.pdf`, three runs | 0.87, 0.86, 0.83 ms |
+| `t_verify`, `signed_ec.pdf`, three runs | 1.03, 1.33, 0.96 ms |
+| `app.exe` | 20,258,816 to 20,829,184 bytes, +557 KiB (`ring`, `cms`, `x509-cert`, `der`) |
+
+The size of a large document's hash was not measured: the digest streams the file in 1 MiB pieces on
+that thread, so it costs no memory with size, but no large file signed by another tool was at hand.
+
+**Row BC** passes on fixtures made by OpenSSL (`tests/fixtures/make_signed.py`), plan §5.
+
+**Mutations.** Each change below, one at a time, makes `signature_test` fail:
+
+| Change | Failing test |
+| :--- | :--- |
+| Digest compared with what is signed: skipped | `one_byte_changed_in_the_signed_range_is_broken` |
+| A bad signature counted as good | `a_byte_changed_in_the_signature_itself_is_broken` |
+| The gap may hold more than the hex string | `a_signature_over_a_range_with_more_left_out_is_broken` |
+| Range past the file's end allowed | `a_range_past_the_end_is_broken` |
+| An intermediate's signature on the next certificate: skipped | `a_real_intermediate_that_did_not_issue_the_leaf_is_not_trusted` |
+| A root's signature on the next certificate: skipped | `a_chain_of_other_keys_under_the_same_names_is_not_trusted` |
+| Validity at signing: skipped | `a_certificate_not_yet_valid_when_signing_is_not_trusted` |
+| Levels 1-2: only MuPDF's answer | `a_moved_signature_after_level_1_is_forbidden` |
+| Levels 1-2: without MuPDF's answer | `a_note_after_docmdp_1_is_a_disallowed_change`, `level_1_refuses_a_turned_page_too` |
+| A page may change in anything | `level_3_allows_annotations_but_not_a_turned_page`, `field_locks_are_kept_apart_from_annotations` |
+| Signed and locked fields may change | `a_changed_signature_value_after_level_3_is_forbidden`, `field_locks_are_kept_apart_from_annotations` |
+| An appearance the page uses counts as free | `an_appearance_the_page_uses_is_not_free_under_level_3` |
+| A free field counts as forbidden | `field_locks_are_kept_apart_from_annotations` |
+| An unknown changed object counts as free | `new_page_contents_after_level_3_are_forbidden` |
+| The comparison skipped, anything saved after is allowed | seven tests |
+
 ## 16. Printing
 
 ADR 0013. **`t_print_to_pdf`** is the time for `crates/app/tests/print_test.rs`'s

@@ -59,6 +59,7 @@ pub mod platform;
 mod print_ui;
 mod redact_ui;
 mod secure_ui;
+mod signature_ui;
 mod stamps_ui;
 mod tabs;
 mod tools_ui;
@@ -459,6 +460,8 @@ struct AppState {
     /// PDF (`editable` is that and a permission to edit something); whether the user was told an
     /// edit is a change the certifying signature does not allow.
     security: pdf_core::secure::Security,
+    /// What the file's signatures say (Plan 0009 Phase 3); empty until the engine has checked.
+    signatures: Vec<pdf_core::signature::SignatureInfo>,
     pdf_editable: bool,
     certified_warned: bool,
     /// Form fields of the near pages, those asked for, the field being filled, and what the
@@ -608,6 +611,7 @@ impl AppState {
             crop: None,
             redact_pending: None,
             security: pdf_core::secure::Security::default(),
+            signatures: Vec::new(),
             pdf_editable: false,
             certified_warned: false,
             fields: HashMap::new(),
@@ -1118,7 +1122,18 @@ impl AppState {
                 }
             }
         }
-        self.field_hover(ui, point, x, y);
+        let on_field = self.field_hover(ui, point, x, y);
+        // A signature says what it is, where a note or a field's description does not already
+        // speak (Plan 0009 Phase 3).
+        if !ui.get_note_hover_visible() || on_field {
+            let signature = point.and_then(|p| self.signature_hover(p));
+            if let Some(text) = signature {
+                ui.set_note_hover_text(SharedString::from(text));
+                ui.set_note_hover_x(x + 14.0);
+                ui.set_note_hover_y(y + 14.0);
+                ui.set_note_hover_visible(true);
+            }
+        }
     }
 
     /// The note under a page point, if there is one there.
@@ -3902,6 +3917,7 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
                 state.pdf_editable = editable;
                 state.certified_warned = false;
                 state.set_security(ui, security);
+                state.clear_signatures(ui);
                 state.document_opened(ui);
                 state.warm_pending = true;
             });
@@ -4107,6 +4123,9 @@ fn apply_event(ui: &MainWindow, event: EngineEvent) {
             security,
             wrong,
         } => secure_ui::security_changed(ui, generation, security, wrong),
+        EngineEvent::Signatures { path, signatures } => {
+            with_state(|state| state.set_signatures(ui, &path, signatures));
+        }
         EngineEvent::Error { message } => {
             dialogs::password_done(ui);
             ui.set_has_error(true);
@@ -5506,6 +5525,16 @@ pub fn run(mut args: Vec<String>) -> Result<(), slint::PlatformError> {
 
     {
         let weak = main_window.as_weak();
+        main_window.on_signature_clicked({
+            let weak = main_window.as_weak();
+            move |row| {
+                if let Some(ui) = weak.upgrade()
+                    && let Ok(row) = usize::try_from(row)
+                {
+                    with_state(|state| state.signature_clicked(&ui, row));
+                }
+            }
+        });
         main_window.on_outline_clicked(move |row| {
             if let Some(ui) = weak.upgrade()
                 && let Ok(row) = usize::try_from(row)

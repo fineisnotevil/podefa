@@ -968,3 +968,28 @@ What is left:
 
 Add the print usage when mupdf-rs exposes `fz_run_page` with a usage string or a shim is justified,
 and the rest as people ask for them.
+
+## 33. Signatures: what the check does not read yet
+
+### Problem
+
+Plan 0009 Phase 3 checks `adbe.pkcs7.detached` and `ETSI.CAdES.detached` signatures offline.
+
+- `adbe.pkcs7.sha1` and `adbe.x509.rsa_sha1`, the old formats, are reported as not read. A document
+  signed that way shows "Signature not verified", never "invalid".
+- Revocation (CRL, OCSP, a document's DSS) is not checked, by the plan's §9 question 7; the panel
+  says so on every signature.
+- A timestamp token (RFC 3161) is not read: the certificates must be valid at the time the signature
+  dictionary claims (`/M`, which is signed), and a signature whose certificate has since expired
+  counts as long as that time falls inside its validity.
+- Name constraints are not read: a certificate with them marked critical is not trusted rather than
+  half checked. Some national chains use them.
+- Upstream: `check_unchanged_between` in `pdf-xref.c` marks a difference in a direct value on object
+  number 0, which the final loop never reads, so a signed widget moved off its page passes
+  `pdf_validate_change_history` (ADR 0014). Worth reporting to MuPDF with `signature_test`'s
+  document as the example.
+
+### Proposed Solution
+
+The old formats when a real document needs them; revocation and timestamps as a decision of their
+own, since they need the network or the document's validation data. Report the upstream bug.

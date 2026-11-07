@@ -56,6 +56,10 @@ export component StatusIsland inherits Island {
     in property <bool> secured;
     in property <bool> restricted;
     callback security();
+    // Plan 0009 Phase 3: the worst of a signed document's signatures, -1 without any; a click shows
+    // the panel.
+    in property <int> signature-verdict: -1;
+    callback signatures();
 
     property <bool> ready: root.total-pages > 0 && !root.is-loading;
 
@@ -68,6 +72,20 @@ export component StatusIsland inherits Island {
             icon-size: 14px;
             tip: root.restricted ? "Protected: some permissions withheld" : "Protected";
             clicked => { root.security(); }
+        }
+        if root.signature-verdict >= 0 : IconButton {
+            width: 28px;
+            icon: root.signature-verdict == 0 ? @image-url("icons/shield-check.svg")
+                : root.signature-verdict == 1 ? @image-url("icons/shield-alert.svg")
+                : @image-url("icons/shield-x.svg");
+            icon-size: 14px;
+            tint: root.signature-verdict == 0 ? Theme.text-muted
+                : root.signature-verdict == 1 ? Theme.caution
+                : Theme.danger;
+            tip: root.signature-verdict == 0 ? "Signed: valid"
+                : root.signature-verdict == 1 ? "Signed: not verified"
+                : "Signed: not valid";
+            clicked => { root.signatures(); }
         }
         IconButton {
             width: 28px;

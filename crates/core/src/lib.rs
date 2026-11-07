@@ -31,6 +31,7 @@ pub mod search;
 pub mod secure;
 pub mod select;
 pub mod settings;
+pub mod signature;
 pub mod stamp;
 pub mod tiling;
 pub mod tools;
@@ -283,6 +284,12 @@ pub struct OutlineItem {
 #[derive(Debug)]
 pub enum EngineEvent {
     /// Document was successfully opened.
+    /// What a signed document's signatures say (Plan 0009 Phase 3): after it is opened and after
+    /// each save, about the file at `path`, from a thread of its own.
+    Signatures {
+        path: PathBuf,
+        signatures: Vec<signature::SignatureInfo>,
+    },
     Opened {
         page_count: usize,
         page_sizes: Vec<PageSize>,

@@ -49,6 +49,15 @@ export struct OutlineRow {
     enabled: bool,
 }
 
+// One signature in the panel (Plan 0009 Phase 3). `verdict`: 0 valid, 1 not verified, 2 invalid.
+export struct SigRow {
+    headline: string,
+    byline: string,
+    details: string,
+    verdict: int,
+    page: int,
+}
+
 // One highlighted search hit rectangle, in canvas logical pixels (Plan 0003, §4.4).
 export struct HitView {
     x: length,

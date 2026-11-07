@@ -31,3 +31,4 @@ Each ADR follows a standardized format:
 - [0011: Tabs - One Engine per Document, One Render Pool and One Tile Budget per Window](0011-tabs-and-one-tile-budget.md)
 - [0012: A Platform Layer, and Documents on Android as Cache Copies of `content://` URIs](0012-platform-layer-and-android-files.md)
 - [0013: Printing - Pixels to Windows, a PDF to CUPS and Android](0013-printing.md)
+- [0014: Verifying Signatures in Rust from the File's Bytes](0014-verifying-signatures-from-the-file.md)

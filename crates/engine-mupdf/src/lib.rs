@@ -15,11 +15,14 @@
 mod edit;
 mod fonts;
 mod form;
+mod mdp;
 mod pool;
 mod redact;
 mod search;
 mod secure;
+pub mod signature;
 mod tools;
+mod verify;
 
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, DisplayList, Document, Matrix, Pixmap};
@@ -1523,6 +1526,7 @@ impl EngineHandle {
                                     let _ = event_tx.send(EngineEvent::Outline {
                                         items: engine.outline(),
                                     });
+                                    Self::verify_signatures(&event_tx, &engine);
                                     Self::history(&event_tx, &engine, 0, HistoryChange::None);
                                 }
                                 // A protected document asks for its password (again, when the
@@ -1749,10 +1753,21 @@ impl EngineHandle {
                                 search.document(saved_to.clone(), engine.password.clone());
                             }
                             let switched = path.is_some() && result.is_ok();
+                            let written = result.is_ok();
                             let _ = event_tx.send(EngineEvent::Saved {
                                 path: saved_to,
                                 result: result.map(|(_, bytes)| bytes),
                             });
+                            if written {
+                                // A save may have dropped them too, with a flattened form.
+                                if engine.security().signed == 0 {
+                                    let _ = event_tx.send(EngineEvent::Signatures {
+                                        path: engine.path.clone().unwrap_or_default(),
+                                        signatures: Vec::new(),
+                                    });
+                                }
+                                Self::verify_signatures(&event_tx, &engine);
+                            }
                             if switched {
                                 Self::history(&event_tx, &engine, 0, HistoryChange::None);
                             }
@@ -1782,6 +1797,7 @@ impl EngineHandle {
                                     security: engine.security(),
                                     wrong: false,
                                 });
+                                Self::verify_signatures(&event_tx, &engine);
                             }
                         }
                         EngineCmd::Unlock {
@@ -1986,6 +2002,17 @@ impl EngineHandle {
             fields: applied.fields as u32,
             outline,
         });
+    }
+
+    /// Starts checking the open file's signatures, when it has any. Verified from the file, so
+    /// only after it has been opened or written (Plan 0009 §4.1).
+    fn verify_signatures(events: &Sender<EngineEvent>, engine: &MupdfEngine) {
+        if engine.security().signed == 0 {
+            return;
+        }
+        if let Some(path) = engine.path.clone() {
+            signature::verify_in_background(path, engine.password.clone(), events.clone());
+        }
     }
 
     fn history(

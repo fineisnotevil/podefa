@@ -15,6 +15,18 @@
 typedef struct mupdf_error mupdf_error_t;
 void mupdf_save_error(fz_context *ctx, mupdf_error_t **errptr);
 
+/* Checks the document's history of incremental saves against what its signatures lock: 0 when the
+ * whole history is fine, otherwise how many of the last versions are not. */
+int fa_pdf_validate_change_history(fz_context *ctx, pdf_document *doc, mupdf_error_t **errptr)
+{
+    int bad = 0;
+    fz_try(ctx)
+        bad = pdf_validate_change_history(ctx, doc);
+    fz_catch(ctx)
+        mupdf_save_error(ctx, errptr);
+    return bad;
+}
+
 /* Colour and grey images above `threshold_dpi` are scaled (bicubic) to `to_dpi` and every
  * colour and grey image is recompressed as JPEG of `quality` (1-100) when that is smaller. Bitonal
  * images (fax, JBIG2) are left as they are: JPEG would only make them larger and blurred.

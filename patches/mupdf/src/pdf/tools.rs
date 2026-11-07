@@ -18,6 +18,11 @@ use crate::pdf::PdfDocument;
 use crate::{context, DocumentWriter, Error, Pixmap};
 
 extern "C" {
+    fn fa_pdf_validate_change_history(
+        ctx: *mut fz_context,
+        doc: *mut pdf_document,
+        errptr: *mut *mut mupdf_error_t,
+    ) -> c_int;
     fn fa_pdf_rewrite_images(
         ctx: *mut fz_context,
         doc: *mut pdf_document,
@@ -51,6 +56,13 @@ fn headers() -> Result<(), Error> {
 }
 
 impl PdfDocument {
+    /// Checks the document's incremental saves against what its signatures lock: 0 when the whole
+    /// history is fine, otherwise how many of the last versions are not.
+    pub fn validate_change_history(&self) -> Result<i32, Error> {
+        headers()?;
+        unsafe { ffi_try!(fa_pdf_validate_change_history(context(), self.as_raw())) }
+    }
+
     /// Downsamples colour and grey images above `threshold_dpi` to `to_dpi`, and recompresses
     /// them as JPEG of `quality` (1-100) where that is smaller. Bitonal images stay as they are.
     /// It changes objects in place: use it on a document of its own, never on one whose undo

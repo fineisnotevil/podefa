@@ -10,7 +10,7 @@
 // clear of the system bars (`safe-top`, `safe-bottom`) and the cards of the on-screen keyboard.
 
 import { ListView } from "std-widgets.slint";
-import { ThumbRow, OutlineRow, TabItem } from "../types.slint";
+import { ThumbRow, OutlineRow, SigRow, TabItem } from "../types.slint";
 import { Theme } from "../theme.slint";
 import { Field, Island } from "../widgets.slint";
 
@@ -232,6 +232,9 @@ export component MobileShell inherits Rectangle {
     in property <int> active-tab;
     in property <[ThumbRow]> thumbs;
     in property <[OutlineRow]> outline-rows;
+    in property <[SigRow]> signature-rows;
+    in property <int> signature-verdict: -1;
+    callback signature-clicked(int);
     in property <bool> has-error;
     in property <string> error-text;
     in-out property <int> mode;
@@ -1343,6 +1346,19 @@ export component MobileShell inherits Rectangle {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.line; }
+                if root.signature-verdict >= 0 : SheetRow {
+                    icon: root.signature-verdict == 0 ? @image-url("../icons/shield-check.svg")
+                        : root.signature-verdict == 1 ? @image-url("../icons/shield-alert.svg")
+                        : @image-url("../icons/shield-x.svg");
+                    label: "Signatures";
+                    detail: root.signature-verdict == 0 ? "Valid"
+                        : root.signature-verdict == 1 ? "Not verified"
+                        : "Not valid";
+                    clicked => {
+                        root.more-menu = false;
+                        root.open-sheet(3);
+                    }
+                }
                 SheetRow {
                     icon: @image-url("../icons/info.svg");
                     label: "Document properties";
@@ -1456,6 +1472,15 @@ export component MobileShell inherits Rectangle {
                             checked: root.sheet-tab == 2;
                             clicked => { root.open-sheet(2); }
                         }
+                        if root.signature-verdict >= 0 : Segment {
+                            horizontal-stretch: 1;
+                            label: "Signed";
+                            icon: root.signature-verdict == 0 ? @image-url("../icons/shield-check.svg")
+                                : root.signature-verdict == 1 ? @image-url("../icons/shield-alert.svg")
+                                : @image-url("../icons/shield-x.svg");
+                            checked: root.sheet-tab == 3;
+                            clicked => { root.open-sheet(3); }
+                        }
                     }
                 }
                 TouchButton {
@@ -1561,6 +1586,58 @@ export component MobileShell inherits Rectangle {
                 color: Theme.text-faint;
                 font-size: 13px;
                 horizontal-alignment: center;
+            }
+
+            if root.sheet-tab == 3 : ListView {
+                vertical-stretch: 1;
+                for row[index] in root.signature-rows : Rectangle {
+                    border-radius: 12px;
+                    background: signature-touch.pressed && row.page >= 0 ? Theme.hover : transparent;
+                    signature-touch := TouchArea {
+                        enabled: row.page >= 0;
+                        clicked => {
+                            root.signature-clicked(index);
+                            root.close-sheet();
+                        }
+                    }
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Image {
+                                width: 18px;
+                                height: 18px;
+                                y: (parent.height - self.height) / 2;
+                                source: row.verdict == 0 ? @image-url("../icons/shield-check.svg")
+                                    : row.verdict == 1 ? @image-url("../icons/shield-alert.svg")
+                                    : @image-url("../icons/shield-x.svg");
+                                colorize: row.verdict == 0 ? Theme.text-muted
+                                    : row.verdict == 1 ? Theme.caution
+                                    : Theme.danger;
+                            }
+                            Text {
+                                text: row.headline;
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: Theme.text;
+                                wrap: word-wrap;
+                            }
+                        }
+                        Text {
+                            text: row.byline;
+                            font-size: 13px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: row.details;
+                            font-size: 13px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
             }
 
             if root.sheet-tab == 2 : VerticalLayout {

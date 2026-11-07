@@ -10,7 +10,7 @@
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ThumbRow, OutlineRow } from "types.slint";
+import { ThumbRow, OutlineRow, SigRow } from "types.slint";
 import { Island, IconButton, Separator, MenuRow, MenuSurface, MenuHeading } from "widgets.slint";
 
 // The island's padding and the gap before a flyout or menu beside it.
@@ -82,6 +82,7 @@ export component SidebarColumn inherits Rectangle {
     callback choose-ink-width(int);
     // Shows the drawer on a tab (0 thumbnails, 1 outline), or hides it when it already shows it.
     callback show-drawer(int);
+    in property <int> signature-verdict: -1;
     callback find-open();
     callback page-op(int);
     callback crop-tool();
@@ -180,6 +181,12 @@ export component SidebarColumn inherits Rectangle {
                         enabled: root.has-pages;
                         checked: root.sidebar-visible && root.sidebar-tab == 1;
                         clicked => { root.show-drawer(1); }
+                    }
+                    if root.signature-verdict >= 0 : IconButton {
+                        icon: @image-url("icons/shield-check.svg");
+                        tip: "Signatures";
+                        checked: root.sidebar-visible && root.sidebar-tab == 2;
+                        clicked => { root.show-drawer(2); }
                     }
                     IconButton {
                         icon: @image-url("icons/search.svg");
@@ -607,6 +614,7 @@ export component Drawer inherits Island {
     in property <int> sidebar-tab;
     in property <[ThumbRow]> thumbs;
     in property <[OutlineRow]> outline-rows;
+    in property <[SigRow]> signature-rows;
     in-out property <length> thumb-scroll-y;
     in property <data-transfer> page-drag-data;
     in-out property <int> drop-row;
@@ -622,6 +630,7 @@ export component Drawer inherits Island {
     callback thumb-dropped(int, bool);
     callback outline-clicked(int);
     callback outline-toggled(int);
+    callback signature-clicked(int);
 
     clip: true;
 
@@ -764,6 +773,54 @@ export component Drawer inherits Island {
             font-size: 12px;
             horizontal-alignment: center;
             vertical-stretch: 1;
+        }
+        if root.sidebar-tab == 2 : ListView {
+            vertical-stretch: 1;
+            for row[index] in root.signature-rows : Rectangle {
+                border-radius: 4px;
+                background: signature-touch.has-hover && row.page >= 0 ? Theme.hover : transparent;
+                signature-touch := TouchArea {
+                    enabled: row.page >= 0;
+                    clicked => { root.signature-clicked(index); }
+                }
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 3px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            y: (parent.height - self.height) / 2;
+                            source: row.verdict == 0 ? @image-url("icons/shield-check.svg")
+                                : row.verdict == 1 ? @image-url("icons/shield-alert.svg")
+                                : @image-url("icons/shield-x.svg");
+                            colorize: row.verdict == 0 ? Theme.text-muted
+                                : row.verdict == 1 ? Theme.caution
+                                : Theme.danger;
+                        }
+                        Text {
+                            text: row.headline;
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Text {
+                        text: row.byline;
+                        font-size: 11px;
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: row.details;
+                        font-size: 11px;
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                    }
+                }
+            }
         }
     }
 }
