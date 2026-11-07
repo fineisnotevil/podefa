@@ -19,8 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes after signing under DocMDP and FieldMDP. A shield beside the page number, a Signatures
   panel, a text over the signature on the page; on the phone a "Signed" tab. Offline: revocation is
   not checked, and the panel says so.
-
-### Added
 - **Print** (ADR 0013): Ctrl+P, Save's menu and the phone's More menu. On the desktop a dialog asks
   for the printer, the pages and the copies (with the driver's Properties on Windows); on Android
   the system's dialog does. Windows gets the pages as bitmaps at the printer's resolution, up to
